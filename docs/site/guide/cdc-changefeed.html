@@ -127,16 +127,19 @@
     <article class="doc-article">
       <h1 id="change-data-capture-cdc-and-dependency-driven-changefeeds">Change Data Capture (CDC) and dependency-driven changefeeds<a class="headerlink" href="#change-data-capture-cdc-and-dependency-driven-changefeeds" title="Permanent link">¶</a></h1>
 <p>Status: Partial implementation
-Last updated: 2026-04-16</p>
+Last updated: 2026-05-27</p>
 <p>Current runtime baseline:
-- <code>cdc.subscribe_table</code> creates table subscriptions over the RPC API.
-- <code>cdc.subscribe_query</code> creates dependency-driven subscriptions for prepared queries and emits invalidation events with the current query ETag.
-- <code>cdc.poll</code> reads from the retained persisted change log and returns <code>earliest_offset</code> / <code>latest_offset</code> plus <code>resnapshot_required</code> metadata when a consumer falls behind the retained horizon.
-- <code>GET /api/v1/cdc/sse/{sub_id}</code> streams the same subscription events over SSE, with replay from the retained change log, bounded batch delivery, reconnect via <code>Last-Event-ID</code> or <code>from_offset</code>, and a terminal <code>resnapshot</code> control event when the reconnect cursor falls behind retention.
-- <code>cdc.ack</code> advances an in-memory consumer cursor per subscription.
-- <code>cdc.close</code> removes the subscription handle.
-- SkeinAdmin now includes a dedicated CDC page for <code>cdc.subscribe_table</code> / <code>cdc.poll</code> / <code>cdc.ack</code> / <code>cdc.close</code>, with session-local lag visualization derived from <code>next_offset - acked_offset</code>.
-- WebSocket delivery and durable consumer cursors are still open backlog items.</p>
+- <code>cdc.subscribe_table</code> creates table subscriptions over the RPC API. Subscriptions can request row images with <code>include: {"before": true, "after": true}</code>, can narrow delivery to selected source mutation kinds with <code>ops: ["insert", "update", "delete"]</code>, can restrict replay to one exact primary-key tuple with <code>pk: [&lt;typed Lit&gt;, ...]</code>, can restrict replay to an inclusive primary-key range on single-column primary keys with <code>pk_range: {"lower_bound": &lt;typed Lit&gt;?, "upper_bound": &lt;typed Lit&gt;?}</code>, can restrict replay to mutations where at least one named column value changes with <code>columns: ["status", ...]</code>, and can choose <code>format: "objects_json"</code> or <code>format: "plain_json"</code> for <code>cdc.poll</code>, SSE, and WebSocket event payloads.
+- <code>cdc.subscribe_query</code> creates dependency-driven subscriptions for prepared queries and emits invalidation events with the current query ETag. Query subscriptions can request the same optional triggering row images through <code>include</code>, and the same <code>ops</code>, exact <code>pk</code>, inclusive <code>pk_range</code>, and changed-column <code>columns</code> filters constrain which source table mutations emit <code>invalidate</code> events. Prepared queries over views expand those view dependencies to the underlying base tables that actually emit retained CDC events, prepared queries with set-operation bodies (for example <code>UNION</code> / <code>UNION ALL</code>) track dependency tables across every branch, and prepared queries using CTEs walk the CTE definitions for base-table dependencies while ignoring the CTE names as physical tables.
+- <code>cdc.poll</code> reads from the retained persisted change log and returns <code>earliest_offset</code> / <code>latest_offset</code>, <code>resnapshot_required</code> metadata when a consumer falls behind the retained horizon, and a <code>backpressure</code> object with <code>state</code>, <code>lag</code>, <code>remaining_until_resnapshot</code>, and <code>paused</code>.
+- <code>cdc.pause</code> and <code>cdc.resume</code> persist an operator pause flag per subscription. Paused subscriptions keep their cursor and retained-horizon accounting, but <code>cdc.poll</code> suppresses data events until resumed unless a resnapshot is already required.
+- <code>GET /api/v1/cdc/sse/{sub_id}</code> streams the same subscription events over SSE, with replay from the retained change log, bounded batch delivery, reconnect via <code>Last-Event-ID</code> or <code>from_offset</code>, <code>backpressure</code> control events when a subscription enters a non-healthy state, and a terminal <code>resnapshot</code> control event when the reconnect cursor falls behind retention.
+- <code>GET /api/v1/cdc/ws/{sub_id}</code> upgrades to a WebSocket stream that replays the same retained subscription events as JSON text frames, resumes from <code>Last-Event-ID</code> or <code>from_offset</code>, emits <code>backpressure</code> control frames for non-healthy states, and emits a terminal <code>resnapshot</code> control frame when the reconnect cursor falls behind retention.
+- <code>cdc.ack</code> persists the acknowledged consumer cursor per subscription so polling, SSE, and WebSocket resumes survive process restarts.
+- <code>cdc.close</code> removes the subscription handle and its persisted cursor state.
+- <code>stats.snapshot.cdc</code> reports active subscription counts, aggregate lag, retained-window offsets, pause/pressure counters, backpressure thresholds, and <code>dropped_events_total</code> so operators can spot consumers that have fallen behind retention.
+- SkeinAdmin now includes a dedicated CDC page for <code>cdc.subscribe_table</code> / <code>cdc.poll</code> / <code>cdc.pause</code> / <code>cdc.resume</code> / <code>cdc.ack</code> / <code>cdc.close</code>, with lag and backpressure visualization derived from the current poll/control state.
+- Subscribe results now include both <code>sse_url</code> and <code>ws_url</code> transport paths.</p>
 <p>SkeinDB's MySQL compatibility mode is valuable for adoption, but modern web and data pipelines often need a "push" interface for changes.
 This document specifies a CDC subsystem that provides:</p>
 <ol>
@@ -162,14 +165,21 @@ This document specifies a CDC subsystem that provides:</p>
 - <code>pk</code>: primary key values
 - <code>before</code> and <code>after</code> images (optional, configurable)</p>
 <p>Current runtime scope:
-- row-level table events persist <code>commit_ts_ms</code> and <code>lsn = seq</code>
-- query invalidation events reuse the triggering table event metadata and override <code>op = "invalidate"</code></p>
+- row-level table events persist <code>commit_ts_ms</code>, <code>lsn = seq</code>, and optional <code>before</code> / <code>after</code> row images in the retained change log; <code>cdc.poll</code>, SSE, and WebSocket only expose those images for subscriptions that opt in via <code>include.before</code> / <code>include.after</code>, only deliver source events whose op matches the optional subscription <code>ops</code> allowlist, whose retained <code>pk</code> exactly matches the optional subscription <code>pk</code> tuple and/or falls within the optional inclusive <code>pk_range</code> bounds, and when <code>columns</code> is present only deliver events whose retained <code>before</code> / <code>after</code> row images differ on at least one selected column while projecting exposed row images down to those columns
+- query invalidation events reuse the triggering table event metadata and override <code>op = "invalidate"</code>; when requested, they can also forward the triggering event's <code>before</code> / <code>after</code> row images alongside <code>query_id</code> / <code>etag</code>, and the optional subscription <code>ops</code> allowlist, exact <code>pk</code> tuple, inclusive <code>pk_range</code>, and changed-column <code>columns</code> filter are evaluated against the underlying triggering table event before the invalidation is emitted
+- delivery formats are subscription-scoped and persisted: <code>objects_json</code> keeps <code>pk</code>, <code>before</code>, and <code>after</code> values as typed SkeinQL <code>Lit</code> envelopes, while <code>plain_json</code> emits those same fields as ordinary JSON scalars/objects for clients that do not need type tags</p>
 <h2 id="3-streams">3. Streams<a class="headerlink" href="#3-streams" title="Permanent link">¶</a></h2>
 <h3 id="31-table-streams">3.1 Table streams<a class="headerlink" href="#31-table-streams" title="Permanent link">¶</a></h3>
 <ul>
 <li><code>cdc.subscribe_table</code> creates a stream for a given table.</li>
-<li>Current runtime scope: full-table subscriptions only.</li>
-<li>Optional filters (pk range, shard, columns) remain planned.</li>
+<li>Current runtime scope: full-table subscriptions plus optional exact and inclusive primary-key filtering.</li>
+<li>Current runtime scope: <code>include.before</code> / <code>include.after</code> opt into full-row images for insert/update/delete events.</li>
+<li>Current runtime scope: <code>ops</code> can narrow a full-table stream to <code>insert</code>, <code>update</code>, and/or <code>delete</code> source events.</li>
+<li>Current runtime scope: <code>pk</code> can narrow a full-table stream to one exact primary-key tuple; table subscriptions reject <code>pk</code> filters when the table has no primary key or the tuple width does not match.</li>
+<li>Current runtime scope: <code>pk_range</code> can narrow a full-table stream to retained events whose single-column primary key falls inside inclusive <code>lower_bound</code> / <code>upper_bound</code> bounds; table subscriptions reject range filters when the table has no primary key, has a composite primary key, when both bounds are missing, or when the lower bound sorts after the upper bound.</li>
+<li>Current runtime scope: <code>columns</code> can narrow a stream to events where at least one selected column value changes between the retained <code>before</code> / <code>after</code> row images; when row images are included, they are projected down to those columns, and table subscriptions reject unknown column names.</li>
+<li>Current runtime scope: <code>format</code> defaults to <code>objects_json</code>; <code>plain_json</code> is also accepted and applies consistently to <code>cdc.poll</code>, SSE, and WebSocket delivery.</li>
+<li>Optional filters beyond the current exact/range primary-key, source-op, and changed-column filters (shard) remain planned.</li>
 </ul>
 <h3 id="32-query-streams-dependency-driven">3.2 Query streams (dependency-driven)<a class="headerlink" href="#32-query-streams-dependency-driven" title="Permanent link">¶</a></h3>
 <ul>
@@ -181,9 +191,9 @@ This document specifies a CDC subsystem that provides:</p>
 <li>changed_keys summary (optional)</li>
 </ul>
 <p>Current runtime scope:
-- dependency sets are conservative and table-based, reusing the same prepared-query dependency metadata used for query ETags
-- invalidation events are delivered through <code>cdc.poll</code> with <code>op = "invalidate"</code>, the triggering <code>db</code> / <code>table</code>, and optional <code>query_id</code> / <code>etag</code> fields
-- subscriptions are bound to a prepared <code>query_id</code> plus its positional args</p>
+- dependency sets are conservative and table-based, reusing the same prepared-query dependency metadata used for query ETags; when a prepared query references one or more views, subscription delivery expands those dependencies to the underlying base tables that actually emit retained CDC events, when a prepared query uses a set operation the dependency set includes tables referenced by every branch, and when a prepared query uses CTEs the runtime walks each CTE definition for base tables without treating the CTE relation name as a retained-event table
+- invalidation events are delivered through <code>cdc.poll</code> with <code>op = "invalidate"</code>, the triggering <code>db</code> / <code>table</code>, optional <code>query_id</code> / <code>etag</code> fields, optional triggering <code>before</code> / <code>after</code> row images when requested, and optional source-op, exact-primary-key, inclusive-primary-key-range, plus changed-column filtering through the same <code>ops</code>, <code>pk</code>, <code>pk_range</code>, and <code>columns</code> options used by table subscriptions
+- subscriptions are bound to a prepared <code>query_id</code> plus its positional args, and the runtime recomputes the effective base-table change set from the stored query during polling so older durable query subscriptions keep invalidating correctly after restart</p>
 <p>This gives applications a direct way to update caches and UIs.</p>
 <h2 id="4-delivery-mechanisms">4. Delivery mechanisms<a class="headerlink" href="#4-delivery-mechanisms" title="Permanent link">¶</a></h2>
 <p>Current runtime support:
@@ -192,17 +202,29 @@ This document specifies a CDC subsystem that provides:</p>
   - emits the same JSON event payloads as <code>cdc.poll</code>
   - replays from <code>?from_offset=&lt;seq&gt;</code> or <code>Last-Event-ID: &lt;seq&gt;</code>
   - drains the retained change log in bounded batches so slow consumers can reconnect without losing events inside the retained horizon
-  - emits <code>event: resnapshot</code> with recovery metadata when the reconnect cursor falls behind retention</p>
-<p>Planned follow-ons:
-- WebSocket with backpressure</p>
+  - emits <code>event: backpressure</code> when the subscription enters <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>
+  - emits <code>event: resnapshot</code> with recovery metadata when the reconnect cursor falls behind retention
+- WebSocket: <code>GET /api/v1/cdc/ws/{sub_id}</code>
+  - upgrades over HTTP and streams JSON text frames shaped as <code>{"id": &lt;seq&gt;, "event": "insert|update|delete|invalidate|backpressure|resnapshot", "data": {...}}</code>
+  - replays from <code>?from_offset=&lt;seq&gt;</code> or <code>Last-Event-ID: &lt;seq&gt;</code>
+  - drains the retained change log in bounded batches so reconnecting consumers can catch up inside the retained horizon
+  - emits <code>backpressure</code> control frames when the subscription enters <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>
+  - emits a final <code>resnapshot</code> control frame with the same recovery metadata returned by <code>cdc.poll</code></p>
+<p>Backpressure state model:
+- <code>healthy</code>: lag is below the warning threshold.
+- <code>pressure</code>: lag is at or above <code>warn_lag</code> (half the retained window, minimum 1 event).
+- <code>throttle</code>: lag is at or above <code>throttle_lag</code> (three quarters of the retained window, rounded up).
+- <code>paused</code>: an operator paused the subscription with <code>cdc.pause</code>; retained-horizon checks still win if the cursor is already too old.
+- <code>resnapshot_required</code>: the acknowledged cursor fell behind <code>earliest_offset</code>, so the consumer must rebuild from a snapshot before resuming.</p>
 <h2 id="5-exactly-once-vs-at-least-once">5. Exactly-once vs at-least-once<a class="headerlink" href="#5-exactly-once-vs-at-least-once" title="Permanent link">¶</a></h2>
 <ul>
 <li>Default delivery is at-least-once.</li>
 <li>Consumers ACK offsets via <code>cdc.ack</code>.</li>
-<li>Current runtime tracks acked offsets in memory per subscription and suppresses redelivery for older offsets.</li>
+<li>Current runtime persists acked offsets per subscription in <code>cdc_subscriptions.json</code> and suppresses redelivery for older offsets after restart as well as within a live process.</li>
 <li>SSE reconnects are driven by event <code>id = seq</code>; clients can resume by supplying <code>Last-Event-ID</code> or <code>from_offset</code>.</li>
-<li>When a consumer falls behind the retained horizon, <code>cdc.poll</code> returns <code>resnapshot_required = true</code> and SSE emits a <code>resnapshot</code> control event instead of replaying a partial stream.</li>
-<li>Durable cursors and richer backpressure policies remain follow-on work.</li>
+<li>WebSocket reconnects use the same <code>id = seq</code> cursor and accept <code>Last-Event-ID</code> or <code>from_offset</code> on the upgrade request.</li>
+<li>When a consumer falls behind the retained horizon, <code>cdc.poll</code> returns <code>resnapshot_required = true</code> and SSE/WebSocket emit a <code>resnapshot</code> control event instead of replaying a partial stream.</li>
+<li><code>cdc.pause</code> persists <code>paused = true</code> in <code>cdc_subscriptions.json</code>; <code>cdc.resume</code> clears it. Pausing does not ACK events or extend retention, so a paused consumer can still cross into <code>resnapshot_required</code>.</li>
 </ul>
 <h2 id="6-retention">6. Retention<a class="headerlink" href="#6-retention" title="Permanent link">¶</a></h2>
 <p>Planned target design:
@@ -218,22 +240,37 @@ This document specifies a CDC subsystem that provides:</p>
 - <code>cdc.subscribe_query</code>
 - <code>cdc.poll</code>
 - <code>cdc.ack</code>
+- <code>cdc.pause</code>
+- <code>cdc.resume</code>
 - <code>cdc.close</code></p>
 <p>HTTP transport:
-- <code>GET /api/v1/cdc/sse/{sub_id}</code></p>
+- <code>GET /api/v1/cdc/sse/{sub_id}</code>
+- <code>GET /api/v1/cdc/ws/{sub_id}</code></p>
 <h2 id="8-observability">8. Observability<a class="headerlink" href="#8-observability" title="Permanent link">¶</a></h2>
-<p>Expose:
-- active_subscriptions
-- lag (max_offset - consumer_offset)
-- dropped_events_total</p>
+<p>Current runtime support:
+- <code>stats.snapshot.cdc.active_subscriptions</code>
+- <code>stats.snapshot.cdc.total_lag</code> and <code>stats.snapshot.cdc.max_lag</code>
+- <code>stats.snapshot.cdc.paused_subscriptions</code>
+- <code>stats.snapshot.cdc.pressured_subscriptions</code>
+- <code>stats.snapshot.cdc.throttle_recommended_subscriptions</code>
+- <code>stats.snapshot.cdc.warn_lag</code> and <code>stats.snapshot.cdc.throttle_lag</code>
+- <code>stats.snapshot.cdc.min_remaining_until_resnapshot</code>
+- <code>stats.snapshot.cdc.dropped_events_total</code>
+- <code>stats.snapshot.cdc.resnapshot_subscriptions</code>, <code>earliest_offset</code>, <code>latest_offset</code>, and retention-window metadata</p>
 <h2 id="9-testing">9. Testing<a class="headerlink" href="#9-testing" title="Permanent link">¶</a></h2>
 <ul>
 <li>ordering preserved per stream</li>
 <li>offsets monotonic</li>
 <li>acknowledged offsets suppress redelivery for older polls</li>
+<li>acknowledged offsets survive restart until <code>cdc.close</code></li>
+<li><code>cdc.pause</code> / <code>cdc.resume</code> state survives restart</li>
+<li><code>cdc.poll</code>, SSE, and WebSocket expose <code>backpressure</code> state transitions</li>
 <li>SSE resumes from <code>Last-Event-ID</code> / <code>from_offset</code></li>
+<li>WebSocket resumes from <code>Last-Event-ID</code> / <code>from_offset</code></li>
 <li>retained-horizon loss returns <code>resnapshot_required</code> for <code>cdc.poll</code></li>
 <li>retained-horizon loss emits <code>event: resnapshot</code> for SSE reconnects</li>
+<li>retained-horizon loss emits a <code>resnapshot</code> control frame for WebSocket reconnects</li>
+<li>query dependencies expand views, set-operation branches, and CTE definitions to the real base tables used for invalidation</li>
 <li>closed subscriptions return <code>not_found</code></li>
 </ul>
       <hr>

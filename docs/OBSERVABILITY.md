@@ -1,7 +1,7 @@
 # Observability and Server Statistics
 
-Status: Draft v0.1
-Last updated: 2026-01-17
+Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, and `stats.snapshot`-driven HTTP(S) webhook delivery landed; standalone escalation automation is still evolving
+Last updated: 2026-05-27
 
 This document defines the observability surface of SkeinDB:
 - server load and resource stats
@@ -49,13 +49,59 @@ A `stats.snapshot` should include:
 - QPS (queries/sec) recent window
 - TPS (transactions/sec)
 - commit rate
-- p50/p95/p99 latency (if enabled)
+- average latency plus `p50` / `p95` / `p99` latency over the recent query sample window
 - cache hit rates (row cache, value cache)
 - coalescing hit rate (if enabled)
 - in-flight query groups
 - autoparameterization hit rate (if enabled)
 - plan cache entries (if enabled)
 - index advisor: suggestions_pending (if enabled)
+
+Current runtime surface in `stats.snapshot.query`:
+- `tracked_calls`
+- `fingerprints`
+- `recent_samples`
+- `slow_count`
+- `avg_latency_ms`
+- `latency_ms.p50`
+- `latency_ms.p95`
+- `latency_ms.p99`
+- `etag_hits`
+- `coalesced`
+
+Current synthesized alert surface in `stats.snapshot.alerts`:
+- overall `status`
+- `summary.critical`
+- `summary.warning`
+- `summary.total`
+- optional `routing.configured`
+- optional `routing.routed_alerts`
+- optional `routing.matched_routes`
+- optional `routing.delivery.delivered`
+- optional `routing.delivery.suppressed`
+- optional `routing.delivery.failed`
+- optional `routing.delivery.unsupported`
+- per-item `code`, `severity`, `component`, `panel`, `title`, `summary`, and `action`
+- optional per-item `routes[].id`
+- optional per-item `routes[].targets`
+- optional per-item `routes[].delivery.delivered`
+- optional per-item `routes[].delivery.suppressed`
+- optional per-item `routes[].delivery.failed`
+- optional per-item `routes[].delivery.unsupported`
+
+Current routing config surface:
+- `settings.set { "observability.alert_routes": [...] }`
+- each route can declare `id`, `min_severity`, `components`, `panels`, `codes`, and `targets`
+- `stats.snapshot.alerts` resolves matching routes against the current synthesized alerts
+- `http://` and `https://` targets receive a JSON `POST` the first time a matching alert is observed in `stats.snapshot`
+- identical active alerts are suppressed on subsequent `stats.snapshot` calls until the alert clears
+- non-HTTP targets are still annotated in the snapshot but are not delivered externally yet
+
+Current drill-down surface in `stats.query_fingerprint_latency`:
+- bounded recent per-fingerprint latency samples
+- `p50_ms`, `p95_ms`, and `p99_ms`
+- millisecond histogram buckets with `overflow_count`
+- optional filtering by exact fingerprint for operator drill-down
 
 ### 2.3 Storage engine snapshot
 
@@ -81,6 +127,25 @@ CDC (if enabled):
 - active subscriptions
 - max lag (producer_offset - consumer_offset)
 
+Current runtime surface in `stats.snapshot.cdc`:
+- `active_subscriptions`
+- `table_subscriptions`
+- `query_subscriptions`
+- `total_lag`
+- `max_lag`
+- `paused_subscriptions`
+- `pressured_subscriptions`
+- `throttle_recommended_subscriptions`
+- `warn_lag`
+- `throttle_lag`
+- `min_remaining_until_resnapshot`
+- `resnapshot_subscriptions`
+- `earliest_offset`
+- `latest_offset`
+- `retained_events`
+- `retention_limit`
+- `dropped_events_total`
+
 ### 2.4 Cluster snapshot (if enabled)
 
 - node role (primary/replica/router)
@@ -97,6 +162,7 @@ CDC (if enabled):
 
 - `stats.snapshot` -> JSON summary for dashboards
 - `stats.top_queries` -> top by total time / p95 / rows
+- `stats.query_fingerprint_latency` -> per-fingerprint p50/p95/p99 plus bounded latency histogram buckets
 - `stats.slow_queries` -> recent slow query log
 - `stats.storage` -> compaction + disk + dedup
 - `stats.cluster` -> node + shard view
@@ -143,7 +209,7 @@ The "Server Load & Stats" section should include:
 - active sessions
 
 2) **Latency**
-- p50/p95/p99 over last N minutes
+- average latency plus p50/p95/p99 over the recent query sample window
 - slow query list
 
 3) **Storage**
@@ -156,6 +222,20 @@ The "Server Load & Stats" section should include:
 - node list with health
 - replication lag
 - shard placement
+
+Delivered baseline in SkeinAdmin:
+- overview cards for cache, average latency, and p95 tail latency
+- overview `Operational Alerts` card synthesized from current query, CDC, and compaction telemetry
+- active-session summary text with average, p95, and p99 latency
+- telemetry panel table for per-fingerprint latency histograms with p95/p99 drill-down
+- CDC panel summary cards for runtime subscription counts, lag, retention horizon, and dropped-event totals
+
+Delivered operator routing baseline:
+- persisted alert-route configuration via `observability.alert_routes`
+- per-alert matched route IDs/targets in `stats.snapshot.alerts.items[*].routes`
+- top-level route summary counters in `stats.snapshot.alerts.routing`
+- HTTP(S) route targets receive JSON `POST` delivery once per active alert while `stats.snapshot` is being evaluated
+- broader escalation policies, retries, and non-HTTP sinks remain backlog work
 
 ---
 

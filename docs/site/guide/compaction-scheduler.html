@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="workload-guided-compaction-scheduling">Workload-guided compaction scheduling<a class="headerlink" href="#workload-guided-compaction-scheduling" title="Permanent link">¶</a></h1>
 <p>Status: Hardened research baseline
-Last updated: 2026-05-08</p>
+Last updated: 2026-05-24</p>
 <p>SkeinDB uses an LSM-like structure for sorted runs and background compaction.
 Compaction is necessary to bound read amplification and reclaim space, but can also cause
 write stalls and tail-latency spikes under load.</p>
@@ -165,6 +165,9 @@ show that workload-aware approaches can improve throughput and reduce stalls.</p
 - L0 pressure is derived from live <code>.rseg</code> files under <code>tables/&lt;db&gt;/*.rseg</code>, and recent workload signals are derived from the existing bounded RPC/query telemetry ring buffer.
 - <code>stats.snapshot.compaction.scheduler</code> now reports the live policy, configured/effective budgets, active peak window, queued task summary, and priority/admission state derived from the same runtime telemetry.
 - <code>maintenance.compaction.status</code>, <code>maintenance.compaction.set_policy</code>, and <code>maintenance.compaction.pause</code> / <code>resume</code> persist policy state in <code>settings.json</code>, expose live scheduler decisions, and enforce safe-mode write backpressure for write-classified SkeinQL/HTTP mutations when hard L0 bounds are exceeded.
+- <code>serve()</code> now runs a pressure-driven background compaction worker that consumes the same scheduler state, rewrites canonical <code>.rseg</code> segments for live tables through <code>Engine::maintenance_compaction_rewrite_table()</code>, and under file-pressure conditions can batch multiple removable <code>.rseg</code> cleanups in one tick up to the scheduler IO budget.
+- <code>maintenance.compaction.status</code> now reports real worker execution metadata: <code>runs</code>, <code>scheduler.tasks.current</code>, <code>scheduler.tasks.last_completed</code>, <code>last_run_ms</code>, <code>bytes_rewritten</code>, <code>bytes_reclaimed</code>, <code>orphan_files_removed</code>, and <code>last_error</code>.
+- SkeinAdmin's compaction cards and scheduler summary now surface the same worker counters (<code>runs</code>, reclaimed bytes, current task, last completed task) instead of only the policy/status envelope.
 - R20 energy-aware scheduling is implemented as <code>policy: "energy_aware"</code>. Runtime status includes CPU/IO joule estimates, external signal multipliers, constraint score, and deferral ratio under <code>compaction.scheduler.energy</code>.
 - <code>maintenance.compaction.set_policy</code> accepts <code>energy</code> coefficients and <code>external_signals</code> (<code>power_source</code>, <code>battery_pct</code>, <code>price_multiplier</code>, <code>carbon_multiplier</code>) so test harnesses, operators, or embedded integrations can feed battery/power, pricing, or carbon signals without platform-specific APIs.</p>
 <h2 id="4-compaction-task-model">4. Compaction task model<a class="headerlink" href="#4-compaction-task-model" title="Permanent link">¶</a></h2>
@@ -227,7 +230,9 @@ show that workload-aware approaches can improve throughput and reduce stalls.</p
 - emits <code>compaction_scheduler_summary.json</code>, <code>compaction_scheduler_timeline.csv</code>, and a self-contained <code>compaction_scheduler_dashboard.html</code>
 - compares <code>fixed_leveling</code>, <code>fixed_tiering</code>, <code>workload_guided</code>, and <code>energy_aware</code> policies over the same deterministic workload timeline
 - surfaces stall rate, total stall time, peak/p95-of-p99 read and write latency, backlog pressure, average compaction budget, external energy signal multiplier, and total/average energy score</p>
-<p>The harness remains synthetic rather than tied directly to a background compactor. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, and safe-mode admission control.</p>
+<p>The harness remains synthetic rather than tied directly to the runtime worker. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, safe-mode admission control, and the pressure-driven segment rewrite loop.</p>
+<p>Current limitation:
+- The autonomous worker can now batch removable file-pressure tasks, but it still does not implement deeper multi-level merge planning. Pure file-count pressure caused by many required live canonical segments still relies on safe-mode backpressure plus future storage-engine work.</p>
 <h2 id="9-testing">9. Testing<a class="headerlink" href="#9-testing" title="Permanent link">¶</a></h2>
 <ul>
 <li>scheduler never violates hard bounds without applying backpressure</li>

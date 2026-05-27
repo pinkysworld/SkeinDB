@@ -1,7 +1,7 @@
 # Cache-coherent Queries with HTTP Validators (ETags)
 
 Status: Partial implementation
-Last updated: 2026-03-27
+Last updated: 2026-05-27
 
 Current runtime baseline:
 - `data.get` returns row ETags and `data.update` honors `expected_etag` / `If-Match`-style optimistic writes.
@@ -9,7 +9,7 @@ Current runtime baseline:
 - `vector.search` returns source-table dependency metadata, V2 causality tokens, and vector-search ETags by default; it honors `cache.if_none_match` with a `not_modified=true` result and invalidates when `data.insert`, `data.update`, `data.delete`, or `vector.insert` changes the source table version.
 - `query.prepare` plus `GET /api/v1/q/{query_id}` is live and returns HTTP ETag headers with `304 Not Modified` on matches.
 - `query.patch` reuses the same query-level ETag surface for delta refreshes.
-- `query.subscribe` exposes an SSE endpoint for prepared-query invalidation, and `cdc.subscribe_query` exposes the same dependency-driven invalidation model over both polling and `GET /api/v1/cdc/sse/{sub_id}` with query ETags.
+- `query.subscribe` exposes an SSE endpoint for prepared-query invalidation, and `cdc.subscribe_query` exposes the same dependency-driven invalidation model over polling, `GET /api/v1/cdc/sse/{sub_id}`, and `GET /api/v1/cdc/ws/{sub_id}` with query ETags. Prepared-query dependencies expand views, set-operation branches, and CTE definitions to the real base tables used for invalidation.
 
 Goal:
 Make SkeinDB a web-native database by supporting cache-coherent reads using HTTP validators.

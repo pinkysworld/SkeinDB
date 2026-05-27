@@ -34,6 +34,11 @@ pub mod backend {
     pub const PARAMETER_STATUS: u8 = b'S';
     pub const BACKEND_KEY_DATA: u8 = b'K';
     pub const READY_FOR_QUERY: u8 = b'Z';
+    pub const COPY_IN_RESPONSE: u8 = b'G';
+    pub const COPY_OUT_RESPONSE: u8 = b'H';
+    pub const COPY_DATA: u8 = b'd';
+    pub const COPY_DONE: u8 = b'c';
+    pub const PORTAL_SUSPENDED: u8 = b's';
     pub const ROW_DESCRIPTION: u8 = b'T';
     pub const DATA_ROW: u8 = b'D';
     pub const COMMAND_COMPLETE: u8 = b'C';
@@ -54,6 +59,9 @@ pub mod frontend {
     pub const BIND: u8 = b'B';
     pub const DESCRIBE: u8 = b'D';
     pub const EXECUTE: u8 = b'E';
+    pub const COPY_DATA: u8 = b'd';
+    pub const COPY_DONE: u8 = b'c';
+    pub const COPY_FAIL: u8 = b'f';
     pub const SYNC: u8 = b'S';
     pub const CLOSE: u8 = b'C';
     pub const FLUSH: u8 = b'H';
@@ -715,6 +723,51 @@ pub async fn write_data_row(
     write_message(stream, backend::DATA_ROW, &buf).await
 }
 
+/// Build and write a CopyOutResponse message.
+pub async fn write_copy_out_response(
+    stream: &mut TcpStream,
+    overall_format: u8,
+    column_formats: &[i16],
+) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(3 + (column_formats.len() * 2));
+    buf.push(overall_format);
+    buf.extend_from_slice(&(column_formats.len() as i16).to_be_bytes());
+    for format in column_formats {
+        buf.extend_from_slice(&format.to_be_bytes());
+    }
+    write_message(stream, backend::COPY_OUT_RESPONSE, &buf).await
+}
+
+/// Build and write a CopyInResponse message.
+pub async fn write_copy_in_response(
+    stream: &mut TcpStream,
+    overall_format: u8,
+    column_formats: &[i16],
+) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(3 + (column_formats.len() * 2));
+    buf.push(overall_format);
+    buf.extend_from_slice(&(column_formats.len() as i16).to_be_bytes());
+    for format in column_formats {
+        buf.extend_from_slice(&format.to_be_bytes());
+    }
+    write_message(stream, backend::COPY_IN_RESPONSE, &buf).await
+}
+
+/// Build and write a CopyData message.
+pub async fn write_copy_data(stream: &mut TcpStream, data: &[u8]) -> anyhow::Result<()> {
+    write_message(stream, backend::COPY_DATA, data).await
+}
+
+/// Build and write a CopyDone message.
+pub async fn write_copy_done(stream: &mut TcpStream) -> anyhow::Result<()> {
+    write_message(stream, backend::COPY_DONE, &[]).await
+}
+
+/// Build and write a PortalSuspended message.
+pub async fn write_portal_suspended(stream: &mut TcpStream) -> anyhow::Result<()> {
+    write_message(stream, backend::PORTAL_SUSPENDED, &[]).await
+}
+
 /// Build and write a CommandComplete message.
 pub async fn write_command_complete(stream: &mut TcpStream, tag: &str) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(tag.len() + 1);
@@ -1204,6 +1257,94 @@ mod tests {
         let (mut server, _) = listener.accept().await.unwrap();
         let vals: Vec<Option<&[u8]>> = vec![Some(b"hello"), None, Some(b"42")];
         write_data_row(&mut server, &vals).await.unwrap();
+
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_copy_out_response_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let msg = read_message(&mut client).await.unwrap();
+            assert_eq!(msg.tag, backend::COPY_OUT_RESPONSE);
+            assert_eq!(msg.payload[0], 0);
+            assert_eq!(i16::from_be_bytes([msg.payload[1], msg.payload[2]]), 2);
+            assert_eq!(i16::from_be_bytes([msg.payload[3], msg.payload[4]]), 0);
+            assert_eq!(i16::from_be_bytes([msg.payload[5], msg.payload[6]]), 0);
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        write_copy_out_response(&mut server, 0, &[0, 0])
+            .await
+            .unwrap();
+
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_copy_in_response_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let msg = read_message(&mut client).await.unwrap();
+            assert_eq!(msg.tag, backend::COPY_IN_RESPONSE);
+            assert_eq!(msg.payload[0], 0);
+            assert_eq!(i16::from_be_bytes([msg.payload[1], msg.payload[2]]), 2);
+            assert_eq!(i16::from_be_bytes([msg.payload[3], msg.payload[4]]), 0);
+            assert_eq!(i16::from_be_bytes([msg.payload[5], msg.payload[6]]), 0);
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        write_copy_in_response(&mut server, 0, &[0, 0])
+            .await
+            .unwrap();
+
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_copy_data_and_done_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+
+            let data_msg = read_message(&mut client).await.unwrap();
+            assert_eq!(data_msg.tag, backend::COPY_DATA);
+            assert_eq!(data_msg.payload, b"1\tAda\n");
+
+            let done_msg = read_message(&mut client).await.unwrap();
+            assert_eq!(done_msg.tag, backend::COPY_DONE);
+            assert!(done_msg.payload.is_empty());
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        write_copy_data(&mut server, b"1\tAda\n").await.unwrap();
+        write_copy_done(&mut server).await.unwrap();
+
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_portal_suspended_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let msg = read_message(&mut client).await.unwrap();
+            assert_eq!(msg.tag, backend::PORTAL_SUSPENDED);
+            assert!(msg.payload.is_empty());
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        write_portal_suspended(&mut server).await.unwrap();
 
         client_handle.await.unwrap();
     }

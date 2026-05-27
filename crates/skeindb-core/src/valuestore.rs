@@ -1882,22 +1882,45 @@ fn validate_vseg_header(file: &mut File) -> Result<(), ValueStoreError> {
     Ok(())
 }
 
-fn encode_vseg_entry(id: ValueId, entry: &ValueEntry) -> Result<Vec<u8>, ValueStoreError> {
-    let mut out = vec![
-        VSEG_RECORD_TYPE,
-        VSEG_RECORD_VERSION,
-        entry.kind as u8,
-        ValueSegmentCodec::Raw as u8,
-    ];
-    out.extend_from_slice(&id);
+fn maybe_compress_vseg_bytes(
+    bytes: &[u8],
+) -> Result<(ValueSegmentCodec, Vec<u8>), ValueStoreError> {
+    let compressed = zstd::stream::encode_all(bytes, 0)?;
+    if compressed.len() < bytes.len() {
+        Ok((ValueSegmentCodec::Zstd, compressed))
+    } else {
+        Ok((ValueSegmentCodec::Raw, bytes.to_vec()))
+    }
+}
 
-    let (raw_len, stored_bytes) = match entry.kind {
+fn decode_vseg_bytes(
+    codec: ValueSegmentCodec,
+    stored_bytes: &[u8],
+) -> Result<Vec<u8>, ValueStoreError> {
+    match codec {
+        ValueSegmentCodec::Raw => Ok(stored_bytes.to_vec()),
+        ValueSegmentCodec::Zstd => Ok(zstd::stream::decode_all(stored_bytes)?),
+    }
+}
+
+fn encode_vseg_entry(id: ValueId, entry: &ValueEntry) -> Result<Vec<u8>, ValueStoreError> {
+    let (raw_len, raw_bytes) = match entry.kind {
         ValueKind::Delta => {
             let delta = entry.delta.as_ref().ok_or(ValueStoreError::InvalidDelta)?;
             (delta.full_len, encode_delta1_bytes(delta, &entry.bytes)?)
         }
         _ => (entry.bytes.len(), entry.bytes.clone()),
     };
+
+    let (codec, stored_bytes) = maybe_compress_vseg_bytes(&raw_bytes)?;
+
+    let mut out = vec![
+        VSEG_RECORD_TYPE,
+        VSEG_RECORD_VERSION,
+        entry.kind as u8,
+        codec as u8,
+    ];
+    out.extend_from_slice(&id);
 
     out.extend_from_slice(&encode_varu(raw_len as u64));
     out.extend_from_slice(&encode_varu(stored_bytes.len() as u64));
@@ -1918,9 +1941,6 @@ fn decode_vseg_entry(payload: &[u8]) -> Result<ValueSegmentEntry, ValueStoreErro
 
     let kind = value_kind_from_u8(payload[2])?;
     let codec = ValueSegmentCodec::from_u8(payload[3])?;
-    if codec != ValueSegmentCodec::Raw {
-        return Err(ValueStoreError::UnsupportedValueCodec(payload[3]));
-    }
 
     let mut id = [0u8; 16];
     id.copy_from_slice(&payload[4..20]);
@@ -1931,7 +1951,7 @@ fn decode_vseg_entry(payload: &[u8]) -> Result<ValueSegmentEntry, ValueStoreErro
     if rest.len() < stored_len {
         return Err(ValueStoreError::Format(FormatError::UnexpectedEof));
     }
-    let stored_bytes = rest[..stored_len].to_vec();
+    let stored_bytes = decode_vseg_bytes(codec, &rest[..stored_len])?;
     rest = &rest[stored_len..];
     if !rest.is_empty() {
         return Err(ValueStoreError::InvalidSegmentEntry(

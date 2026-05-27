@@ -195,16 +195,16 @@ The current writer uses <code>plain+null_bitmap</code> only. Dictionary, RLE, an
 <h2 id="5-query-planning">5) Query planning<a class="headerlink" href="#5-query-planning" title="Permanent link">¶</a></h2>
 <p>Planner chooses:
 - row scan for hot data not covered by snapshots
-- column scan for covered ranges when query is:
+- column scan for covered current-time single-table reads when query is:
   - read-only
-  - aggregation-heavy
-  - uses a subset of columns available in snapshot</p>
+  - covered by the snapshot's projected columns (plus PK sidecars)
+  - cheaper than a row scan and not better served by a row-side prefilter</p>
 <p>Current prototype:
 - Simple single-table SELECT execution can now read required columns directly from <code>manifest.json</code> + <code>.cseg</code> sidecars.
 - Primary-key columns are always eligible because they are stored as dedicated segments even when they are not part of the projected snapshot column list.
-- Execution is still row-wise after load: predicates, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
-- The optimizer now routes into snapshot scans only for current-time reads when a covering snapshot is cheaper than a row scan and no better row-side prefilter path is available.
-- Historical <code>AS OF</code> reads and selective vector/index-prefilter paths stay on the row engine.</p>
+- Execution is still row-wise after load: predicates, <code>DISTINCT</code> dedup, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
+- The optimizer now routes covered current-time single-table SELECTs, including covered <code>DISTINCT</code> projections, projection-only <code>GROUP BY</code>, compatible <code>HAVING</code> over grouped projected columns or aliases, and broad equality-index prefilter shapes, into snapshot scans when a covering snapshot is cheaper than both a full row scan and the competing row-side candidate scan.
+- Historical <code>AS OF</code> reads, broader <code>GROUP BY</code>, aggregate <code>HAVING</code>, and selective vector/index-prefilter paths stay on the row engine.</p>
 <p>Hybrid plan:
 - scan column snapshots for cold partitions
 - scan row store for newest partitions

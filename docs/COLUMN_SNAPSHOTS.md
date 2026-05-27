@@ -92,17 +92,17 @@ The current writer uses `plain+null_bitmap` only. Dictionary, RLE, and richer st
 
 Planner chooses:
 - row scan for hot data not covered by snapshots
-- column scan for covered ranges when query is:
+- column scan for covered current-time single-table reads when query is:
   - read-only
-  - aggregation-heavy
-  - uses a subset of columns available in snapshot
+  - covered by the snapshot's projected columns (plus PK sidecars)
+  - cheaper than a row scan and not better served by a row-side prefilter
 
 Current prototype:
 - Simple single-table SELECT execution can now read required columns directly from `manifest.json` + `.cseg` sidecars.
 - Primary-key columns are always eligible because they are stored as dedicated segments even when they are not part of the projected snapshot column list.
-- Execution is still row-wise after load: predicates, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
-- The optimizer now routes into snapshot scans only for current-time reads when a covering snapshot is cheaper than a row scan and no better row-side prefilter path is available.
-- Historical `AS OF` reads and selective vector/index-prefilter paths stay on the row engine.
+- Execution is still row-wise after load: predicates, `DISTINCT` dedup, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
+- The optimizer now routes covered current-time single-table SELECTs, including covered `DISTINCT` projections, projection-only `GROUP BY`, compatible `HAVING` over grouped projected columns or aliases, and broad equality-index prefilter shapes, into snapshot scans when a covering snapshot is cheaper than both a full row scan and the competing row-side candidate scan.
+- Historical `AS OF` reads, broader `GROUP BY`, aggregate `HAVING`, and selective vector/index-prefilter paths stay on the row engine.
 
 Hybrid plan:
 - scan column snapshots for cold partitions

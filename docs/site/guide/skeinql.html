@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
 <p>Status: Draft v1.0 (implementable; v0.3.17 runtime sync)
-Last updated: 2026-05-11</p>
+Last updated: 2026-05-27</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <ul>
@@ -150,7 +150,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 - <code>POST /api/v1/rpc</code> with <code>Content-Type: application/json</code></p>
 <p>Optional endpoints:
 - <code>GET /api/v1/q/{query_id}</code> — cacheable prepared-query execution (ETag-aware)
-- <code>GET /api/v1/cdc/{sub_id}</code> — <code>text/event-stream</code> (SSE) changefeed</p>
+- <code>GET /api/v1/cdc/sse/{sub_id}</code> — <code>text/event-stream</code> (SSE) changefeed
+- <code>GET /api/v1/cdc/ws/{sub_id}</code> — WebSocket changefeed using JSON text frames</p>
 <h3 id="12-request-envelope">1.2 Request envelope<a class="headerlink" href="#12-request-envelope" title="Permanent link">¶</a></h3>
 <p>Request shape:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -965,20 +966,32 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <p>Result (shape is implementation-defined; typically includes a result set plus a compatibility report).</p>
 <h3 id="108-cdc">10.8 cdc.*<a class="headerlink" href="#108-cdc" title="Permanent link">¶</a></h3>
 <h4 id="cdcsubscribe_table">cdc.subscribe_table<a class="headerlink" href="#cdcsubscribe_table" title="Permanent link">¶</a></h4>
-<p>Params: <code>{ "db":"mydb", "table":"users" }</code></p>
+<p>Params: <code>{ "db":"mydb", "table":"users", "pk_range":{"lower_bound":{"t":"u64","v":7},"upper_bound":{"t":"u64","v":9}}, "ops":["update","delete"], "columns":["status"], "include":{"after":true}, "format":"objects_json" }</code></p>
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="mi">123</span><span class="p">,</span><span class="nt">&quot;sse_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/sse/sub_...&quot;</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="mi">123</span><span class="p">,</span><span class="nt">&quot;sse_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/sse/sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;ws_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/ws/sub_...&quot;</span><span class="p">}</span>
 </code></pre></div>
 
+<p>The returned <code>sub_id</code> remains valid across server restarts until <code>cdc.close</code> removes the subscription.</p>
+<p><code>ops</code> is optional and currently accepts any subset of <code>insert</code>, <code>update</code>, and <code>delete</code>. When omitted, all three source mutation kinds are delivered.
+<code>pk</code> is optional and, when present, must be an exact primary-key tuple encoded as SkeinQL typed literals. For table subscriptions, the tuple width must match the table primary key.
+<code>pk_range</code> is optional and, when present, applies an inclusive primary-key range using typed literal <code>lower_bound</code> and/or <code>upper_bound</code>. At least one bound must be present. For table subscriptions, the table must have a single-column primary key; tables without a primary key, composite primary keys, empty range objects, or <code>lower_bound &gt; upper_bound</code> are rejected.
+<code>columns</code> is optional and, when present, only emits events whose retained <code>before</code> / <code>after</code> row images differ on at least one selected column. If row images are included, they are projected down to those columns. For table subscriptions, every requested column must exist in the table schema.
+<code>format</code> is optional and defaults to <code>objects_json</code>. Supported values are <code>objects_json</code>, which encodes <code>pk</code>, <code>before</code>, and <code>after</code> values as typed SkeinQL <code>Lit</code> envelopes, and <code>plain_json</code>, which emits those same fields as ordinary JSON scalars/objects. The selected format is persisted with the subscription and applies to <code>cdc.poll</code>, SSE, and WebSocket delivery.</p>
 <h4 id="cdcsubscribe_query">cdc.subscribe_query<a class="headerlink" href="#cdcsubscribe_query" title="Permanent link">¶</a></h4>
 <p>Params:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;query_id&quot;</span><span class="p">:</span><span class="s2">&quot;q_...&quot;</span><span class="p">,</span><span class="nt">&quot;args&quot;</span><span class="p">:[]}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;query_id&quot;</span><span class="p">:</span><span class="s2">&quot;q_...&quot;</span><span class="p">,</span><span class="nt">&quot;args&quot;</span><span class="p">:[],</span><span class="nt">&quot;pk_range&quot;</span><span class="p">:{</span><span class="nt">&quot;lower_bound&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">},</span><span class="nt">&quot;upper_bound&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">9</span><span class="p">}},</span><span class="nt">&quot;ops&quot;</span><span class="p">:[</span><span class="s2">&quot;delete&quot;</span><span class="p">],</span><span class="nt">&quot;columns&quot;</span><span class="p">:[</span><span class="s2">&quot;status&quot;</span><span class="p">],</span><span class="nt">&quot;include&quot;</span><span class="p">:{</span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">},</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;objects_json&quot;</span><span class="p">}</span>
 </code></pre></div>
 
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="mi">123</span><span class="p">,</span><span class="nt">&quot;sse_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/sse/sub_...&quot;</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="mi">123</span><span class="p">,</span><span class="nt">&quot;sse_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/sse/sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;ws_url&quot;</span><span class="p">:</span><span class="s2">&quot;/api/v1/cdc/ws/sub_...&quot;</span><span class="p">}</span>
 </code></pre></div>
 
+<p>The returned <code>sub_id</code> remains valid across server restarts until <code>cdc.close</code> removes the subscription.</p>
+<p>For query subscriptions, <code>ops</code> filters the triggering table mutations before an <code>op: "invalidate"</code> event is emitted.
+For query subscriptions, <code>pk</code> filters the triggering table mutations by exact primary-key tuple before an <code>op: "invalidate"</code> event is emitted.
+For query subscriptions, <code>pk_range</code> filters the triggering table mutations by inclusive primary-key bounds before an <code>op: "invalidate"</code> event is emitted.
+For query subscriptions, <code>columns</code> filters the triggering table mutations to cases where at least one selected column value changes between the retained <code>before</code> / <code>after</code> row images; when row images are included, they are projected down to those columns before the invalidation is emitted.
+Prepared queries over views invalidate on writes to the underlying base tables, prepared queries with set-operation bodies (for example <code>UNION</code> / <code>UNION ALL</code>) invalidate on writes to tables referenced by any branch, prepared queries using CTEs walk CTE definitions for base-table dependencies while ignoring CTE names as physical tables, and <code>query.subscribe</code> uses that same dependency set for prepared-query SSE change notifications.</p>
 <h4 id="cdcpoll">cdc.poll<a class="headerlink" href="#cdcpoll" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;from_offset&quot;</span><span class="p">:</span><span class="mi">123</span><span class="p">,</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">200</span><span class="p">}</span>
@@ -990,8 +1003,13 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;next_offset&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;earliest_offset&quot;</span><span class="p">:</span><span class="mi">120</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;latest_offset&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;resnapshot_required&quot;</span><span class="p">:</span><span class="kc">false</span>
+<span class="w">  </span><span class="nt">&quot;resnapshot_required&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;backpressure&quot;</span><span class="p">:{</span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="s2">&quot;healthy&quot;</span><span class="p">,</span><span class="nt">&quot;lag&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;remaining_until_resnapshot&quot;</span><span class="p">:</span><span class="mi">4095</span><span class="p">,</span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">}</span>
 <span class="p">}</span>
+</code></pre></div>
+
+<p>For a subscription created with <code>format: "plain_json"</code>, the same event's <code>pk</code> and row images are emitted without typed <code>Lit</code> wrappers, for example:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;seq&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;update&quot;</span><span class="p">,</span><span class="nt">&quot;pk&quot;</span><span class="p">:[</span><span class="mi">1</span><span class="p">],</span><span class="nt">&quot;after&quot;</span><span class="p">:{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;email&quot;</span><span class="p">:</span><span class="s2">&quot;ada@example.test&quot;</span><span class="p">},</span><span class="nt">&quot;commit_ts_ms&quot;</span><span class="p">:</span><span class="mi">1710000000000</span><span class="p">,</span><span class="nt">&quot;lsn&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">}</span>
 </code></pre></div>
 
 <p>When a consumer falls behind the retained horizon, the result becomes:</p>
@@ -1002,10 +1020,22 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;latest_offset&quot;</span><span class="p">:</span><span class="mi">245</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;resnapshot_required&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;resnapshot_from_offset&quot;</span><span class="p">:</span><span class="mi">199</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;resnapshot_reason&quot;</span><span class="p">:</span><span class="s2">&quot;wal_horizon_exceeded&quot;</span>
+<span class="w">  </span><span class="nt">&quot;resnapshot_reason&quot;</span><span class="p">:</span><span class="s2">&quot;wal_horizon_exceeded&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;backpressure&quot;</span><span class="p">:{</span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="s2">&quot;resnapshot_required&quot;</span><span class="p">,</span><span class="nt">&quot;lag&quot;</span><span class="p">:</span><span class="mi">46</span><span class="p">,</span><span class="nt">&quot;remaining_until_resnapshot&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
+<p><code>backpressure.state</code> is one of <code>healthy</code>, <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>.</p>
+<h4 id="cdcpause-cdcresume">cdc.pause / cdc.resume<a class="headerlink" href="#cdcpause-cdcresume" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;sub_id&quot;</span><span class="p">:</span><span class="s2">&quot;sub_...&quot;</span><span class="p">,</span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;acked_offset&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span><span class="nt">&quot;backpressure&quot;</span><span class="p">:{</span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="s2">&quot;paused&quot;</span><span class="p">,</span><span class="nt">&quot;lag&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;remaining_until_resnapshot&quot;</span><span class="p">:</span><span class="mi">4096</span><span class="p">,</span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">}}</span>
+</code></pre></div>
+
+<p><code>cdc.pause</code> persists the paused flag and suppresses data event delivery for the subscription. <code>cdc.resume</code> clears the flag. Neither method advances the acknowledged offset, and retained-horizon loss still returns or emits <code>resnapshot_required</code> before normal delivery can resume.</p>
 <h4 id="cdc-sse-transport">CDC SSE transport<a class="headerlink" href="#cdc-sse-transport" title="Permanent link">¶</a></h4>
 <p><code>GET /api/v1/cdc/sse/{sub_id}</code> streams the same event payloads as <code>cdc.poll</code> over Server-Sent Events.</p>
 <p>Reconnect options:</p>
@@ -1013,7 +1043,19 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <li><code>Last-Event-ID: &lt;seq&gt;</code></li>
 <li><code>GET /api/v1/cdc/sse/{sub_id}?from_offset=&lt;seq&gt;</code></li>
 </ul>
-<p>If the reconnect cursor falls behind the retained horizon, the stream emits <code>event: resnapshot</code> with the same recovery metadata returned by <code>cdc.poll</code> and then closes.</p>
+<p>If the subscription enters <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>, the stream emits <code>event: backpressure</code> with the same <code>backpressure</code> fields returned by <code>cdc.poll</code>. If the reconnect cursor falls behind the retained horizon, the stream emits <code>event: resnapshot</code> with the same recovery metadata returned by <code>cdc.poll</code> and then closes.</p>
+<h4 id="cdc-websocket-transport">CDC WebSocket transport<a class="headerlink" href="#cdc-websocket-transport" title="Permanent link">¶</a></h4>
+<p><code>GET /api/v1/cdc/ws/{sub_id}</code> upgrades to a WebSocket stream carrying JSON text frames with this envelope:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span><span class="nt">&quot;event&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">,</span><span class="nt">&quot;data&quot;</span><span class="p">:{</span><span class="nt">&quot;seq&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">,</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">,</span><span class="nt">&quot;pk&quot;</span><span class="p">:[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">}],</span><span class="nt">&quot;commit_ts_ms&quot;</span><span class="p">:</span><span class="mi">1710000000000</span><span class="p">,</span><span class="nt">&quot;lsn&quot;</span><span class="p">:</span><span class="mi">124</span><span class="p">}}</span>
+</code></pre></div>
+
+<p>Reconnect options:</p>
+<ul>
+<li><code>Last-Event-ID: &lt;seq&gt;</code> on the upgrade request</li>
+<li><code>GET /api/v1/cdc/ws/{sub_id}?from_offset=&lt;seq&gt;</code></li>
+</ul>
+<p>If the subscription enters <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>, the server sends a <code>{"event":"backpressure",...}</code> control frame with the same <code>backpressure</code> fields returned by <code>cdc.poll</code>. If the reconnect cursor falls behind the retained horizon, the server sends a final <code>{"event":"resnapshot",...}</code> control frame with the same recovery metadata returned by <code>cdc.poll</code> and then closes the socket.</p>
+<p><code>cdc.ack</code> persists the acknowledged offset for the subscription, and <code>cdc.pause</code> / <code>cdc.resume</code> persist the operator control flag, so <code>cdc.poll</code>, SSE reconnects, and WebSocket reconnects restore the same cursor and paused state after restart as well as within a live process.</p>
 <h3 id="109-dp-experimental">10.9 dp.* (experimental)<a class="headerlink" href="#109-dp-experimental" title="Permanent link">¶</a></h3>
 <p>Differential privacy aggregates with budget tracking.</p>
 <h4 id="dpaggregate">dp.aggregate<a class="headerlink" href="#dpaggregate" title="Permanent link">¶</a></h4>
@@ -2147,7 +2189,7 @@ unchanged.</p>
 
 <p>Safety rules: only the latest active <code>advisor.apply_index</code> action for a suggestion is considered; a newer <code>dismiss</code> or <code>retire</code> removes it from candidates; recent dependency signals return <code>reason:"recently_used"</code>; actual retirements record action <code>retire</code> in <code>advisor.history</code>.</p>
 <h4 id="advisorevaluate-experimental">advisor.evaluate (experimental)<a class="headerlink" href="#advisorevaluate-experimental" title="Permanent link">¶</a></h4>
-<p>Replay phased dependency samples through a scratch advisor state and report how quickly the top suggestion converges after a workload shift.</p>
+<p>Replay phased dependency samples through a scratch advisor state, report how quickly the top suggestion converges after a workload shift, and optionally benchmark benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order against a hypothetical suggested index.</p>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
@@ -2193,6 +2235,30 @@ unchanged.</p>
 <span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;latency_benchmark&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;benchmarkable_samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;benchmark_runs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;observed_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">400</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;before_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;after_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">18200</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">19600</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22100</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">19875.0</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3200</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4100</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4300</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4300</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">3362.5</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;speedup&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">5.91</span>
+<span class="w">      </span><span class="p">},</span>
 <span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
 <span class="w">    </span><span class="p">},</span>
@@ -2209,7 +2275,7 @@ unchanged.</p>
 <span class="p">}</span>
 </code></pre></div>
 
-<p>Each phase consists of one or more dependency samples. Samples may populate <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state.</p>
+<p>Each phase consists of one or more dependency samples. Samples may populate <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state. <code>latency_benchmark</code> is optional and currently appears only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order whose dependency columns cover the phase-final suggestion key; non-grouped range+order layouts without a same-leading key are still excluded.</p>
 <h4 id="advisordismiss-experimental">advisor.dismiss (experimental)<a class="headerlink" href="#advisordismiss-experimental" title="Permanent link">¶</a></h4>
 <p>Dismiss an index suggestion (suppressed from future synthesize output). Drops any advisor-built in-memory index.</p>
 <p>Params:</p>

@@ -1,7 +1,7 @@
 # Workload-guided compaction scheduling
 
 Status: Hardened research baseline
-Last updated: 2026-05-08
+Last updated: 2026-05-24
 
 SkeinDB uses an LSM-like structure for sorted runs and background compaction.
 Compaction is necessary to bound read amplification and reclaim space, but can also cause
@@ -50,6 +50,9 @@ Current baseline:
 - L0 pressure is derived from live `.rseg` files under `tables/<db>/*.rseg`, and recent workload signals are derived from the existing bounded RPC/query telemetry ring buffer.
 - `stats.snapshot.compaction.scheduler` now reports the live policy, configured/effective budgets, active peak window, queued task summary, and priority/admission state derived from the same runtime telemetry.
 - `maintenance.compaction.status`, `maintenance.compaction.set_policy`, and `maintenance.compaction.pause` / `resume` persist policy state in `settings.json`, expose live scheduler decisions, and enforce safe-mode write backpressure for write-classified SkeinQL/HTTP mutations when hard L0 bounds are exceeded.
+- `serve()` now runs a pressure-driven background compaction worker that consumes the same scheduler state, rewrites canonical `.rseg` segments for live tables through `Engine::maintenance_compaction_rewrite_table()`, and under file-pressure conditions can batch multiple removable `.rseg` cleanups in one tick up to the scheduler IO budget.
+- `maintenance.compaction.status` now reports real worker execution metadata: `runs`, `scheduler.tasks.current`, `scheduler.tasks.last_completed`, `last_run_ms`, `bytes_rewritten`, `bytes_reclaimed`, `orphan_files_removed`, and `last_error`.
+- SkeinAdmin's compaction cards and scheduler summary now surface the same worker counters (`runs`, reclaimed bytes, current task, last completed task) instead of only the policy/status envelope.
 - R20 energy-aware scheduling is implemented as `policy: "energy_aware"`. Runtime status includes CPU/IO joule estimates, external signal multipliers, constraint score, and deferral ratio under `compaction.scheduler.energy`.
 - `maintenance.compaction.set_policy` accepts `energy` coefficients and `external_signals` (`power_source`, `battery_pct`, `price_multiplier`, `carbon_multiplier`) so test harnesses, operators, or embedded integrations can feed battery/power, pricing, or carbon signals without platform-specific APIs.
 
@@ -132,7 +135,10 @@ Prototype harness:
 - compares `fixed_leveling`, `fixed_tiering`, `workload_guided`, and `energy_aware` policies over the same deterministic workload timeline
 - surfaces stall rate, total stall time, peak/p95-of-p99 read and write latency, backlog pressure, average compaction budget, external energy signal multiplier, and total/average energy score
 
-The harness remains synthetic rather than tied directly to a background compactor. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, and safe-mode admission control.
+The harness remains synthetic rather than tied directly to the runtime worker. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, safe-mode admission control, and the pressure-driven segment rewrite loop.
+
+Current limitation:
+- The autonomous worker can now batch removable file-pressure tasks, but it still does not implement deeper multi-level merge planning. Pure file-count pressure caused by many required live canonical segments still relies on safe-mode backpressure plus future storage-engine work.
 
 ## 9. Testing
 

@@ -1,6 +1,7 @@
 use skeindb_core::valuestore::{
-    BloomFilter, DeltaPolicy, ModelRefreshPolicy, ValueEntry, ValueId, ValueSegmentReader,
-    ValueSegmentWriter, ValueStore, ValueStoreConfig,
+    decode_transfer_entry, encode_transfer_entry, BloomFilter, DeltaPolicy, ModelRefreshPolicy,
+    ValueEntry, ValueId, ValueSegmentCodec, ValueSegmentReader, ValueSegmentWriter, ValueStore,
+    ValueStoreConfig,
 };
 use skeindb_core::{value_id, FileHeader, FileKind, ValueKind};
 
@@ -440,6 +441,43 @@ fn bloom_filter_integrated_with_valuestore() {
 }
 
 #[test]
+fn transfer_entry_prefers_zstd_when_smaller_and_roundtrips() {
+    let bytes = vec![b'a'; 4096];
+    let id = value_id(&bytes);
+    let entry = ValueEntry {
+        kind: ValueKind::Cell,
+        bytes: bytes.clone(),
+        delta: None,
+    };
+
+    let encoded = encode_transfer_entry(id, &entry).expect("encode transfer entry");
+    assert_eq!(encoded[3], ValueSegmentCodec::Zstd as u8);
+
+    let decoded = decode_transfer_entry(&encoded).expect("decode transfer entry");
+    assert_eq!(decoded.id, id);
+    assert_eq!(decoded.entry.kind, ValueKind::Cell);
+    assert_eq!(decoded.entry.bytes, bytes);
+}
+
+#[test]
+fn transfer_entry_keeps_raw_when_zstd_is_not_smaller() {
+    let bytes: Vec<u8> = (0u8..32).collect();
+    let id = value_id(&bytes);
+    let entry = ValueEntry {
+        kind: ValueKind::Cell,
+        bytes: bytes.clone(),
+        delta: None,
+    };
+
+    let encoded = encode_transfer_entry(id, &entry).expect("encode transfer entry");
+    assert_eq!(encoded[3], ValueSegmentCodec::Raw as u8);
+
+    let decoded = decode_transfer_entry(&encoded).expect("decode transfer entry");
+    assert_eq!(decoded.id, id);
+    assert_eq!(decoded.entry.bytes, bytes);
+}
+
+#[test]
 fn value_segment_roundtrip_preserves_ids_and_delta_materialization() {
     let path = temp_path("roundtrip");
     let config = ValueStoreConfig {
@@ -475,6 +513,39 @@ fn value_segment_roundtrip_preserves_ids_and_delta_materialization() {
     );
     assert_eq!(loaded.get(&delta_id).expect("delta").kind, ValueKind::Delta);
     assert_eq!(loaded.materialize(&delta_id).expect("materialize"), updated);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn value_segment_writer_roundtrips_zstd_entries() {
+    let path = temp_path("zstd_roundtrip");
+    let bytes = vec![b'z'; 4096];
+    let id = value_id(&bytes);
+    let entry = ValueEntry {
+        kind: ValueKind::Cell,
+        bytes: bytes.clone(),
+        delta: None,
+    };
+
+    let encoded = encode_transfer_entry(id, &entry).expect("encode transfer entry");
+    assert_eq!(encoded[3], ValueSegmentCodec::Zstd as u8);
+
+    {
+        let mut writer = ValueSegmentWriter::create(&path).expect("create writer");
+        writer.append(id, &entry).expect("append zstd entry");
+        writer.sync().expect("sync zstd entry");
+    }
+
+    let entries = ValueSegmentReader::open(&path)
+        .expect("open reader")
+        .read_all()
+        .expect("read all");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, id);
+    assert_eq!(entries[0].entry.kind, ValueKind::Cell);
+    assert_eq!(entries[0].entry.bytes, bytes);
 
     let _ = std::fs::remove_file(path);
 }

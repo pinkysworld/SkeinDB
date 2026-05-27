@@ -264,9 +264,10 @@ Security note:
 
 ### 4.12 CDC Subscriptions
 - Create table subscriptions via `cdc.subscribe_table`
-- Poll / ACK / close session-local handles via `cdc.poll`, `cdc.ack`, and `cdc.close`
-- Inspect lag for the currently tracked browser-session subscriptions via `next_offset - acked_offset`
-- Prepared-query subscriptions remain planned work
+- Create prepared-query invalidation subscriptions via `cdc.subscribe_query`; query dependencies expand views, set-operation branches, and CTE definitions to the real base tables used for invalidation
+- Poll / pause / resume / ACK / close durable CDC handles via `cdc.poll`, `cdc.pause`, `cdc.resume`, `cdc.ack`, and `cdc.close`
+- Inspect lag and backpressure state for the currently tracked browser-session subscriptions via `next_offset - acked_offset` plus the returned `backpressure` object
+- Surface runtime pause/pressure counters from `stats.snapshot.cdc`
 
 ### 4.13 Index Advisor
 (See docs/INDEX_ADVISOR.md)
@@ -365,7 +366,7 @@ SkeinAdmin should support:
 - SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog
 - SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*) — implemented with the dedicated `Time Travel & Replay` panel, including `maintenance.history.*` retention controls and replay integrity summaries.
 - SA11: Encryption + key rotation UI (settings.encryption + status/progress)
-- SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work
+- SA12: CDC subscriptions UI (cdc.*) + lag/backpressure visualization — implemented for table and prepared-query subscriptions with durable handle tracking, SSE/WebSocket transport paths, pause/resume controls, and runtime pressure summaries
 - SA13: Compaction scheduler policy UI (maintenance.compaction.*) — implemented with status, policy update, pause, and resume controls in Engine Config
 - SA14: Autoparameterization and plan-cache widgets
 - SA15: Forensics page (`maintenance.audit_*`, `forensic.*`) + proof verification UI

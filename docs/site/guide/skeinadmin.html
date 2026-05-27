@@ -385,9 +385,10 @@ shortcut. The Help Center contains:</p>
 <h3 id="412-cdc-subscriptions">4.12 CDC Subscriptions<a class="headerlink" href="#412-cdc-subscriptions" title="Permanent link">¶</a></h3>
 <ul>
 <li>Create table subscriptions via <code>cdc.subscribe_table</code></li>
-<li>Poll / ACK / close session-local handles via <code>cdc.poll</code>, <code>cdc.ack</code>, and <code>cdc.close</code></li>
-<li>Inspect lag for the currently tracked browser-session subscriptions via <code>next_offset - acked_offset</code></li>
-<li>Prepared-query subscriptions remain planned work</li>
+<li>Create prepared-query invalidation subscriptions via <code>cdc.subscribe_query</code>; query dependencies expand views, set-operation branches, and CTE definitions to the real base tables used for invalidation</li>
+<li>Poll / pause / resume / ACK / close durable CDC handles via <code>cdc.poll</code>, <code>cdc.pause</code>, <code>cdc.resume</code>, <code>cdc.ack</code>, and <code>cdc.close</code></li>
+<li>Inspect lag and backpressure state for the currently tracked browser-session subscriptions via <code>next_offset - acked_offset</code> plus the returned <code>backpressure</code> object</li>
+<li>Surface runtime pause/pressure counters from <code>stats.snapshot.cdc</code></li>
 </ul>
 <h3 id="413-index-advisor">4.13 Index Advisor<a class="headerlink" href="#413-index-advisor" title="Permanent link">¶</a></h3>
 <p>(See docs/INDEX_ADVISOR.md)
@@ -469,7 +470,7 @@ shortcut. The Help Center contains:</p>
 <li>SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog</li>
 <li>SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*) — implemented with the dedicated <code>Time Travel &amp; Replay</code> panel, including <code>maintenance.history.*</code> retention controls and replay integrity summaries.</li>
 <li>SA11: Encryption + key rotation UI (settings.encryption + status/progress)</li>
-<li>SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work</li>
+<li>SA12: CDC subscriptions UI (cdc.*) + lag/backpressure visualization — implemented for table and prepared-query subscriptions with durable handle tracking, SSE/WebSocket transport paths, pause/resume controls, and runtime pressure summaries</li>
 <li>SA13: Compaction scheduler policy UI (maintenance.compaction.*) — implemented with status, policy update, pause, and resume controls in Engine Config</li>
 <li>SA14: Autoparameterization and plan-cache widgets</li>
 <li>SA15: Forensics page (<code>maintenance.audit_*</code>, <code>forensic.*</code>) + proof verification UI</li>

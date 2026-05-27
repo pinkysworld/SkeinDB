@@ -32,11 +32,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP server + SkeinQL RPC
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+futures-util = "0.3"
 sha1 = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
@@ -57,3 +58,4 @@ skeindb-skeinql = { path = "../skeindb-skeinql" }
 [dev-dependencies]
 http-body-util = "0.1"
 rcgen = "0.14"
+tokio-tungstenite = "0.24"

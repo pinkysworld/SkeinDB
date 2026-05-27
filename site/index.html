@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC</title>
-  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL corpus-backed compatibility, partial PostgreSQL support, and web-native administration.">
+  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL corpus-backed compatibility, partial PostgreSQL support, CDC changefeeds, and web-native administration.">
   <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
   <meta property="og:title" content="SkeinDB — Single-Binary Database">
-  <meta property="og:description" content="Cell-interned MVCC · 134 RPC methods · 20 research tracks (18 hardened) · MySQL corpus-backed + partial PostgreSQL · One binary">
+  <meta property="og:description" content="Cell-interned MVCC · 145 RPC methods · 20 research tracks (18 hardened / 2 prototype) · MySQL corpus-backed + partial PostgreSQL · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -565,7 +565,7 @@
   </h1>
   <p>
     SkeinDB is a single-binary database combining cell-interned MVCC storage,
-    MySQL corpus-backed compatibility, partial PostgreSQL support, 20 opt-in research features (18 hardened), and a full web admin —
+    MySQL corpus-backed compatibility, partial PostgreSQL support, 20 opt-in research features (18 hardened / 2 prototype), CDC changefeeds, and a full web admin —
     all in one Rust executable.
   </p>
   <div class="hero-actions">
@@ -589,11 +589,11 @@
 <!-- STATS -->
 <div class="stats">
   <div class="stat">
-    <div class="stat-num">129</div>
+    <div class="stat-num">145</div>
     <div class="stat-label">RPC Methods</div>
   </div>
   <div class="stat">
-    <div class="stat-num">15</div>
+    <div class="stat-num">30+</div>
     <div class="stat-label">Method Families</div>
   </div>
   <div class="stat">
@@ -601,16 +601,16 @@
     <div class="stat-label">Research Tracks</div>
   </div>
   <div class="stat">
-    <div class="stat-num">26</div>
+    <div class="stat-num">27</div>
     <div class="stat-label">Admin Panels</div>
   </div>
   <div class="stat">
-    <div class="stat-num">285</div>
-    <div class="stat-label">Automated Tests</div>
+    <div class="stat-num">700+</div>
+    <div class="stat-label">Corpus Statements</div>
   </div>
   <div class="stat">
-    <div class="stat-num">&lt;25s</div>
-    <div class="stat-label">Full Test Suite</div>
+    <div class="stat-num">No</div>
+    <div class="stat-label">100% Parity Claim</div>
   </div>
 </div>
 
@@ -649,7 +649,7 @@
       <span class="status-badge status-implemented">Documented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">📚</div>
       <h3>SkeinQL API Reference</h3>
-      <p>The API surface now has a dedicated <a href="../docs/site/guide/api-reference.html">client reference</a>: transports, envelopes, result formats, method families, and the current 134-method <code>system.capabilities</code> map are documented beside the full SkeinQL language spec.</p>
+      <p>The API surface now has a dedicated <a href="../docs/site/guide/api-reference.html">client reference</a>: transports, envelopes, result formats, method families, and the current 145-method <code>system.capabilities</code> map are documented beside the full SkeinQL language spec.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Sample App</span>
@@ -667,13 +667,13 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
-      <p>27 interactive panels compiled into the binary, including a dedicated <strong>Help &amp; Docs</strong> center with quick start, panel reference, R01-R20 research-track index, keyboard shortcuts, glossary, and direct links to the canonical documentation. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation plus live create-table preview/validation, expert control panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.</p>
+      <p>27 interactive panels compiled into the binary, including a dedicated <strong>Help &amp; Docs</strong> center with quick start, panel reference, R01-R20 research-track index, keyboard shortcuts, glossary, and direct links to the canonical documentation. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation plus live create-table preview/validation, expert control panels, a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports, CDC lag and backpressure controls with pause/resume, average/p95/p99 query latency, plus per-fingerprint tail-latency histograms.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</div>
-      <h3>20 Research Tracks (18 Hardened)</h3>
-      <p>From learned ValueID indexes and closed-out differential privacy aggregate hardening to migration intent reports, NL-to-SkeinQL verification, energy-aware compaction, and replay-regression CI comparison reports — 18 tracks are hardened with real algorithms and integration tests; R18 and R19 remain prototype-level while their remaining productionization work continues.</p>
+      <h3>20 Research Tracks (18 Hardened / 2 Prototype)</h3>
+      <p>Research maturity is tracked explicitly: R01-R17 and R20 are hardened, while R18 performance replay and R19 Wasm query operators remain prototype implemented. See the <a href="../docs/site/guide/true-status-matrix.html">True Status Matrix</a> for the current gaps instead of treating the research backlog as a maturity claim.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
@@ -738,10 +738,10 @@
       <div class="insight-copy compact">
         <div class="insight-eyebrow">Embedded admin</div>
         <h3>Telemetry, security, CDC, cluster control, and research panels share one live control surface</h3>
-        <p>SkeinAdmin is wired directly to the runtime. The dashboard, Easy Viewer, index advisor, Privacy lab, Merge &amp; CRDT evaluator, cluster tools, and Forensics proof bundles speak the same typed control plane as external clients.</p>
+        <p>SkeinAdmin is wired directly to the runtime. The dashboard, Easy Viewer, CDC pause/resume controls, index advisor, Privacy lab, Merge &amp; CRDT evaluator, cluster tools, and Forensics proof bundles speak the same typed control plane as external clients.</p>
         <div class="insight-pills">
-          <span>26 admin panels</span>
-          <span>134 RPC methods</span>
+          <span>27 admin panels</span>
+          <span>145 RPC methods</span>
           <span>20 research tracks</span>
         </div>
       </div>

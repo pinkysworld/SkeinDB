@@ -126,8 +126,8 @@
     </div>
     <article class="doc-article">
       <h1 id="dedup-preserving-encryption-message-locked-convergent-mode">Dedup-preserving encryption (message-locked / convergent mode)<a class="headerlink" href="#dedup-preserving-encryption-message-locked-convergent-mode" title="Permanent link">¶</a></h1>
-<p>Status: Shipped baseline (T190-T193 implemented; background re-encryption orchestration and durable key catalog persistence remain follow-ups)
-Last updated: 2026-05-08</p>
+<p>Status: Partial baseline (T190-T193 library/control surfaces implemented; encryption profile/audit metadata now persists, but main engine read/write integration and durable master-key persistence remain follow-ups)
+Last updated: 2026-05-27</p>
 <p>SkeinDB's storage design uses content addressing and optional deduplication in the ValueStore.
 Traditional randomized encryption breaks deduplication because identical plaintexts produce different ciphertexts.</p>
 <p>This document specifies an <strong>optional</strong> encryption mode that preserves deduplication by using
@@ -148,7 +148,8 @@ feature MUST be opt-in and MUST offer safer scope defaults.</p>
 <li><code>ENC_MLE_DB</code> derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts.</li>
 <li>T191 adds <code>EncryptedValueStore</code>, which stores self-describing encryption envelopes as ordinary <code>ValueKind::Cell</code> blobs and computes <code>ValueID</code> over the stored bytes without changing the <code>.vseg</code> format.</li>
 <li>T192 adds key rotation plans and per-envelope / per-value re-encryption helpers with progress counters.</li>
-<li>T193 exposes <code>settings.encryption.*</code> JSON-RPC methods plus the SkeinAdmin Encryption panel. Master key bytes are accepted as base64 but never persisted; operators re-register keys after restart.</li>
+<li>T193 exposes <code>settings.encryption.*</code> JSON-RPC methods plus the SkeinAdmin Encryption panel. <code>data/encryption.json</code> now persists per-database mode/active-key metadata plus the redacted encryption audit ring across restart, but master key bytes are still accepted as base64 and never persisted; operators re-register keys after restart.</li>
+<li>Current engine boundary: normal table reads/writes are not yet routed through <code>EncryptedValueStore</code>, so the encryption controls remain a standalone/runtime-control baseline rather than full at-rest coverage.</li>
 </ul>
 <h2 id="2-threat-model-explicit">2. Threat model (explicit)<a class="headerlink" href="#2-threat-model-explicit" title="Permanent link">¶</a></h2>
 <p>This feature is designed primarily for:</p>
@@ -388,7 +389,8 @@ to work under prior keys until a separate GC pass collects them.</p>
 <h2 id="11-t193-settingsencryption-rpc-skeinadmin-panel">11. T193 — <code>settings.encryption.*</code> RPC + SkeinAdmin panel<a class="headerlink" href="#11-t193-settingsencryption-rpc-skeinadmin-panel" title="Permanent link">¶</a></h2>
 <p>The engine exposes the runtime key-management surface via JSON-RPC. Master key
 bytes are <strong>never persisted to disk</strong> by these methods — operators must
-re-register keys after restart.</p>
+re-register keys after restart. The non-secret control metadata (<code>mode</code>,
+<code>active_key_id</code>, recent audit events) is persisted in <code>data/encryption.json</code>.</p>
 <table>
 <thead>
 <tr>

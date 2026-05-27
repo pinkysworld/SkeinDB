@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="self-tuning-index-advisor-telemetry-driven">Self-tuning Index Advisor (Telemetry-driven)<a class="headerlink" href="#self-tuning-index-advisor-telemetry-driven" title="Permanent link">¶</a></h1>
 <p>Status: Partial implementation
-Last updated: 2026-05-17</p>
+Last updated: 2026-05-24</p>
 <p>Current runtime baseline:
 - Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
 - <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, <code>advisor.retire_unused</code>, <code>advisor.evaluate</code>, and <code>advisor.history</code> are live.
@@ -137,9 +137,10 @@ Last updated: 2026-05-17</p>
 - Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
 - <code>advisor.retire_unused</code> can dry-run or retire advisor-built secondary indexes when the latest dependency signal is absent or older than a caller-provided idle threshold; recent dependency signals block retirement.
 - <code>advisor.evaluate</code> replays phased dependency samples against a scratch advisor state and reports top-suggestion convergence after workload shifts without mutating live advisor telemetry.
+- For benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order, <code>advisor.evaluate</code> also returns measured before/after latency stats and row-scan comparisons by comparing live full scans against a hypothetical advisor-built secondary index.
 - <code>advisor.apply_index</code> now queues background in-memory secondary-index builds, returns <code>queued</code> or <code>exists</code>, and <code>advisor.history</code> records lifecycle state (<code>queued</code>, <code>building</code>, <code>completed</code>, <code>failed</code>, <code>cancelled</code>) with progress percentages plus optional result/rollback metadata.
 - SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
-- Measured before/after latency deltas for advisor-applied indexes remain open work.</p>
+- Non-grouped range+order layouts without a same-leading key still rely on observed-before / expected-after scan reports; measured latency now covers benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order.</p>
 <p>Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.</p>
 <p>Key idea:
@@ -222,7 +223,7 @@ Suggest INDEX(a,b,j,r,c).</p>
 5) Failed builds record rollback state before the suggestion can surface again
 6) Optional retirement scans can dry-run first, then drop only advisor-built indexes whose latest dependency signal is stale or absent</p>
 <p>Note:
-- The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
+- SkeinAdmin's per-suggestion "before/after" report remains workload-derived and expected-after; <code>advisor.evaluate</code> adds measured latency benchmarks only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order.
 - Progress reporting is lifecycle-level (<code>queued</code> -&gt; <code>building</code> -&gt; terminal state), not per-row physical build accounting.</p>
 <p>An optional "auto-apply" mode can exist for development environments.</p>
 <hr />
@@ -349,6 +350,30 @@ Suggest INDEX(a,b,j,r,c).</p>
 <span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;latency_benchmark&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;benchmarkable_samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;benchmark_runs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;observed_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">400</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;before_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;after_rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">18200</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">19600</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22100</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">22900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">19875.0</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2900</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3200</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4100</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4300</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4300</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">3362.5</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;speedup&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">5.91</span>
+<span class="w">      </span><span class="p">},</span>
 <span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
 <span class="w">    </span><span class="p">},</span>
@@ -365,7 +390,7 @@ Suggest INDEX(a,b,j,r,c).</p>
 <span class="p">}</span>
 </code></pre></div>
 
-<p>Each sample can supply <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero <code>rows_scanned</code> or zero <code>repeats</code>.</p>
+<p>Each sample can supply <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero <code>rows_scanned</code> or zero <code>repeats</code>. <code>latency_benchmark</code> is optional and currently appears only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order whose dependency columns cover the winning suggestion key; non-grouped range+order layouts without a same-leading key are still excluded.</p>
 <hr />
 <p>Telemetry persistence (prototype):
 - Set <code>SKEINDB_ADVISOR_PERSIST=1</code> to persist advisor patterns/history on disk.
@@ -386,7 +411,7 @@ Suggest INDEX(a,b,j,r,c).</p>
 <li>[x] IA03: Benefit estimation level 0</li>
 <li>[x] IA04: SkeinQL endpoints + SkeinAdmin UI page</li>
 <li>[x] IA05: Safe advisor-built index retirement with dry-run and stale-dependency checks</li>
-<li>[ ] IA06: Measured before/after reporting for advisor-applied indexes</li>
+<li>[x] IA06: Measured before/after reporting for benchmarkable advisor recommendations (equality + single-range + narrow order-by + narrow group-by today)</li>
 </ul>
 <hr />
 <h2 id="research-extension-automatic-index-synthesis-from-dependency-analysis">Research extension: Automatic index synthesis from dependency analysis<a class="headerlink" href="#research-extension-automatic-index-synthesis-from-dependency-analysis" title="Permanent link">¶</a></h2>

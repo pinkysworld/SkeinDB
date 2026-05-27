@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use md5::Md5;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
@@ -44,8 +45,9 @@ use skeindb_core::wasm_udf::{
 };
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
-    AdvisorEvaluateParams, AdvisorEvaluatePhaseResult, AdvisorEvaluateResult, AdvisorHistoryEntry,
-    AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams, AdvisorIndexApplyResult,
+    AdvisorEvaluateLatencyReport, AdvisorEvaluateLatencyStats, AdvisorEvaluateParams,
+    AdvisorEvaluatePhaseResult, AdvisorEvaluateResult, AdvisorHistoryEntry, AdvisorHistoryParams,
+    AdvisorHistoryResult, AdvisorIndexApplyParams, AdvisorIndexApplyResult,
     AdvisorIndexCostEstimate, AdvisorIndexDependencyCapture, AdvisorIndexDismissParams,
     AdvisorIndexDismissResult, AdvisorIndexRetireUnusedParams, AdvisorIndexRetireUnusedResult,
     AdvisorIndexRetirementEntry, AdvisorIndexSuggestion, AdvisorIndexSynthesizeParams,
@@ -57,20 +59,20 @@ use skeindb_skeinql::methods::{
     AiAutoparamLabelSchemaResult, AiAutoparamLiteral, AiAutoparamMetricsParams,
     AiAutoparamMetricsResult, AiAutoparamRules, AiNlExecuteParams, AiNlExecuteResult,
     AiNlExplainParams, AiNlExplainResult, AiNlPromptPackage, AiNlPromptTable, AiNlTranslateParams,
-    AiNlTranslateResult, ClientStateSummary, DpAggregateParams, DpAggregateResult, DpAggregateSpec,
-    DpAuditLogParams, DpAuditLogResult, DpBounds, DpBudgetGetParams, DpBudgetGetResult,
-    DpBudgetSetParams, DpEvaluateParams, DpEvaluatePoint, DpEvaluateResult, EdgeBundle,
-    EdgeBundleApplyParams, EdgeBundleApplyResult, EdgeBundleCoverage, EdgeBundleRecord,
-    EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult, EdgeBundleRoute,
-    EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams, ForensicExportResult,
-    ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams, ForensicVerifyResult,
-    MaintenanceReplayExportParams, MaintenanceReplayExportResult, MaintenanceReplayImportParams,
-    MaintenanceReplayImportResult, MaintenanceReplayRunParams, MaintenanceReplayRunResult,
-    MergeApplyParams, MergeApplyResult, MergeEvaluateCaseResult, MergeEvaluateParams,
-    MergeEvaluateResult, MergeFunctionRef, MergePolicySpec, MergeRegisterParams,
-    MergeRegisterResult, MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities,
-    MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
-    MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
+    AiNlTranslateResult, CdcPrimaryKeyRange, ClientStateSummary, DpAggregateParams,
+    DpAggregateResult, DpAggregateSpec, DpAuditLogParams, DpAuditLogResult, DpBounds,
+    DpBudgetGetParams, DpBudgetGetResult, DpBudgetSetParams, DpEvaluateParams, DpEvaluatePoint,
+    DpEvaluateResult, EdgeBundle, EdgeBundleApplyParams, EdgeBundleApplyResult, EdgeBundleCoverage,
+    EdgeBundleRecord, EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult,
+    EdgeBundleRoute, EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams,
+    ForensicExportResult, ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams,
+    ForensicVerifyResult, MaintenanceReplayExportParams, MaintenanceReplayExportResult,
+    MaintenanceReplayImportParams, MaintenanceReplayImportResult, MaintenanceReplayRunParams,
+    MaintenanceReplayRunResult, MergeApplyParams, MergeApplyResult, MergeEvaluateCaseResult,
+    MergeEvaluateParams, MergeEvaluateResult, MergeFunctionRef, MergePolicySpec,
+    MergeRegisterParams, MergeRegisterResult, MergeSimulateParams, MergeSimulateResult,
+    MergeWasmCapabilities, MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult,
+    MergeWasmModuleInfo, MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
     MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
     MigrationIntentSuggestion, MigrationReportExportParams, MigrationReportExportResult,
     MigrationRewritePreview, MigrationRewritePreviewParams, MigrationRewritePreviewResult,
@@ -99,9 +101,9 @@ use skeindb_skeinql::methods::{
     WasmPlanPerfRunStats, WasmPlanSimdExploration,
 };
 use skeindb_skeinql::types::{
-    BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
-    LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, ResultFormat, SelectBody, SelectItem,
-    TableRef, TypeDesc,
+    BaseTableRef, CaseExpr, CaseWhen, CastExpr, CausalityDependency, CausalityToken, ExistsExpr,
+    Expr, JoinRef, JoinType, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, ResultFormat,
+    SelectBody, SelectItem, TableRef, TypeDesc,
 };
 
 // -----------------------------
@@ -173,6 +175,7 @@ const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
+const ENCRYPTION_STATE_FORMAT_VERSION: u32 = 1;
 const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +220,17 @@ struct ValueRefDisk {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lit: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptionStateDisk {
+    format_version: u32,
+    #[serde(default)]
+    databases: Vec<skeindb_core::encryption::DatabaseEncryptionProfile>,
+    #[serde(default)]
+    audit: Vec<EncryptionAuditEntry>,
+    #[serde(default)]
+    next_audit_id: u64,
 }
 
 #[derive(Debug)]
@@ -488,6 +502,10 @@ pub struct ChangeEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pk: Option<Vec<Lit>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<RowObject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<RowObject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
@@ -604,7 +622,8 @@ const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 2;
 const SCHEMA_FLAGS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
-const CHANGE_LOG_FORMAT_VERSION: u32 = 1;
+const CHANGE_LOG_FORMAT_VERSION: u32 = 2;
+const CDC_SUBSCRIPTIONS_FORMAT_VERSION: u32 = 8;
 const REPLAY_BUNDLE_FORMAT_VERSION: u32 = 1;
 const REPLAY_PERFORMANCE_FORMAT_V1: &str = "skein.replay.performance.v1";
 const REPLAY_WORKSPACES_DIR: &str = ".replay_workspaces";
@@ -744,6 +763,7 @@ struct MergePolicyDisk {
 const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
 const MERGE_EVALUATE_FORMAT_V1: &str = "skein.merge.evaluate.v1";
 const ADVISOR_EVALUATE_FORMAT_V1: &str = "skein.advisor.evaluate.v1";
+const ADVISOR_EVALUATE_BENCHMARK_ITERATIONS: u64 = 8;
 const SCHEMA_SIMULATE_ROLLOUT_FORMAT_V1: &str = "skein.schema.simulate_rollout.v1";
 const VIEW_EVALUATE_FORMAT_V1: &str = "skein.view.evaluate.v1";
 
@@ -1367,8 +1387,10 @@ pub struct DbUser {
     pub grants: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CdcPollResult {
+    #[serde(skip)]
+    pub format: CdcEventFormat,
     pub events: Vec<ChangeEvent>,
     pub next_offset: u64,
     pub earliest_offset: u64,
@@ -1378,6 +1400,45 @@ pub struct CdcPollResult {
     pub resnapshot_from_offset: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resnapshot_reason: Option<String>,
+    #[serde(default)]
+    pub backpressure: CdcBackpressureStatus,
+}
+
+impl Serialize for CdcPollResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut len = 6;
+        if self.resnapshot_from_offset.is_some() {
+            len += 1;
+        }
+        if self.resnapshot_reason.is_some() {
+            len += 1;
+        }
+        let mut state = serializer.serialize_struct("CdcPollResult", len)?;
+        let events = self
+            .events
+            .iter()
+            .map(|event| CdcDeliveryEvent {
+                event,
+                format: self.format,
+            })
+            .collect::<Vec<_>>();
+        state.serialize_field("events", &events)?;
+        state.serialize_field("next_offset", &self.next_offset)?;
+        state.serialize_field("earliest_offset", &self.earliest_offset)?;
+        state.serialize_field("latest_offset", &self.latest_offset)?;
+        state.serialize_field("resnapshot_required", &self.resnapshot_required)?;
+        if let Some(resnapshot_from_offset) = self.resnapshot_from_offset {
+            state.serialize_field("resnapshot_from_offset", &resnapshot_from_offset)?;
+        }
+        if let Some(resnapshot_reason) = &self.resnapshot_reason {
+            state.serialize_field("resnapshot_reason", resnapshot_reason)?;
+        }
+        state.serialize_field("backpressure", &self.backpressure)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1386,10 +1447,48 @@ pub struct CdcAckResult {
     pub acked_offset: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CdcBackpressureStatus {
+    pub state: String,
+    pub lag: u64,
+    pub remaining_until_resnapshot: u64,
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscriptionControlResult {
+    pub sub_id: String,
+    pub paused: bool,
+    pub acked_offset: u64,
+    #[serde(default)]
+    pub backpressure: CdcBackpressureStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcCloseResult {
     pub sub_id: String,
     pub closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcRuntimeStats {
+    pub active_subscriptions: u64,
+    pub table_subscriptions: u64,
+    pub query_subscriptions: u64,
+    pub total_lag: u64,
+    pub max_lag: u64,
+    pub resnapshot_subscriptions: u64,
+    pub paused_subscriptions: u64,
+    pub pressured_subscriptions: u64,
+    pub throttle_recommended_subscriptions: u64,
+    pub earliest_offset: u64,
+    pub latest_offset: u64,
+    pub retained_events: u64,
+    pub retention_limit: u64,
+    pub dropped_events_total: u64,
+    pub warn_lag: u64,
+    pub throttle_lag: u64,
+    pub min_remaining_until_resnapshot: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1420,16 +1519,182 @@ pub struct ObjectManifest {
     pub total_bytes: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Subscriptions {
     pub subs: HashMap<String, Subscription>,
     pub next_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CdcEventFormat {
+    #[default]
+    ObjectsJson,
+    PlainJson,
+}
+
+impl CdcEventFormat {
+    fn is_objects_json(&self) -> bool {
+        matches!(self, Self::ObjectsJson)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CdcSubscriptionOptions {
+    #[serde(
+        default,
+        rename = "format",
+        skip_serializing_if = "CdcEventFormat::is_objects_json"
+    )]
+    pub format: CdcEventFormat,
+    #[serde(default)]
+    pub include_before: bool,
+    #[serde(default)]
+    pub include_after: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk: Vec<Lit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk_range: Option<CdcPrimaryKeyRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+struct CdcDeliveryEvent<'a> {
+    event: &'a ChangeEvent,
+    format: CdcEventFormat,
+}
+
+impl Serialize for CdcDeliveryEvent<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let event = self.event;
+        let mut len = 5;
+        if event.pk.is_some() {
+            len += 1;
+        }
+        if event.before.is_some() {
+            len += 1;
+        }
+        if event.after.is_some() {
+            len += 1;
+        }
+        if event.query_id.is_some() {
+            len += 1;
+        }
+        if event.etag.is_some() {
+            len += 1;
+        }
+        if event.lsn.is_some() {
+            len += 1;
+        }
+
+        let mut state = serializer.serialize_struct("ChangeEvent", len)?;
+        state.serialize_field("seq", &event.seq)?;
+        state.serialize_field("db", &event.db)?;
+        state.serialize_field("table", &event.table)?;
+        state.serialize_field("op", &event.op)?;
+        if let Some(pk) = &event.pk {
+            match self.format {
+                CdcEventFormat::ObjectsJson => state.serialize_field("pk", pk)?,
+                CdcEventFormat::PlainJson => {
+                    let pk = pk.iter().map(cdc_lit_to_plain_json).collect::<Vec<_>>();
+                    state.serialize_field("pk", &pk)?;
+                }
+            }
+        }
+        if let Some(before) = &event.before {
+            match self.format {
+                CdcEventFormat::ObjectsJson => state.serialize_field("before", before)?,
+                CdcEventFormat::PlainJson => {
+                    let before = cdc_row_to_plain_json(before);
+                    state.serialize_field("before", &before)?;
+                }
+            }
+        }
+        if let Some(after) = &event.after {
+            match self.format {
+                CdcEventFormat::ObjectsJson => state.serialize_field("after", after)?,
+                CdcEventFormat::PlainJson => {
+                    let after = cdc_row_to_plain_json(after);
+                    state.serialize_field("after", &after)?;
+                }
+            }
+        }
+        if let Some(query_id) = &event.query_id {
+            state.serialize_field("query_id", query_id)?;
+        }
+        if let Some(etag) = &event.etag {
+            state.serialize_field("etag", etag)?;
+        }
+        state.serialize_field("commit_ts_ms", &event.commit_ts_ms)?;
+        if let Some(lsn) = event.lsn {
+            state.serialize_field("lsn", &lsn)?;
+        }
+        state.end()
+    }
+}
+
+pub fn cdc_event_delivery_value(
+    event: &ChangeEvent,
+    format: CdcEventFormat,
+) -> serde_json::Result<serde_json::Value> {
+    serde_json::to_value(CdcDeliveryEvent { event, format })
+}
+
+pub fn cdc_event_delivery_string(
+    event: &ChangeEvent,
+    format: CdcEventFormat,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&CdcDeliveryEvent { event, format })
+}
+
+fn cdc_row_to_plain_json(row: &RowObject) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (key, value) in row {
+        object.insert(key.clone(), cdc_lit_to_plain_json(value));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn cdc_lit_to_plain_json(lit: &Lit) -> serde_json::Value {
+    match lit {
+        Lit::Null => serde_json::Value::Null,
+        Lit::Bool { v } => serde_json::Value::Bool(*v),
+        Lit::I64 { v } => serde_json::Value::Number(serde_json::Number::from(*v)),
+        Lit::U64 { v } => serde_json::Value::Number(serde_json::Number::from(*v)),
+        Lit::F64 { v } => serde_json::Number::from_f64(*v)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Lit::Dec { v }
+        | Lit::Str { v }
+        | Lit::Uuid { v }
+        | Lit::Date { iso: v }
+        | Lit::Time { iso: v }
+        | Lit::Datetime { iso: v } => serde_json::Value::String(v.clone()),
+        Lit::Bytes { b64 } => serde_json::Value::String(b64.clone()),
+        Lit::Json { v } => v.clone(),
+        Lit::Embedding { v, .. } => serde_json::Value::Array(
+            v.iter()
+                .map(|value| {
+                    serde_json::Number::from_f64(f64::from(*value))
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect(),
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: String,
     pub acked_offset: u64,
+    pub paused: bool,
+    pub options: CdcSubscriptionOptions,
     pub target: SubscriptionTarget,
 }
 
@@ -1445,6 +1710,202 @@ pub enum SubscriptionTarget {
         args: Vec<Lit>,
         dep_tables: HashSet<String>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CdcSubscriptionsDisk {
+    format_version: u32,
+    next_id: u64,
+    subs: Vec<CdcSubscriptionDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CdcSubscriptionDisk {
+    id: String,
+    acked_offset: u64,
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    options: CdcSubscriptionOptions,
+    target: CdcSubscriptionTargetDisk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum CdcSubscriptionTargetDisk {
+    Table {
+        db: String,
+        table: String,
+    },
+    Query {
+        query_id: String,
+        query: Query,
+        args: Vec<Lit>,
+        dep_tables: Vec<String>,
+    },
+}
+
+impl From<&Subscription> for CdcSubscriptionDisk {
+    fn from(value: &Subscription) -> Self {
+        let target = match &value.target {
+            SubscriptionTarget::Table { db, table } => CdcSubscriptionTargetDisk::Table {
+                db: db.clone(),
+                table: table.clone(),
+            },
+            SubscriptionTarget::Query {
+                query_id,
+                query,
+                args,
+                dep_tables,
+            } => {
+                let mut dep_tables = dep_tables.iter().cloned().collect::<Vec<_>>();
+                dep_tables.sort();
+                CdcSubscriptionTargetDisk::Query {
+                    query_id: query_id.clone(),
+                    query: query.clone(),
+                    args: args.clone(),
+                    dep_tables,
+                }
+            }
+        };
+        Self {
+            id: value.id.clone(),
+            acked_offset: value.acked_offset,
+            paused: value.paused,
+            options: value.options.clone(),
+            target,
+        }
+    }
+}
+
+impl From<CdcSubscriptionDisk> for Subscription {
+    fn from(value: CdcSubscriptionDisk) -> Self {
+        let target = match value.target {
+            CdcSubscriptionTargetDisk::Table { db, table } => {
+                SubscriptionTarget::Table { db, table }
+            }
+            CdcSubscriptionTargetDisk::Query {
+                query_id,
+                query,
+                args,
+                dep_tables,
+            } => SubscriptionTarget::Query {
+                query_id,
+                query,
+                args,
+                dep_tables: dep_tables.into_iter().collect(),
+            },
+        };
+        Self {
+            id: value.id,
+            acked_offset: value.acked_offset,
+            paused: value.paused,
+            options: value.options,
+            target,
+        }
+    }
+}
+
+fn project_cdc_event_for_subscription(
+    event: &ChangeEvent,
+    options: &CdcSubscriptionOptions,
+) -> ChangeEvent {
+    let mut event = event.clone();
+    if !options.include_before {
+        event.before = None;
+    } else if let Some(before) = event.before.as_mut() {
+        *before = cdc_project_row_columns(before, &options.columns);
+    }
+    if !options.include_after {
+        event.after = None;
+    } else if let Some(after) = event.after.as_mut() {
+        *after = cdc_project_row_columns(after, &options.columns);
+    }
+    event
+}
+
+fn cdc_project_row_columns(row: &RowObject, columns: &[String]) -> RowObject {
+    if columns.is_empty() {
+        return row.clone();
+    }
+
+    columns
+        .iter()
+        .filter_map(|column| {
+            row.get(column)
+                .cloned()
+                .map(|value| (column.clone(), value))
+        })
+        .collect()
+}
+
+fn cdc_subscription_allows_source_op(options: &CdcSubscriptionOptions, op: &str) -> bool {
+    options.ops.is_empty()
+        || options
+            .ops
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(op))
+}
+
+fn cdc_subscription_matches_pk(options: &CdcSubscriptionOptions, pk: Option<&Vec<Lit>>) -> bool {
+    options.pk.is_empty() || pk == Some(&options.pk)
+}
+
+fn cdc_validate_pk_range(range: &CdcPrimaryKeyRange) -> anyhow::Result<()> {
+    if range.lower_bound.is_none() && range.upper_bound.is_none() {
+        anyhow::bail!("invalid_request: cdc pk_range requires at least one bound");
+    }
+    if let (Some(lower), Some(upper)) = (&range.lower_bound, &range.upper_bound) {
+        if cmp_lit(lower, upper)? == std::cmp::Ordering::Greater {
+            anyhow::bail!("invalid_request: cdc pk_range lower_bound must be <= upper_bound");
+        }
+    }
+    Ok(())
+}
+
+fn cdc_subscription_matches_pk_range(
+    options: &CdcSubscriptionOptions,
+    pk: Option<&Vec<Lit>>,
+) -> bool {
+    let Some(range) = options.pk_range.as_ref() else {
+        return true;
+    };
+    let Some(pk) = pk else {
+        return false;
+    };
+    if pk.len() != 1 {
+        return false;
+    }
+    let candidate = &pk[0];
+    let lower_ok = range
+        .lower_bound
+        .as_ref()
+        .map(|lower| {
+            cmp_lit(candidate, lower)
+                .map(|ord| ord != std::cmp::Ordering::Less)
+                .unwrap_or(false)
+        })
+        .unwrap_or(true);
+    let upper_ok = range
+        .upper_bound
+        .as_ref()
+        .map(|upper| {
+            cmp_lit(candidate, upper)
+                .map(|ord| ord != std::cmp::Ordering::Greater)
+                .unwrap_or(false)
+        })
+        .unwrap_or(true);
+    lower_ok && upper_ok
+}
+
+fn cdc_subscription_matches_columns(
+    options: &CdcSubscriptionOptions,
+    before: Option<&RowObject>,
+    after: Option<&RowObject>,
+) -> bool {
+    options.columns.is_empty()
+        || options.columns.iter().any(|column| {
+            before.and_then(|row| row.get(column)) != after.and_then(|row| row.get(column))
+        })
 }
 
 impl Engine {
@@ -1522,6 +1983,7 @@ impl Engine {
             encryption_audit_next_id: 1,
         };
 
+        engine.load_encryption_state_best_effort();
         engine.load_tables_best_effort();
         engine.rebuild_value_store_from_tables_best_effort();
         engine.load_changes_best_effort();
@@ -1620,6 +2082,95 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    pub fn cdc_runtime_stats_snapshot(&self, subs: &Subscriptions) -> CdcRuntimeStats {
+        let earliest_offset = self.current_cdc_earliest_offset();
+        let latest_offset = self.change_seq;
+        let retention_limit = self.cdc_retention_events as u64;
+        let warn_lag = cdc_backpressure_warn_lag(retention_limit);
+        let throttle_lag = cdc_backpressure_throttle_lag(retention_limit);
+        let mut table_subscriptions = 0u64;
+        let mut query_subscriptions = 0u64;
+        let mut total_lag = 0u64;
+        let mut max_lag = 0u64;
+        let mut resnapshot_subscriptions = 0u64;
+        let mut paused_subscriptions = 0u64;
+        let mut pressured_subscriptions = 0u64;
+        let mut throttle_recommended_subscriptions = 0u64;
+        let mut min_remaining_until_resnapshot = retention_limit;
+
+        for sub in subs.subs.values() {
+            match &sub.target {
+                SubscriptionTarget::Table { .. } => {
+                    table_subscriptions = table_subscriptions.saturating_add(1);
+                }
+                SubscriptionTarget::Query { .. } => {
+                    query_subscriptions = query_subscriptions.saturating_add(1);
+                }
+            }
+
+            let lag = latest_offset.saturating_sub(sub.acked_offset);
+            total_lag = total_lag.saturating_add(lag);
+            max_lag = max_lag.max(lag);
+            let backpressure = cdc_backpressure_status(
+                sub,
+                latest_offset,
+                earliest_offset,
+                retention_limit,
+                warn_lag,
+                throttle_lag,
+            );
+            min_remaining_until_resnapshot =
+                min_remaining_until_resnapshot.min(backpressure.remaining_until_resnapshot);
+            if sub.paused {
+                paused_subscriptions = paused_subscriptions.saturating_add(1);
+            }
+            match backpressure.state.as_str() {
+                "resnapshot_required" => {
+                    resnapshot_subscriptions = resnapshot_subscriptions.saturating_add(1);
+                }
+                "pressure" => {
+                    pressured_subscriptions = pressured_subscriptions.saturating_add(1);
+                }
+                "throttle" => {
+                    pressured_subscriptions = pressured_subscriptions.saturating_add(1);
+                    throttle_recommended_subscriptions =
+                        throttle_recommended_subscriptions.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        if subs.subs.is_empty() {
+            min_remaining_until_resnapshot = retention_limit;
+        }
+
+        CdcRuntimeStats {
+            active_subscriptions: subs.subs.len() as u64,
+            table_subscriptions,
+            query_subscriptions,
+            total_lag,
+            max_lag,
+            resnapshot_subscriptions,
+            paused_subscriptions,
+            pressured_subscriptions,
+            throttle_recommended_subscriptions,
+            earliest_offset,
+            latest_offset,
+            retained_events: self.changes.len() as u64,
+            retention_limit,
+            dropped_events_total: earliest_offset.saturating_sub(1),
+            warn_lag,
+            throttle_lag,
+            min_remaining_until_resnapshot,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cdc_retention_events_for_test(&mut self, retention_events: usize) {
+        self.cdc_retention_events = retention_events.max(1);
+        self.trim_retained_change_log();
+    }
+
     pub fn list_databases(&self) -> Vec<String> {
         let mut v: Vec<String> = self.catalog.databases.keys().cloned().collect();
         v.sort();
@@ -1629,6 +2180,14 @@ impl Engine {
     /// Public read-only accessor for the active row-persistence mode name (`json`, `segment`, `hybrid`).
     pub fn storage_mode_name(&self) -> &'static str {
         self.storage_mode.as_str()
+    }
+
+    pub fn maintenance_compaction_table_exists(&self, db: &str, table: &str) -> bool {
+        self.catalog
+            .databases
+            .get(db)
+            .map(|meta| meta.tables.contains_key(table))
+            .unwrap_or(false)
     }
 
     /// Acquire a lock on the ValueStore for CAS object operations.
@@ -2911,7 +3470,7 @@ impl Engine {
         let mut last_insert_id = 0u64;
         let mut affected = 0u64;
         let mut returning_rows: Vec<serde_json::Value> = Vec::new();
-        let mut change_pks: Vec<Vec<Lit>> = Vec::new();
+        let mut change_rows: Vec<(Vec<Lit>, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
         let table_key = TableKey {
@@ -2962,7 +3521,7 @@ impl Engine {
                 tdata.pk_index.insert(pk_key_s, idx);
                 secondary_index_add_row(tdata, idx, &row)?;
 
-                change_pks.push(pk);
+                change_rows.push((pk, row.clone()));
                 collect_value_store_items(&row, &mut intern_items);
                 snapshot_rows.push(row.clone());
                 affected += 1;
@@ -2996,8 +3555,15 @@ impl Engine {
             self.invalidate_hnsw_indexes_for_table(table);
         }
 
-        for pk in change_pks {
-            self.emit_change(&table.db, &table.table, "insert", Some(pk));
+        for (pk, after) in change_rows {
+            self.emit_change(
+                &table.db,
+                &table.table,
+                "insert",
+                Some(pk),
+                None,
+                Some(after),
+            );
         }
         self.persist_catalog()?;
         self.persist_table(&table.db, &table.table)?;
@@ -3041,7 +3607,7 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<WriteResult> {
         let mut affected = 0u64;
-        let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
+        let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
         let key = TableKey {
@@ -3114,7 +3680,7 @@ impl Engine {
                 affected += 1;
 
                 let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
-                change_pks.push(pk);
+                change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
                 collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
                 snapshot_rows.push(tdata.rows[idx].row.clone());
 
@@ -3145,8 +3711,15 @@ impl Engine {
             self.invalidate_hnsw_indexes_for_table(table);
         }
 
-        for pk in change_pks {
-            self.emit_change(&table.db, &table.table, "update", pk);
+        for (pk, before, after) in change_rows {
+            self.emit_change(
+                &table.db,
+                &table.table,
+                "update",
+                pk,
+                Some(before),
+                Some(after),
+            );
         }
 
         if affected > 0 {
@@ -3171,7 +3744,7 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<WriteResult> {
         let mut affected = 0u64;
-        let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
+        let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject)> = Vec::new();
         let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
@@ -3212,7 +3785,7 @@ impl Engine {
                 if let Some(ref pk) = pk {
                     snapshot_pks.push(pk.clone());
                 }
-                change_pks.push(pk);
+                change_rows.push((pk, row_before_delete));
                 if let Some(lim) = limit {
                     if affected >= lim {
                         break;
@@ -3226,8 +3799,8 @@ impl Engine {
             }
         }
 
-        for pk in change_pks {
-            self.emit_change(&table.db, &table.table, "delete", pk);
+        for (pk, before) in change_rows {
+            self.emit_change(&table.db, &table.table, "delete", pk, Some(before), None);
         }
 
         if self.apply_snapshot_deletes(table, &snapshot_pks) {
@@ -3274,11 +3847,37 @@ impl Engine {
     }
 
     pub fn query_dependency_tables(&self, query: &Query) -> anyhow::Result<Vec<String>> {
-        Ok(self
-            .dependencies_for_query(query)?
-            .into_iter()
-            .map(|dep| dep.table)
-            .collect())
+        let mut tables = Vec::new();
+        collect_tables(query, &mut tables);
+        let mut queue = tables;
+        let mut visited = HashSet::new();
+        let mut change_tables = HashSet::new();
+        while let Some((db, table)) = queue.pop() {
+            let key = format!("{db}.{table}");
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if self.get_schema(&db, &table).is_ok() {
+                change_tables.insert(key);
+                continue;
+            }
+            let view_key = TableKey {
+                db: db.clone(),
+                table: table.clone(),
+            };
+            if let Some(view) = self.views.get(&view_key) {
+                queue.extend(
+                    view.deps
+                        .iter()
+                        .map(|dep| (dep.db.clone(), dep.table.clone())),
+                );
+                continue;
+            }
+            anyhow::bail!("table not found: {db}.{table}");
+        }
+        let mut tables = change_tables.into_iter().collect::<Vec<_>>();
+        tables.sort();
+        Ok(tables)
     }
 
     pub fn create_api_token(&mut self, role: &str, label: &str, ttl_ms: u64) -> ApiToken {
@@ -3766,7 +4365,7 @@ impl Engine {
             anyhow::bail!("invalid_request: phases must not be empty");
         }
 
-        let schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let (schema, tdata) = self.get_table(&params.table)?;
         let table = TableKey {
             db: params.table.db.clone(),
             table: params.table.table.clone(),
@@ -3838,6 +4437,9 @@ impl Engine {
                 .as_ref()
                 .and_then(|suggestion| suggestion.id.as_deref())
                 .and_then(|target| advisor_top_stable_after_observation(&top_history, target));
+            let latency_benchmark = top_after.as_ref().and_then(|suggestion| {
+                advisor_evaluate_phase_latency_benchmark(schema, tdata, phase, suggestion)
+            });
 
             phases.push(AdvisorEvaluatePhaseResult {
                 label: phase
@@ -3848,6 +4450,7 @@ impl Engine {
                 top_before,
                 top_after,
                 final_top_stable_after_observation,
+                latency_benchmark,
                 top_changes,
                 distinct_top_suggestions: distinct_top_suggestions.len() as u64,
             });
@@ -4948,7 +5551,8 @@ impl Engine {
         let mut inserted = 0u64;
         let mut updated = 0u64;
         let mut embedding_ids = Vec::new();
-        let mut change_ops: Vec<(Vec<Lit>, &'static str)> = Vec::new();
+        let mut change_ops: Vec<(Vec<Lit>, &'static str, Option<RowObject>, RowObject)> =
+            Vec::new();
         let mut intern_items = Vec::new();
         let mut snapshot_rows = Vec::new();
         let mut last_insert_id = 0u64;
@@ -4986,6 +5590,7 @@ impl Engine {
                         anyhow::bail!("conflict");
                     }
                     let entry = &mut tdata.rows[idx];
+                    let before = entry.row.clone();
                     if entry.deleted {
                         entry.deleted = false;
                     }
@@ -4996,7 +5601,7 @@ impl Engine {
                     entry.schema_version = row_schema_version;
                     entry.commit_ts_ms = now_millis();
                     updated += 1;
-                    change_ops.push((row.pk.clone(), "update"));
+                    change_ops.push((row.pk.clone(), "update", Some(before), entry.row.clone()));
                     collect_value_store_items(&entry.row, &mut intern_items);
                     snapshot_rows.push(entry.row.clone());
                 } else {
@@ -5016,7 +5621,7 @@ impl Engine {
                     });
                     tdata.pk_index.insert(key, idx);
                     inserted += 1;
-                    change_ops.push((row.pk.clone(), "insert"));
+                    change_ops.push((row.pk.clone(), "insert", None, new_row.clone()));
                     collect_value_store_items(&new_row, &mut intern_items);
                     snapshot_rows.push(new_row);
                 }
@@ -5040,8 +5645,15 @@ impl Engine {
             self.persist_snapshots_best_effort();
         }
 
-        for (pk, op) in change_ops {
-            self.emit_change(&params.table.db, &params.table.table, op, Some(pk));
+        for (pk, op, before, after) in change_ops {
+            self.emit_change(
+                &params.table.db,
+                &params.table.table,
+                op,
+                Some(pk),
+                before,
+                Some(after),
+            );
         }
 
         if inserted + updated > 0 {
@@ -7762,6 +8374,8 @@ impl Engine {
                 table: event.table.clone(),
                 op: event.op.clone(),
                 pk: event.pk.clone(),
+                before: None,
+                after: None,
                 query_id: None,
                 etag: None,
                 commit_ts_ms: event.commit_ts_ms,
@@ -8081,6 +8695,7 @@ impl Engine {
         let mut conflicts = Vec::new();
         let mut etag = None;
         let mut op = None;
+        let mut change_images: Option<(Option<RowObject>, RowObject)> = None;
         let table_key = TableKey {
             db: params.table.db.clone(),
             table: params.table.table.clone(),
@@ -8196,11 +8811,13 @@ impl Engine {
                         applied = true;
                         etag = Some(row_etag(&entry.row, entry.version));
                         op = Some("insert".to_string());
+                        change_images = Some((None, entry.row.clone()));
                         collect_value_store_items(&entry.row, &mut intern_items);
                         snapshot_rows.push(entry.row.clone());
                     }
                 } else {
                     let current_etag = row_etag(&entry.row, entry.version);
+                    let before = entry.row.clone();
                     if let Some(expected) = params.expected_etag.as_deref() {
                         if expected != current_etag {
                             push_merge_conflict(&mut conflicts, &mut conflict, "write_write");
@@ -8242,6 +8859,7 @@ impl Engine {
                     applied = true;
                     etag = Some(row_etag(&entry.row, entry.version));
                     op = Some("update".to_string());
+                    change_images = Some((Some(before), entry.row.clone()));
                     collect_value_store_items(&entry.row, &mut intern_items);
                     snapshot_rows.push(entry.row.clone());
                 }
@@ -8288,6 +8906,7 @@ impl Engine {
                     applied = true;
                     etag = Some(row_etag(&merged_row, version));
                     op = Some("insert".to_string());
+                    change_images = Some((None, merged_row.clone()));
                     collect_value_store_items(&merged_row, &mut intern_items);
                     snapshot_rows.push(merged_row.clone());
                 }
@@ -8304,8 +8923,15 @@ impl Engine {
             if self.apply_snapshot_upserts(&params.table, &snapshot_rows) {
                 self.persist_snapshots_best_effort();
             }
-            if let Some(op) = op {
-                self.emit_change(&params.table.db, &params.table.table, &op, Some(params.pk));
+            if let (Some(op), Some((before, after))) = (op, change_images) {
+                self.emit_change(
+                    &params.table.db,
+                    &params.table.table,
+                    &op,
+                    Some(params.pk.clone()),
+                    before,
+                    Some(after),
+                );
             }
             self.persist_catalog()?;
             self.persist_table(&params.table.db, &params.table.table)?;
@@ -9588,28 +10214,76 @@ impl Engine {
         self.persist_forensic_best_effort();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cdc_subscribe_table(
         &self,
         subs: &mut Subscriptions,
         db: &str,
         table: &str,
     ) -> anyhow::Result<CdcSubscribeResult> {
-        // Validate table exists.
-        let _ = self.get_schema(db, table)?;
+        self.cdc_subscribe_table_with_options(subs, db, table, CdcSubscriptionOptions::default())
+    }
 
-        let id = format!("sub_{:016x}", subs.next_id);
-        subs.next_id += 1;
-        subs.subs.insert(
+    pub fn cdc_subscribe_table_with_options(
+        &self,
+        subs: &mut Subscriptions,
+        db: &str,
+        table: &str,
+        options: CdcSubscriptionOptions,
+    ) -> anyhow::Result<CdcSubscribeResult> {
+        // Validate table exists.
+        let schema = self.get_schema(db, table)?;
+        if !options.pk.is_empty() {
+            if schema.primary_key.is_empty() {
+                anyhow::bail!("invalid_request: cdc pk filter requires a table primary key");
+            }
+            if options.pk.len() != schema.primary_key.len() {
+                anyhow::bail!(
+                    "invalid_request: cdc pk filter length {} does not match primary key width {}",
+                    options.pk.len(),
+                    schema.primary_key.len()
+                );
+            }
+        }
+        if let Some(range) = options.pk_range.as_ref() {
+            if schema.primary_key.is_empty() {
+                anyhow::bail!("invalid_request: cdc pk_range filter requires a table primary key");
+            }
+            if schema.primary_key.len() != 1 {
+                anyhow::bail!(
+                    "invalid_request: cdc pk_range filter requires a single-column primary key"
+                );
+            }
+            cdc_validate_pk_range(range)?;
+        }
+        for column in &options.columns {
+            if !schema
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == *column)
+            {
+                anyhow::bail!("invalid_request: unknown cdc column filter {column}");
+            }
+        }
+
+        let mut updated = subs.clone();
+        let id = format!("sub_{:016x}", updated.next_id);
+        updated.next_id += 1;
+        updated.subs.insert(
             id.clone(),
             Subscription {
                 id: id.clone(),
                 acked_offset: self.change_seq,
+                paused: false,
+                options,
                 target: SubscriptionTarget::Table {
                     db: db.to_string(),
                     table: table.to_string(),
                 },
             },
         );
+        self.persist_cdc_subscriptions(&updated)?;
+        *subs = updated;
 
         Ok(CdcSubscribeResult {
             sub_id: id,
@@ -9617,28 +10291,49 @@ impl Engine {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cdc_subscribe_query(
         &self,
         subs: &mut Subscriptions,
         query_id: &str,
         args: &[Lit],
     ) -> anyhow::Result<CdcSubscribeResult> {
+        self.cdc_subscribe_query_with_options(
+            subs,
+            query_id,
+            args,
+            CdcSubscriptionOptions::default(),
+        )
+    }
+
+    pub fn cdc_subscribe_query_with_options(
+        &self,
+        subs: &mut Subscriptions,
+        query_id: &str,
+        args: &[Lit],
+        options: CdcSubscriptionOptions,
+    ) -> anyhow::Result<CdcSubscribeResult> {
+        if let Some(range) = options.pk_range.as_ref() {
+            cdc_validate_pk_range(range)?;
+        }
         let Some(prepared) = self.get_prepared(query_id) else {
             anyhow::bail!("not_found");
         };
         let dep_tables: HashSet<String> = self
-            .dependencies_for_query(&prepared.query)?
+            .query_dependency_tables(&prepared.query)?
             .into_iter()
-            .map(|dep| dep.table)
             .collect();
 
-        let id = format!("sub_{:016x}", subs.next_id);
-        subs.next_id += 1;
-        subs.subs.insert(
+        let mut updated = subs.clone();
+        let id = format!("sub_{:016x}", updated.next_id);
+        updated.next_id += 1;
+        updated.subs.insert(
             id.clone(),
             Subscription {
                 id: id.clone(),
                 acked_offset: self.change_seq,
+                paused: false,
+                options,
                 target: SubscriptionTarget::Query {
                     query_id: query_id.to_string(),
                     query: prepared.query,
@@ -9647,6 +10342,8 @@ impl Engine {
                 },
             },
         );
+        self.persist_cdc_subscriptions(&updated)?;
+        *subs = updated;
 
         Ok(CdcSubscribeResult {
             sub_id: id,
@@ -9669,8 +10366,20 @@ impl Engine {
         let resume_offset = from_offset.max(sub.acked_offset);
         let earliest_offset = self.current_cdc_earliest_offset();
         let latest_offset = self.change_seq;
+        let retention_limit = self.cdc_retention_events as u64;
+        let warn_lag = cdc_backpressure_warn_lag(retention_limit);
+        let throttle_lag = cdc_backpressure_throttle_lag(retention_limit);
+        let backpressure = cdc_backpressure_status(
+            sub,
+            latest_offset,
+            earliest_offset,
+            retention_limit,
+            warn_lag,
+            throttle_lag,
+        );
         if earliest_offset > 0 && resume_offset.saturating_add(1) < earliest_offset {
             return Ok(CdcPollResult {
+                format: sub.options.format,
                 events,
                 next_offset: earliest_offset.saturating_sub(1),
                 earliest_offset,
@@ -9678,17 +10387,42 @@ impl Engine {
                 resnapshot_required: true,
                 resnapshot_from_offset: Some(earliest_offset.saturating_sub(1)),
                 resnapshot_reason: Some("wal_horizon_exceeded".to_string()),
+                backpressure,
+            });
+        }
+        if sub.paused {
+            return Ok(CdcPollResult {
+                format: sub.options.format,
+                events,
+                next_offset: resume_offset,
+                earliest_offset,
+                latest_offset,
+                resnapshot_required: false,
+                resnapshot_from_offset: None,
+                resnapshot_reason: None,
+                backpressure,
             });
         }
         let mut next_offset = resume_offset;
+        let options = sub.options.clone();
         match &sub.target {
             SubscriptionTarget::Table { db, table } => {
                 for ev in self.changes.iter() {
                     if ev.seq <= resume_offset {
                         continue;
                     }
-                    if ev.db == *db && ev.table == *table {
-                        events.push(ev.clone());
+                    if ev.db == *db
+                        && ev.table == *table
+                        && cdc_subscription_allows_source_op(&options, &ev.op)
+                        && cdc_subscription_matches_pk(&options, ev.pk.as_ref())
+                        && cdc_subscription_matches_pk_range(&options, ev.pk.as_ref())
+                        && cdc_subscription_matches_columns(
+                            &options,
+                            ev.before.as_ref(),
+                            ev.after.as_ref(),
+                        )
+                    {
+                        events.push(project_cdc_event_for_subscription(ev, &options));
                         next_offset = ev.seq;
                         if events.len() as u64 >= limit {
                             break;
@@ -9700,17 +10434,30 @@ impl Engine {
                 query_id,
                 query,
                 args,
-                dep_tables,
+                dep_tables: _,
             } => {
                 let deps = self.dependencies_for_query(query)?;
                 let etag = build_query_etag(query, args, &deps);
+                let dep_tables = self
+                    .query_dependency_tables(query)?
+                    .into_iter()
+                    .collect::<HashSet<_>>();
                 for ev in self.changes.iter() {
                     if ev.seq <= resume_offset {
                         continue;
                     }
                     let changed_table = format!("{}.{}", ev.db, ev.table);
-                    if dep_tables.contains(&changed_table) {
-                        let mut invalidation = ev.clone();
+                    if dep_tables.contains(&changed_table)
+                        && cdc_subscription_allows_source_op(&options, &ev.op)
+                        && cdc_subscription_matches_pk(&options, ev.pk.as_ref())
+                        && cdc_subscription_matches_pk_range(&options, ev.pk.as_ref())
+                        && cdc_subscription_matches_columns(
+                            &options,
+                            ev.before.as_ref(),
+                            ev.after.as_ref(),
+                        )
+                    {
+                        let mut invalidation = project_cdc_event_for_subscription(ev, &options);
                         invalidation.op = "invalidate".to_string();
                         invalidation.query_id = Some(query_id.clone());
                         invalidation.etag = Some(etag.clone());
@@ -9725,6 +10472,7 @@ impl Engine {
         }
 
         Ok(CdcPollResult {
+            format: sub.options.format,
             events,
             next_offset,
             earliest_offset,
@@ -9732,6 +10480,7 @@ impl Engine {
             resnapshot_required: false,
             resnapshot_from_offset: None,
             resnapshot_reason: None,
+            backpressure,
         })
     }
 
@@ -9741,14 +10490,41 @@ impl Engine {
         sub_id: &str,
         offset: u64,
     ) -> anyhow::Result<CdcAckResult> {
-        let Some(sub) = subs.subs.get_mut(sub_id) else {
+        let Some(existing) = subs.subs.get(sub_id) else {
             anyhow::bail!("not_found");
         };
-        sub.acked_offset = sub.acked_offset.max(offset);
+        let mut updated = subs.clone();
+        let acked_offset = {
+            let sub = updated
+                .subs
+                .get_mut(sub_id)
+                .expect("subscription vanished while cloning state");
+            sub.acked_offset = sub.acked_offset.max(offset);
+            sub.acked_offset
+        };
+        self.persist_cdc_subscriptions(&updated)?;
+        let sub_id = existing.id.clone();
+        *subs = updated;
         Ok(CdcAckResult {
-            sub_id: sub.id.clone(),
-            acked_offset: sub.acked_offset,
+            sub_id,
+            acked_offset,
         })
+    }
+
+    pub fn cdc_pause(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+    ) -> anyhow::Result<CdcSubscriptionControlResult> {
+        self.cdc_set_paused(subs, sub_id, true)
+    }
+
+    pub fn cdc_resume(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+    ) -> anyhow::Result<CdcSubscriptionControlResult> {
+        self.cdc_set_paused(subs, sub_id, false)
     }
 
     pub fn cdc_close(
@@ -9756,12 +10532,62 @@ impl Engine {
         subs: &mut Subscriptions,
         sub_id: &str,
     ) -> anyhow::Result<CdcCloseResult> {
-        let Some(sub) = subs.subs.remove(sub_id) else {
+        let Some(existing) = subs.subs.get(sub_id) else {
             anyhow::bail!("not_found");
         };
+        let mut updated = subs.clone();
+        updated
+            .subs
+            .remove(sub_id)
+            .expect("subscription vanished while cloning state");
+        self.persist_cdc_subscriptions(&updated)?;
+        let sub_id = existing.id.clone();
+        *subs = updated;
         Ok(CdcCloseResult {
-            sub_id: sub.id,
+            sub_id,
             closed: true,
+        })
+    }
+
+    fn cdc_set_paused(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+        paused: bool,
+    ) -> anyhow::Result<CdcSubscriptionControlResult> {
+        let Some(existing) = subs.subs.get(sub_id) else {
+            anyhow::bail!("not_found");
+        };
+        let mut updated = subs.clone();
+        let acked_offset = {
+            let sub = updated
+                .subs
+                .get_mut(sub_id)
+                .expect("subscription vanished while cloning state");
+            sub.paused = paused;
+            sub.acked_offset
+        };
+        self.persist_cdc_subscriptions(&updated)?;
+        let snapshot_sub = updated
+            .subs
+            .get(sub_id)
+            .expect("subscription vanished while preparing control result");
+        let retention_limit = self.cdc_retention_events as u64;
+        let backpressure = cdc_backpressure_status(
+            snapshot_sub,
+            self.change_seq,
+            self.current_cdc_earliest_offset(),
+            retention_limit,
+            cdc_backpressure_warn_lag(retention_limit),
+            cdc_backpressure_throttle_lag(retention_limit),
+        );
+        let sub_id = existing.id.clone();
+        *subs = updated;
+        Ok(CdcSubscriptionControlResult {
+            sub_id,
+            paused,
+            acked_offset,
+            backpressure,
         })
     }
 
@@ -10148,6 +10974,22 @@ impl Engine {
         self.persist_table_secondary_indexes(db, table, schema, tdata)
     }
 
+    pub fn maintenance_compaction_rewrite_table(
+        &self,
+        db: &str,
+        table: &str,
+    ) -> anyhow::Result<bool> {
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+        if !self.tables.contains_key(&key) {
+            return Ok(false);
+        }
+        self.persist_table(db, table)?;
+        Ok(true)
+    }
+
     pub fn checkpoint_for_shutdown(&mut self) -> anyhow::Result<()> {
         self.persist_catalog()?;
 
@@ -10250,6 +11092,10 @@ impl Engine {
         self.data_dir.join("changes.json")
     }
 
+    fn cdc_subscriptions_path(&self) -> PathBuf {
+        self.data_dir.join("cdc_subscriptions.json")
+    }
+
     fn replay_workspaces_dir(&self) -> PathBuf {
         self.data_dir.join(REPLAY_WORKSPACES_DIR)
     }
@@ -10265,7 +11111,7 @@ impl Engine {
     fn load_changes_best_effort(&mut self) {
         let path = self.changes_path();
         let events = load_json::<ChangeLogDisk>(&path)
-            .filter(|disk| disk.format_version == CHANGE_LOG_FORMAT_VERSION)
+            .filter(|disk| (1..=CHANGE_LOG_FORMAT_VERSION).contains(&disk.format_version))
             .map(|disk| disk.events)
             .or_else(|| load_json::<Vec<ChangeEvent>>(&path))
             .unwrap_or_default();
@@ -10303,6 +11149,45 @@ impl Engine {
         })
         .map(|bytes| bytes.len() as u64)
         .unwrap_or(0)
+    }
+
+    pub(crate) fn load_cdc_subscriptions_best_effort(&self) -> Subscriptions {
+        let Some(disk) = load_json::<CdcSubscriptionsDisk>(&self.cdc_subscriptions_path())
+            .filter(|disk| (1..=CDC_SUBSCRIPTIONS_FORMAT_VERSION).contains(&disk.format_version))
+        else {
+            return Subscriptions::default();
+        };
+
+        let mut subs = HashMap::new();
+        let mut next_id = disk.next_id;
+        for sub in disk.subs {
+            next_id = next_id.max(next_subscription_id(&sub.id));
+            let sub = Subscription::from(sub);
+            subs.insert(sub.id.clone(), sub);
+        }
+        Subscriptions { subs, next_id }
+    }
+
+    fn persist_cdc_subscriptions(&self, subs: &Subscriptions) -> anyhow::Result<()> {
+        let path = self.cdc_subscriptions_path();
+        if subs.subs.is_empty() {
+            return remove_file_if_exists(&path);
+        }
+
+        let mut disk_subs = subs
+            .subs
+            .values()
+            .map(CdcSubscriptionDisk::from)
+            .collect::<Vec<_>>();
+        disk_subs.sort_by(|left, right| left.id.cmp(&right.id));
+        save_json(
+            &path,
+            &CdcSubscriptionsDisk {
+                format_version: CDC_SUBSCRIPTIONS_FORMAT_VERSION,
+                next_id: subs.next_id,
+                subs: disk_subs,
+            },
+        )
     }
 
     fn prepared_path(&self) -> PathBuf {
@@ -10922,6 +11807,10 @@ impl Engine {
         self.data_dir.join("schema_flags.json")
     }
 
+    fn encryption_state_path(&self) -> PathBuf {
+        self.data_dir.join("encryption.json")
+    }
+
     fn load_schema_versions_best_effort(&mut self) {
         let mut versions = HashMap::new();
         if let Some(disk) = load_json::<SchemaVersionsDisk>(&self.schema_versions_path()) {
@@ -11100,6 +11989,37 @@ impl Engine {
         );
     }
 
+    fn load_encryption_state_best_effort(&mut self) {
+        let Some(disk) = load_json::<EncryptionStateDisk>(&self.encryption_state_path()) else {
+            self.key_manager.load_profiles(Vec::new());
+            self.encryption_audit.clear();
+            self.encryption_audit_next_id = 1;
+            return;
+        };
+        if disk.format_version != ENCRYPTION_STATE_FORMAT_VERSION {
+            self.key_manager.load_profiles(Vec::new());
+            self.encryption_audit.clear();
+            self.encryption_audit_next_id = 1;
+            return;
+        }
+
+        self.key_manager.load_profiles(disk.databases);
+        self.encryption_audit = disk.audit;
+        self.encryption_audit_next_id = disk.next_audit_id.max(1);
+    }
+
+    fn persist_encryption_state_best_effort(&self) {
+        let _ = save_json(
+            &self.encryption_state_path(),
+            &EncryptionStateDisk {
+                format_version: ENCRYPTION_STATE_FORMAT_VERSION,
+                databases: self.key_manager.profiles(),
+                audit: self.encryption_audit.clone(),
+                next_audit_id: self.encryption_audit_next_id,
+            },
+        );
+    }
+
     fn column_is_interned(&self, key: &TableKey, column: &str) -> bool {
         self.schema_flags
             .get(key)
@@ -11143,7 +12063,15 @@ impl Engine {
         }
     }
 
-    fn emit_change(&mut self, db: &str, table: &str, op: &str, pk: Option<Vec<Lit>>) {
+    fn emit_change(
+        &mut self,
+        db: &str,
+        table: &str,
+        op: &str,
+        pk: Option<Vec<Lit>>,
+        before: Option<RowObject>,
+        after: Option<RowObject>,
+    ) {
         self.change_seq += 1;
         let pk_for_forensic = pk.clone();
         self.changes.push(ChangeEvent {
@@ -11152,6 +12080,8 @@ impl Engine {
             table: table.to_string(),
             op: op.to_string(),
             pk,
+            before,
+            after,
             query_id: None,
             etag: None,
             commit_ts_ms: now_millis(),
@@ -11572,6 +12502,29 @@ impl Engine {
     //
     // Master key bytes are NEVER persisted to disk by the engine to avoid
     // accidentally checking key material into the data directory. Operators
+
+    #[cfg(test)]
+    pub(crate) fn testing_set_snapshot_cost_model(&self, row_scan: f64, snapshot_scan: f64) {
+        if let Ok(mut manager) = self.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = row_scan;
+            manager.cost_model.snapshot_scan_cost_per_cell = snapshot_scan;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing_snapshot_hit_count(&self, db: &str, table: &str) -> Option<u64> {
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+        self.snapshots
+            .lock()
+            .ok()?
+            .snapshots
+            .get(&key)
+            .and_then(|list| list.first())
+            .map(|snapshot| snapshot.stats.hits)
+    }
     // re-register keys after restart via `settings.encryption.register_key`.
     // --------------------------------------------------------------
 
@@ -11677,6 +12630,7 @@ impl Engine {
             Some(mode.as_str()),
             None,
         );
+        self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionSetModeResult {
             ok: true,
             db: params.db,
@@ -11726,6 +12680,7 @@ impl Engine {
             None,
             Some("master key bytes redacted"),
         );
+        self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionRegisterKeyResult {
             ok: true,
             db: params.db,
@@ -11752,6 +12707,7 @@ impl Engine {
             None,
             None,
         );
+        self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionSetActiveKeyResult {
             ok: true,
             db: params.db,
@@ -11778,6 +12734,7 @@ impl Engine {
             Some(plan.mode.as_str()),
             None,
         );
+        self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionRotateKeyResult {
             ok: true,
             db: params.db,
@@ -13417,15 +14374,12 @@ fn execute_select(
         distinct,
         projection,
         from,
-        r#where,
-        group_by,
-        having,
         ..
     } = select.as_ref();
 
-    if group_by.is_some() || having.is_some() {
-        anyhow::bail!("group_by/having not implemented in this prototype");
-    }
+    let group_by_dedup = select_group_by_dedup_compatible(select);
+    let effective_predicate = select_effective_predicate(select)?;
+    let dedup_output = distinct.unwrap_or(false) || group_by_dedup;
 
     let from = from.clone().unwrap_or_default();
     if from.is_empty() {
@@ -13450,9 +14404,9 @@ fn execute_select(
                 engine,
                 query,
                 base,
-                distinct.unwrap_or(false),
+                dedup_output,
                 projection,
-                r#where.as_ref(),
+                effective_predicate.as_ref(),
                 args,
                 as_of_ms,
             )? {
@@ -13474,7 +14428,7 @@ fn execute_select(
     if from.len() == 1 {
         if let TableRef::Base(base) = &from[0] {
             if let Some(candidates) =
-                index_prefilter_candidates(engine, base, r#where.as_ref(), args)
+                index_prefilter_candidates(engine, base, effective_predicate.as_ref(), args)
             {
                 let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
                 let (schema, tdata) = engine.get_table(base)?;
@@ -13511,7 +14465,7 @@ fn execute_select(
     }
 
     // Apply WHERE.
-    if let Some(pred) = r#where {
+    if let Some(pred) = effective_predicate.as_ref() {
         let mut filtered = Vec::new();
         for ctx in ctxs.iter() {
             if eval_predicate(pred, &BTreeMap::new(), Some(ctx), args)? {
@@ -13546,7 +14500,7 @@ fn execute_select(
         rows = items.into_iter().map(|(_, row)| row).collect();
     }
 
-    if distinct.unwrap_or(false) {
+    if dedup_output {
         rows = dedup_select_rows(rows);
     }
 
@@ -13582,6 +14536,257 @@ fn dedup_select_rows(rows: Vec<Vec<Lit>>) -> Vec<Vec<Lit>> {
         }
     }
     out
+}
+
+fn select_group_by_and_expr(left: Expr, right: Expr) -> Expr {
+    Expr::Op {
+        op: "and".to_string(),
+        a: Some(Box::new(left)),
+        b: Some(Box::new(right)),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }
+}
+
+fn normalize_single_table_group_by_col(
+    expr: &Expr,
+    table_name: &str,
+    table_alias: &str,
+) -> Option<String> {
+    let Expr::Col { col, table } = expr else {
+        return None;
+    };
+    if col == "*" {
+        return None;
+    }
+    if let Some(table) = table.as_deref() {
+        if !table.eq_ignore_ascii_case(table_name) && !table.eq_ignore_ascii_case(table_alias) {
+            return None;
+        }
+    }
+    Some(col.to_ascii_lowercase())
+}
+
+fn select_group_by_dedup_compatible(select: &SelectBody) -> bool {
+    let Some(group_by) = select.group_by.as_ref() else {
+        return false;
+    };
+    let Some(from) = select.from.as_ref() else {
+        return false;
+    };
+    if select.projection.is_empty() || group_by.is_empty() || from.len() != 1 {
+        return false;
+    }
+    let TableRef::Base(base) = &from[0] else {
+        return false;
+    };
+
+    let table_alias = base.r#as.as_deref().unwrap_or(base.table.as_str());
+    let mut grouped_cols = HashSet::new();
+    for expr in group_by {
+        let Some(col) = normalize_single_table_group_by_col(expr, &base.table, table_alias) else {
+            return false;
+        };
+        grouped_cols.insert(col);
+    }
+    let mut projected_grouped_cols = HashSet::new();
+    if !select.projection.iter().all(|item| {
+        normalize_single_table_group_by_col(&item.expr, &base.table, table_alias)
+            .map(|col| {
+                projected_grouped_cols.insert(col);
+                true
+            })
+            .unwrap_or(false)
+    }) {
+        return false;
+    }
+
+    grouped_cols.is_subset(&projected_grouped_cols)
+}
+
+fn select_group_by_dedup_projection_matches_col(
+    projection: &[SelectItem],
+    col: &str,
+    table: Option<&str>,
+) -> bool {
+    projection.iter().any(|item| {
+        if let Some(alias) = item.r#as.as_ref() {
+            if table.is_none() && col.eq_ignore_ascii_case(alias) {
+                return true;
+            }
+        }
+
+        let Expr::Col {
+            col: projection_col,
+            table: projection_table,
+        } = &item.expr
+        else {
+            return false;
+        };
+
+        if !col.eq_ignore_ascii_case(projection_col) {
+            return false;
+        }
+
+        match (table, projection_table.as_deref()) {
+            (Some(table), Some(projection_table)) => table.eq_ignore_ascii_case(projection_table),
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    })
+}
+
+fn rewrite_group_by_dedup_having_expr(
+    expr: &Expr,
+    projection: &[SelectItem],
+) -> anyhow::Result<Expr> {
+    match expr {
+        Expr::Lit { .. } | Expr::Param { .. } => Ok(expr.clone()),
+        Expr::Col { col, table: None } => {
+            if let Some(rewritten) = projection.iter().find_map(|item| {
+                item.r#as
+                    .as_ref()
+                    .and_then(|alias| col.eq_ignore_ascii_case(alias).then(|| item.expr.clone()))
+            }) {
+                return Ok(rewritten);
+            }
+            if select_group_by_dedup_projection_matches_col(projection, col, None) {
+                return Ok(expr.clone());
+            }
+            anyhow::bail!(
+                "GROUP BY compatibility HAVING supports only grouped projected columns or aliases"
+            );
+        }
+        Expr::Col {
+            col,
+            table: Some(table),
+        } => {
+            if select_group_by_dedup_projection_matches_col(projection, col, Some(table)) {
+                Ok(expr.clone())
+            } else {
+                anyhow::bail!(
+                    "GROUP BY compatibility HAVING supports only grouped projected columns or aliases"
+                )
+            }
+        }
+        Expr::Op {
+            op,
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+        } => Ok(Expr::Op {
+            op: op.clone(),
+            a: a.as_ref()
+                .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                .transpose()?
+                .map(Box::new),
+            b: b.as_ref()
+                .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                .transpose()?
+                .map(Box::new),
+            args: args
+                .as_ref()
+                .map(|args| {
+                    args.iter()
+                        .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .transpose()?,
+            list: list
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .transpose()?,
+            lo: lo
+                .as_ref()
+                .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                .transpose()?
+                .map(Box::new),
+            hi: hi
+                .as_ref()
+                .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expr::Func {
+            name,
+            args,
+            distinct,
+        } => {
+            if matches!(name.as_str(), "count" | "sum" | "min" | "max" | "avg") {
+                anyhow::bail!(
+                    "GROUP BY compatibility HAVING does not support aggregate functions in this path"
+                );
+            }
+            Ok(Expr::Func {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                distinct: *distinct,
+            })
+        }
+        Expr::Cast { cast } => Ok(Expr::Cast {
+            cast: CastExpr {
+                expr: Box::new(rewrite_group_by_dedup_having_expr(
+                    cast.expr.as_ref(),
+                    projection,
+                )?),
+                to: cast.to.clone(),
+            },
+        }),
+        Expr::Case { case_ } => Ok(Expr::Case {
+            case_: CaseExpr {
+                when: case_
+                    .when
+                    .iter()
+                    .map(|branch| {
+                        Ok(CaseWhen {
+                            r#if: rewrite_group_by_dedup_having_expr(&branch.r#if, projection)?,
+                            then: rewrite_group_by_dedup_having_expr(&branch.then, projection)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                r#else: case_
+                    .r#else
+                    .as_ref()
+                    .map(|expr| rewrite_group_by_dedup_having_expr(expr, projection))
+                    .transpose()?
+                    .map(Box::new),
+            },
+        }),
+        Expr::Subquery { .. } | Expr::Exists { .. } => {
+            anyhow::bail!("GROUP BY compatibility HAVING does not support subqueries in this path")
+        }
+    }
+}
+
+fn select_effective_predicate(select: &SelectBody) -> anyhow::Result<Option<Expr>> {
+    let where_expr = select.r#where.clone();
+    if select.group_by.is_none() && select.having.is_none() {
+        return Ok(where_expr);
+    }
+    if !select_group_by_dedup_compatible(select) {
+        anyhow::bail!("group_by/having not implemented in this prototype");
+    }
+    let Some(having_expr) = select.having.as_ref() else {
+        return Ok(where_expr);
+    };
+    let rewritten_having = rewrite_group_by_dedup_having_expr(having_expr, &select.projection)?;
+    Ok(Some(match where_expr {
+        Some(existing) => select_group_by_and_expr(existing, rewritten_having),
+        None => rewritten_having,
+    }))
 }
 
 fn execute_select_with_keys(
@@ -13860,9 +15065,7 @@ fn choose_snapshot_optimizer_plan(
     let QueryBody::Select { select } = query.body.as_ref() else {
         return None;
     };
-    if select.distinct.unwrap_or(false) || select.group_by.is_some() || select.having.is_some() {
-        return None;
-    }
+    let effective_predicate = select_effective_predicate(select).ok()?;
 
     let from = select.from.as_ref()?;
     if from.len() != 1 {
@@ -13902,9 +15105,9 @@ fn choose_snapshot_optimizer_plan(
         }
     }
 
-    if index_prefilter_candidates(engine, base, select.r#where.as_ref(), args).is_some() {
-        return None;
-    }
+    let index_prefilter_candidate_count =
+        index_prefilter_candidates(engine, base, effective_predicate.as_ref(), args)
+            .map(|candidates| candidates.len() as u64);
 
     let estimated_rows = tdata
         .rows
@@ -13925,8 +15128,16 @@ fn choose_snapshot_optimizer_plan(
 
     let manager = engine.snapshots.lock().ok()?;
     let selection = manager.snapshot_candidate_for_query(&key, &required, schema.table_version)?;
-    let (estimated_row_scan_cost, estimated_snapshot_scan_cost) =
+    let (estimated_full_row_scan_cost, estimated_snapshot_scan_cost) =
         manager.estimate_query_scan_costs(estimated_rows, schema.columns.len(), snapshot_scan_cols);
+    let estimated_row_scan_cost = if let Some(candidate_count) = index_prefilter_candidate_count {
+        let indexed_row_scan_cost = manager.cost_model.row_scan_cost_per_cell
+            * (schema.columns.len() as f64)
+            * (candidate_count as f64);
+        estimated_full_row_scan_cost.min(indexed_row_scan_cost)
+    } else {
+        estimated_full_row_scan_cost
+    };
     if estimated_snapshot_scan_cost >= estimated_row_scan_cost {
         return None;
     }
@@ -13973,16 +15184,18 @@ fn try_execute_select_snapshot(
         return Ok(None);
     };
     let SelectBody {
+        distinct,
         projection,
-        r#where,
         ..
     } = select.as_ref();
+    let effective_predicate = select_effective_predicate(select)?;
+    let dedup_output = distinct.unwrap_or(false) || select_group_by_dedup_compatible(select);
 
     let Some(scan) = snapshot_scan_for_query(engine, query, args, info, as_of_ms, false) else {
         return Ok(None);
     };
     let predicate_plan =
-        compile_interned_predicate_for_base(engine, &info.base, r#where.as_ref(), args);
+        compile_interned_predicate_for_base(engine, &info.base, effective_predicate.as_ref(), args);
 
     let order = &query.order_by;
     let materialized_ctx_columns = if predicate_plan.is_some() {
@@ -13995,7 +15208,7 @@ fn try_execute_select_snapshot(
     let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
     for row_idx in 0..scan.row_count {
         let mut ctx = None;
-        if let Some(pred) = r#where.as_ref() {
+        if let Some(pred) = effective_predicate.as_ref() {
             if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
                 compiled_interned_predicate_matches_lookup(plan, &mut |column| {
                     snapshot_scan_value(&scan, row_idx, column)
@@ -14034,6 +15247,10 @@ fn try_execute_select_snapshot(
     if !order.is_empty() {
         items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
         rows = items.into_iter().map(|(_, row)| row).collect();
+    }
+
+    if dedup_output {
+        rows = dedup_select_rows(rows);
     }
 
     // LIMIT/OFFSET
@@ -15772,6 +16989,8 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "export_set"
                     | "quote"
                     | "substring_index"
+                    | "split_part"
+                    | "starts_with"
                     | "ascii"
                     | "ord"
                     | "char"
@@ -17899,6 +19118,65 @@ fn eval_expr(
                         parts[parts.len() - n..].join(&delim)
                     };
                     Ok(Lit::Str { v: result })
+                }
+                "split_part" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("split_part requires 3 args");
+                    }
+                    let input = eval_expr(&fargs[0], row, ctx, args)?;
+                    let delim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let field = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(input_str) = lit_to_string_for_like(&input) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(delim_str) = lit_to_string_for_like(&delim) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(field) = lit_to_i64(&field) else {
+                        return Ok(Lit::Null);
+                    };
+                    if field == 0 {
+                        anyhow::bail!("split_part field position must not be zero");
+                    }
+                    if delim_str.is_empty() {
+                        return Ok(Lit::Str {
+                            v: if field == 1 || field == -1 {
+                                input_str
+                            } else {
+                                String::new()
+                            },
+                        });
+                    }
+                    let parts: Vec<&str> = input_str.split(&delim_str).collect();
+                    let value = if field > 0 {
+                        parts.get((field - 1) as usize).copied().unwrap_or_default()
+                    } else {
+                        let idx_from_end = (-field) as usize;
+                        if idx_from_end > parts.len() {
+                            ""
+                        } else {
+                            parts[parts.len() - idx_from_end]
+                        }
+                    };
+                    Ok(Lit::Str {
+                        v: value.to_string(),
+                    })
+                }
+                "starts_with" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("starts_with requires 2 args");
+                    }
+                    let input = eval_expr(&fargs[0], row, ctx, args)?;
+                    let prefix = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(input_str) = lit_to_string_for_like(&input) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(prefix_str) = lit_to_string_for_like(&prefix) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Bool {
+                        v: input_str.starts_with(&prefix_str),
+                    })
                 }
                 "ascii" => {
                     if fargs.len() != 1 {
@@ -27403,6 +28681,764 @@ fn advisor_top_stable_after_observation(
     None
 }
 
+#[derive(Clone)]
+struct AdvisorBenchmarkPredicate {
+    equality_filters: HashMap<String, Lit>,
+    range_filters: Vec<AdvisorBenchmarkRangeFilter>,
+    order_by_columns: Vec<String>,
+    group_by_columns: Vec<String>,
+}
+
+#[derive(Clone)]
+struct AdvisorBenchmarkRangeFilter {
+    column: String,
+    lower_bound: Lit,
+}
+
+fn advisor_evaluate_phase_latency_benchmark(
+    schema: &TableSchema,
+    tdata: &TableData,
+    phase: &skeindb_skeinql::methods::AdvisorEvaluatePhase,
+    suggestion: &AdvisorIndexSuggestion,
+) -> Option<AdvisorEvaluateLatencyReport> {
+    if suggestion.columns.is_empty() {
+        return None;
+    }
+
+    let live_rows = tdata.rows.iter().filter(|entry| !entry.deleted).count() as u64;
+    if live_rows == 0 {
+        return None;
+    }
+
+    let benchmark_cases = phase
+        .samples
+        .iter()
+        .filter_map(|sample| {
+            let predicate = advisor_evaluate_sample_benchmark_filters(tdata, sample, suggestion)?;
+            Some((predicate, sample.rows_scanned.unwrap_or(live_rows)))
+        })
+        .collect::<Vec<_>>();
+    if benchmark_cases.is_empty() {
+        return None;
+    }
+
+    let index = build_secondary_index(
+        schema.table_version,
+        &suggestion.columns,
+        &suggestion.include,
+        &tdata.rows,
+    );
+
+    let mut before_latencies = Vec::new();
+    let mut after_latencies = Vec::new();
+    let mut total_observed_rows = 0u64;
+    let mut total_after_rows = 0u64;
+
+    for (filters, observed_rows) in benchmark_cases.iter() {
+        total_observed_rows = total_observed_rows.saturating_add(*observed_rows);
+        if !filters.group_by_columns.is_empty() {
+            let (before_groups, _) = advisor_full_scan_grouped_keys(tdata, filters);
+            if filters.range_filters.is_empty() && filters.order_by_columns.is_empty() {
+                let (after_groups, after_rows_scanned) =
+                    advisor_secondary_index_grouped_keys(tdata, &index, filters);
+                if before_groups != after_groups {
+                    return None;
+                }
+                total_after_rows = total_after_rows.saturating_add(after_rows_scanned as u64);
+
+                for _ in 0..ADVISOR_EVALUATE_BENCHMARK_ITERATIONS {
+                    let start = Instant::now();
+                    let _ = advisor_full_scan_grouped_keys(tdata, filters);
+                    before_latencies.push(elapsed_ns(start));
+
+                    let start = Instant::now();
+                    let _ = advisor_secondary_index_grouped_keys(tdata, &index, filters);
+                    after_latencies.push(elapsed_ns(start));
+                }
+            } else {
+                let (after_groups, after_rows_scanned) =
+                    advisor_secondary_index_mixed_grouped_keys(tdata, &index, filters);
+                if before_groups != after_groups {
+                    return None;
+                }
+                total_after_rows = total_after_rows.saturating_add(after_rows_scanned as u64);
+
+                for _ in 0..ADVISOR_EVALUATE_BENCHMARK_ITERATIONS {
+                    let start = Instant::now();
+                    let _ = advisor_full_scan_grouped_keys(tdata, filters);
+                    before_latencies.push(elapsed_ns(start));
+
+                    let start = Instant::now();
+                    let _ = advisor_secondary_index_mixed_grouped_keys(tdata, &index, filters);
+                    after_latencies.push(elapsed_ns(start));
+                }
+            }
+        } else if filters.order_by_columns.is_empty() {
+            let candidate_rows = advisor_secondary_index_candidate_rows(&index, filters);
+            let before_matches = advisor_full_scan_match_count(tdata, filters);
+            let after_matches = advisor_index_match_count(tdata, filters, &candidate_rows);
+            if before_matches != after_matches {
+                return None;
+            }
+            total_after_rows = total_after_rows.saturating_add(candidate_rows.len() as u64);
+
+            for _ in 0..ADVISOR_EVALUATE_BENCHMARK_ITERATIONS {
+                let start = Instant::now();
+                let _ = advisor_full_scan_match_count(tdata, filters);
+                before_latencies.push(elapsed_ns(start));
+
+                let start = Instant::now();
+                let _ = advisor_index_match_count(tdata, filters, &candidate_rows);
+                after_latencies.push(elapsed_ns(start));
+            }
+        } else {
+            let before_rows = advisor_full_scan_ordered_row_ids(tdata, filters);
+            let after_rows = advisor_secondary_index_ordered_row_ids(tdata, &index, filters);
+            if before_rows != after_rows {
+                return None;
+            }
+            total_after_rows = total_after_rows.saturating_add(after_rows.len() as u64);
+
+            for _ in 0..ADVISOR_EVALUATE_BENCHMARK_ITERATIONS {
+                let start = Instant::now();
+                let _ = advisor_full_scan_ordered_row_ids(tdata, filters);
+                before_latencies.push(elapsed_ns(start));
+
+                let start = Instant::now();
+                let _ = advisor_secondary_index_ordered_row_ids(tdata, &index, filters);
+                after_latencies.push(elapsed_ns(start));
+            }
+        }
+    }
+
+    let case_count = benchmark_cases.len() as u64;
+    let before = advisor_evaluate_latency_stats(before_latencies);
+    let after = advisor_evaluate_latency_stats(after_latencies);
+    let speedup = (after.mean_ns > 0.0).then_some(before.mean_ns / after.mean_ns);
+
+    Some(AdvisorEvaluateLatencyReport {
+        benchmarkable_samples: case_count,
+        benchmark_runs: case_count.saturating_mul(ADVISOR_EVALUATE_BENCHMARK_ITERATIONS),
+        observed_rows_scanned: total_observed_rows / case_count,
+        before_rows_scanned: live_rows,
+        after_rows_scanned: total_after_rows / case_count,
+        before,
+        after,
+        speedup,
+    })
+}
+
+fn advisor_evaluate_sample_benchmark_filters(
+    tdata: &TableData,
+    sample: &skeindb_skeinql::methods::AdvisorEvaluateSample,
+    suggestion: &AdvisorIndexSuggestion,
+) -> Option<AdvisorBenchmarkPredicate> {
+    let first_range_column = sample.range_columns.first();
+    let range_order_same_leading_column = first_range_column.as_ref().is_some_and(|range_column| {
+        !sample.order_by_columns.is_empty()
+            && sample.order_by_columns[0].eq_ignore_ascii_case(range_column)
+    });
+    if !sample.range_columns.is_empty()
+        && sample.group_by_columns.is_empty()
+        && !sample.order_by_columns.is_empty()
+        && !range_order_same_leading_column
+    {
+        return None;
+    }
+
+    if !suggestion.columns.iter().all(|column| {
+        sample
+            .equality_columns
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            || sample
+                .join_key_columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            || sample
+                .range_columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            || sample
+                .order_by_columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            || sample
+                .group_by_columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+    }) {
+        return None;
+    }
+    if !sample.order_by_columns.is_empty()
+        && !sample.order_by_columns.iter().all(|column| {
+            suggestion
+                .columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+        })
+    {
+        return None;
+    }
+    if !sample.group_by_columns.is_empty()
+        && !sample.group_by_columns.iter().all(|column| {
+            suggestion
+                .columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+        })
+    {
+        return None;
+    }
+
+    let seed_row = if sample.equality_columns.is_empty()
+        && sample.join_key_columns.is_empty()
+        && first_range_column.is_none()
+    {
+        None
+    } else {
+        Some(tdata.rows.iter().find(|entry| {
+            !entry.deleted
+                && sample
+                    .equality_columns
+                    .iter()
+                    .chain(sample.join_key_columns.iter())
+                    .chain(sample.range_columns.iter())
+                    .all(|column| entry.row.contains_key(column))
+        })?)
+    };
+
+    let mut equality_filters = HashMap::new();
+    for column in sample
+        .equality_columns
+        .iter()
+        .chain(sample.join_key_columns.iter())
+    {
+        equality_filters.insert(column.clone(), seed_row.as_ref()?.row.get(column)?.clone());
+    }
+
+    let range_filters = sample
+        .range_columns
+        .iter()
+        .map(|column| {
+            Some(AdvisorBenchmarkRangeFilter {
+                column: column.clone(),
+                lower_bound: seed_row.as_ref()?.row.get(column)?.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    if equality_filters.is_empty()
+        && range_filters.is_empty()
+        && sample.order_by_columns.is_empty()
+        && sample.group_by_columns.is_empty()
+    {
+        return None;
+    }
+
+    Some(AdvisorBenchmarkPredicate {
+        equality_filters,
+        range_filters,
+        order_by_columns: sample.order_by_columns.clone(),
+        group_by_columns: sample.group_by_columns.clone(),
+    })
+}
+
+fn advisor_row_matches_filters(row: &RowObject, filters: &AdvisorBenchmarkPredicate) -> bool {
+    filters
+        .equality_filters
+        .iter()
+        .all(|(column, value)| row.get(column).is_some_and(|candidate| candidate == value))
+        && filters.range_filters.iter().all(|range| {
+            row.get(&range.column)
+                .and_then(|candidate| cmp_lit(candidate, &range.lower_bound).ok())
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less)
+        })
+}
+
+fn advisor_full_scan_match_count(tdata: &TableData, filters: &AdvisorBenchmarkPredicate) -> u64 {
+    tdata
+        .rows
+        .iter()
+        .filter(|entry| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+        .count() as u64
+}
+
+fn advisor_index_match_count(
+    tdata: &TableData,
+    filters: &AdvisorBenchmarkPredicate,
+    candidates: &[usize],
+) -> u64 {
+    candidates
+        .iter()
+        .filter_map(|idx| tdata.rows.get(*idx))
+        .filter(|entry| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+        .count() as u64
+}
+
+fn advisor_ordered_row_cmp(
+    tdata: &TableData,
+    left_idx: usize,
+    right_idx: usize,
+    order_by_columns: &[String],
+) -> std::cmp::Ordering {
+    let Some(left_row) = tdata.rows.get(left_idx).map(|entry| &entry.row) else {
+        return left_idx.cmp(&right_idx);
+    };
+    let Some(right_row) = tdata.rows.get(right_idx).map(|entry| &entry.row) else {
+        return left_idx.cmp(&right_idx);
+    };
+
+    for column in order_by_columns.iter() {
+        let Some(left_value) = left_row.get(column) else {
+            continue;
+        };
+        let Some(right_value) = right_row.get(column) else {
+            continue;
+        };
+        let ord = cmp_lit(left_value, right_value).unwrap_or(std::cmp::Ordering::Equal);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+
+    left_idx.cmp(&right_idx)
+}
+
+fn advisor_group_key_cmp(left: &[Lit], right: &[Lit]) -> std::cmp::Ordering {
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        let ord = cmp_lit(left_value, right_value).unwrap_or(std::cmp::Ordering::Equal);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn advisor_group_key(row: &RowObject, group_by_columns: &[String]) -> Option<Vec<Lit>> {
+    group_by_columns
+        .iter()
+        .map(|column| row.get(column).cloned())
+        .collect()
+}
+
+fn advisor_full_scan_grouped_keys(
+    tdata: &TableData,
+    filters: &AdvisorBenchmarkPredicate,
+) -> (Vec<Vec<Lit>>, usize) {
+    let mut grouped_rows = tdata
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    grouped_rows.sort_by(|left, right| advisor_grouped_row_cmp(tdata, *left, *right, filters));
+
+    let mut groups = Vec::new();
+    let mut last_group = None::<Vec<Lit>>;
+    for idx in grouped_rows.iter().copied() {
+        let Some(row) = tdata.rows.get(idx).map(|entry| &entry.row) else {
+            continue;
+        };
+        let Some(group_key) = advisor_group_key(row, &filters.group_by_columns) else {
+            continue;
+        };
+        if last_group.as_ref() == Some(&group_key) {
+            continue;
+        }
+        last_group = Some(group_key.clone());
+        groups.push(group_key);
+    }
+
+    (groups, grouped_rows.len())
+}
+
+fn advisor_grouped_row_cmp(
+    tdata: &TableData,
+    left_idx: usize,
+    right_idx: usize,
+    filters: &AdvisorBenchmarkPredicate,
+) -> std::cmp::Ordering {
+    if !filters.order_by_columns.is_empty() {
+        let ord = advisor_ordered_row_cmp(tdata, left_idx, right_idx, &filters.order_by_columns);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    advisor_ordered_row_cmp(tdata, left_idx, right_idx, &filters.group_by_columns)
+}
+
+fn advisor_full_scan_ordered_row_ids(
+    tdata: &TableData,
+    filters: &AdvisorBenchmarkPredicate,
+) -> Vec<usize> {
+    let mut rows = tdata
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        advisor_ordered_row_cmp(tdata, *left, *right, &filters.order_by_columns)
+    });
+    rows
+}
+
+fn advisor_secondary_index_scan_rows(
+    tdata: &TableData,
+    index: &SecondaryIndex,
+    filters: &AdvisorBenchmarkPredicate,
+) -> (Vec<usize>, usize) {
+    if index.columns.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let range_bound = filters.range_filters.first().and_then(|range_filter| {
+        index
+            .columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(&range_filter.column))
+            .map(|position| (position, range_filter))
+    });
+
+    let mut key_rows = index
+        .keys
+        .iter()
+        .filter_map(|(key, rows)| {
+            let Ok(values) = serde_json::from_str::<Vec<Lit>>(key) else {
+                return None;
+            };
+            if values.len() != index.columns.len() {
+                return None;
+            }
+            Some((values, rows))
+        })
+        .collect::<Vec<_>>();
+    key_rows.sort_by(|(left, _), (right, _)| advisor_group_key_cmp(left, right));
+
+    let mut filtered_rows = Vec::new();
+    let mut scanned_rows = 0usize;
+    'keys: for (values, rows) in key_rows.into_iter() {
+        for (idx, column) in index.columns.iter().enumerate() {
+            let Some(expected) = filters.equality_filters.get(column) else {
+                break;
+            };
+            if values.get(idx) != Some(expected) {
+                continue 'keys;
+            }
+        }
+
+        if let Some((range_position, range_filter)) = range_bound {
+            let can_apply_bound = index.columns[..range_position]
+                .iter()
+                .all(|column| filters.equality_filters.contains_key(column));
+            if can_apply_bound {
+                let Some(candidate_value) = values.get(range_position) else {
+                    continue;
+                };
+                let matches_range = cmp_lit(candidate_value, &range_filter.lower_bound)
+                    .map(|ord| ord != std::cmp::Ordering::Less)
+                    .unwrap_or(false);
+                if !matches_range {
+                    continue;
+                }
+            }
+        }
+
+        scanned_rows = scanned_rows.saturating_add(rows.len());
+        filtered_rows.extend(rows.iter().copied().filter(|idx| {
+            tdata.rows.get(*idx).is_some_and(|entry| {
+                !entry.deleted && advisor_row_matches_filters(&entry.row, filters)
+            })
+        }));
+    }
+
+    (filtered_rows, scanned_rows)
+}
+
+fn advisor_secondary_index_mixed_grouped_keys(
+    tdata: &TableData,
+    index: &SecondaryIndex,
+    filters: &AdvisorBenchmarkPredicate,
+) -> (Vec<Vec<Lit>>, usize) {
+    let (mut grouped_rows, scanned_rows) = advisor_secondary_index_scan_rows(tdata, index, filters);
+    grouped_rows.sort_by(|left, right| advisor_grouped_row_cmp(tdata, *left, *right, filters));
+
+    let mut groups = Vec::new();
+    let mut last_group = None::<Vec<Lit>>;
+    for idx in grouped_rows.into_iter() {
+        let Some(row) = tdata.rows.get(idx).map(|entry| &entry.row) else {
+            continue;
+        };
+        let Some(group_key) = advisor_group_key(row, &filters.group_by_columns) else {
+            continue;
+        };
+        if last_group.as_ref() == Some(&group_key) {
+            continue;
+        }
+        last_group = Some(group_key.clone());
+        groups.push(group_key);
+    }
+
+    (groups, scanned_rows)
+}
+
+fn advisor_secondary_index_ordered_row_ids(
+    tdata: &TableData,
+    index: &SecondaryIndex,
+    filters: &AdvisorBenchmarkPredicate,
+) -> Vec<usize> {
+    if index.columns.is_empty() || filters.order_by_columns.is_empty() {
+        return Vec::new();
+    }
+
+    let equality_prefix_len = filters.equality_filters.len();
+    if index.columns.len() < equality_prefix_len + filters.order_by_columns.len() {
+        return Vec::new();
+    }
+    if index.columns[..equality_prefix_len]
+        .iter()
+        .any(|column| !filters.equality_filters.contains_key(column))
+    {
+        return Vec::new();
+    }
+    if index.columns[equality_prefix_len..equality_prefix_len + filters.order_by_columns.len()]
+        .iter()
+        .zip(filters.order_by_columns.iter())
+        .any(|(candidate, expected)| !candidate.eq_ignore_ascii_case(expected))
+    {
+        return Vec::new();
+    }
+
+    let mut ordered_keys = index
+        .keys
+        .values()
+        .filter_map(|rows| {
+            let first_row = rows
+                .first()
+                .and_then(|idx| tdata.rows.get(*idx))
+                .filter(|entry| !entry.deleted)?;
+            let prefix_matches = index.columns[..equality_prefix_len].iter().all(|column| {
+                filters
+                    .equality_filters
+                    .get(column)
+                    .is_some_and(|expected| first_row.row.get(column) == Some(expected))
+            });
+            if !prefix_matches {
+                return None;
+            }
+            Some(rows.clone())
+        })
+        .collect::<Vec<_>>();
+
+    ordered_keys.sort_by(|left_rows, right_rows| {
+        let left_idx = left_rows.first().copied().unwrap_or_default();
+        let right_idx = right_rows.first().copied().unwrap_or_default();
+        advisor_ordered_row_cmp(tdata, left_idx, right_idx, &filters.order_by_columns)
+    });
+
+    let mut rows = Vec::new();
+    for candidates in ordered_keys.into_iter() {
+        rows.extend(candidates.into_iter());
+    }
+    rows.retain(|idx| {
+        tdata
+            .rows
+            .get(*idx)
+            .is_some_and(|entry| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+    });
+    rows
+}
+
+fn advisor_secondary_index_grouped_keys(
+    tdata: &TableData,
+    index: &SecondaryIndex,
+    filters: &AdvisorBenchmarkPredicate,
+) -> (Vec<Vec<Lit>>, usize) {
+    if index.columns.is_empty() || filters.group_by_columns.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let equality_prefix_len = filters.equality_filters.len();
+    if index.columns.len() != equality_prefix_len + filters.group_by_columns.len() {
+        return (Vec::new(), 0);
+    }
+    if index.columns[..equality_prefix_len]
+        .iter()
+        .any(|column| !filters.equality_filters.contains_key(column))
+    {
+        return (Vec::new(), 0);
+    }
+    if index.columns[equality_prefix_len..]
+        .iter()
+        .zip(filters.group_by_columns.iter())
+        .any(|(candidate, expected)| !candidate.eq_ignore_ascii_case(expected))
+    {
+        return (Vec::new(), 0);
+    }
+
+    let mut groups = index
+        .keys
+        .values()
+        .filter_map(|rows| {
+            let first_row = rows
+                .first()
+                .and_then(|idx| tdata.rows.get(*idx))
+                .filter(|entry| !entry.deleted)?;
+            let prefix_matches = index.columns[..equality_prefix_len].iter().all(|column| {
+                filters
+                    .equality_filters
+                    .get(column)
+                    .is_some_and(|expected| first_row.row.get(column) == Some(expected))
+            });
+            if !prefix_matches {
+                return None;
+            }
+            let matching_rows = rows
+                .iter()
+                .filter_map(|idx| tdata.rows.get(*idx))
+                .filter(|entry| !entry.deleted && advisor_row_matches_filters(&entry.row, filters))
+                .count();
+            if matching_rows == 0 {
+                return None;
+            }
+            let group_key = advisor_group_key(&first_row.row, &filters.group_by_columns)?;
+            Some((group_key, matching_rows))
+        })
+        .collect::<Vec<_>>();
+
+    groups.sort_by(|(left_group, _), (right_group, _)| {
+        advisor_group_key_cmp(left_group, right_group)
+    });
+
+    let mut grouped_keys = Vec::new();
+    let mut last_group = None::<Vec<Lit>>;
+    let mut row_count = 0usize;
+    for (group_key, matching_rows) in groups.into_iter() {
+        row_count = row_count.saturating_add(matching_rows);
+        if last_group.as_ref() == Some(&group_key) {
+            continue;
+        }
+        last_group = Some(group_key.clone());
+        grouped_keys.push(group_key);
+    }
+
+    (grouped_keys, row_count)
+}
+
+fn advisor_secondary_index_candidate_rows(
+    index: &SecondaryIndex,
+    filters: &AdvisorBenchmarkPredicate,
+) -> Vec<usize> {
+    if index.columns.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(range_filter) = filters.range_filters.first() else {
+        if !index
+            .columns
+            .iter()
+            .all(|column| filters.equality_filters.contains_key(column))
+        {
+            return Vec::new();
+        }
+
+        let mut values = Vec::with_capacity(index.columns.len());
+        for column in index.columns.iter() {
+            let Some(value) = filters.equality_filters.get(column) else {
+                return Vec::new();
+            };
+            values.push(value.clone());
+        }
+        return index
+            .keys
+            .get(&secondary_index_value_key(&values))
+            .cloned()
+            .unwrap_or_default();
+    };
+
+    let Some(range_position) = index
+        .columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case(&range_filter.column))
+    else {
+        return Vec::new();
+    };
+    if index.columns[..range_position]
+        .iter()
+        .any(|column| !filters.equality_filters.contains_key(column))
+    {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for (key, rows) in index.keys.iter() {
+        let Ok(values) = serde_json::from_str::<Vec<Lit>>(key) else {
+            continue;
+        };
+        if values.len() != index.columns.len() {
+            continue;
+        }
+
+        let prefix_matches =
+            index.columns[..range_position]
+                .iter()
+                .enumerate()
+                .all(|(idx, column)| {
+                    filters
+                        .equality_filters
+                        .get(column)
+                        .is_some_and(|expected| values.get(idx) == Some(expected))
+                });
+        if !prefix_matches {
+            continue;
+        }
+
+        let Some(candidate_value) = values.get(range_position) else {
+            continue;
+        };
+        let matches_range = cmp_lit(candidate_value, &range_filter.lower_bound)
+            .map(|ord| ord != std::cmp::Ordering::Less)
+            .unwrap_or(false);
+        if matches_range {
+            candidates.extend(rows.iter().copied());
+        }
+    }
+    candidates
+}
+
+fn advisor_evaluate_latency_stats(mut latencies: Vec<u64>) -> AdvisorEvaluateLatencyStats {
+    if latencies.is_empty() {
+        return AdvisorEvaluateLatencyStats {
+            min_ns: 0,
+            p50_ns: 0,
+            p95_ns: 0,
+            p99_ns: 0,
+            max_ns: 0,
+            mean_ns: 0.0,
+        };
+    }
+
+    latencies.sort_unstable();
+    let len = latencies.len();
+    let percentile = |pct: usize| -> u64 {
+        let idx = ((len * pct).div_ceil(100)).saturating_sub(1).min(len - 1);
+        latencies[idx]
+    };
+    let sum: u128 = latencies.iter().map(|value| *value as u128).sum();
+
+    AdvisorEvaluateLatencyStats {
+        min_ns: latencies[0],
+        p50_ns: percentile(50),
+        p95_ns: percentile(95),
+        p99_ns: percentile(99),
+        max_ns: latencies[len - 1],
+        mean_ns: sum as f64 / len as f64,
+    }
+}
+
 fn is_active_advisor_apply(entry: &AdvisorHistoryEntry) -> bool {
     entry.action == "apply" && !matches!(entry.status.as_deref(), Some("failed" | "cancelled"))
 }
@@ -27817,9 +29853,7 @@ fn query_snapshot_info(query: &Query) -> Option<QuerySnapshotInfo> {
     let QueryBody::Select { select } = query.body.as_ref() else {
         return None;
     };
-    if select.group_by.is_some() || select.having.is_some() {
-        return None;
-    }
+    let effective_predicate = select_effective_predicate(select).ok()?;
     let from = select.from.as_ref()?;
     if from.len() != 1 {
         return None;
@@ -27834,7 +29868,7 @@ fn query_snapshot_info(query: &Query) -> Option<QuerySnapshotInfo> {
     for item in select.projection.iter() {
         collect_expr_cols(&item.expr, &mut refs, &mut has_subquery);
     }
-    if let Some(pred) = select.r#where.as_ref() {
+    if let Some(pred) = effective_predicate.as_ref() {
         collect_expr_cols(pred, &mut refs, &mut has_subquery);
     }
     for ob in query.order_by.iter() {
@@ -30847,26 +32881,62 @@ fn collect_index_eq_filters(
 // -----------------------------
 
 fn collect_tables(query: &Query, out: &mut Vec<(String, String)>) {
-    match query.body.as_ref() {
+    collect_tables_query(query, &HashSet::new(), out);
+}
+
+fn collect_tables_query(
+    query: &Query,
+    inherited_ctes: &HashSet<String>,
+    out: &mut Vec<(String, String)>,
+) {
+    let mut local_ctes = inherited_ctes.clone();
+    for cte in query.with.iter() {
+        local_ctes.insert(cte.name.to_ascii_lowercase());
+    }
+    for cte in query.with.iter() {
+        collect_tables_query(&cte.query, &local_ctes, out);
+    }
+    collect_tables_body_excluding_ctes(query.body.as_ref(), &local_ctes, out);
+}
+
+fn collect_tables_body_excluding_ctes(
+    body: &QueryBody,
+    cte_names: &HashSet<String>,
+    out: &mut Vec<(String, String)>,
+) {
+    match body {
         QueryBody::Select { select } => {
-            if let Some(from) = &select.from {
+            if let Some(from) = select.from.as_ref() {
                 for tref in from.iter() {
-                    collect_tables_from_ref(tref, out);
+                    collect_tables_ref_excluding_ctes(tref, cte_names, out);
                 }
             }
         }
-        QueryBody::Setop { .. } => {}
+        QueryBody::Setop { setop } => {
+            collect_tables_body_excluding_ctes(&setop.left, cte_names, out);
+            collect_tables_body_excluding_ctes(&setop.right, cte_names, out);
+        }
     }
 }
 
-fn collect_tables_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
+fn collect_tables_ref_excluding_ctes(
+    tref: &TableRef,
+    cte_names: &HashSet<String>,
+    out: &mut Vec<(String, String)>,
+) {
     match tref {
-        TableRef::Base(b) => out.push((b.db.clone(), b.table.clone())),
-        TableRef::Join(j) => {
-            collect_tables_from_ref(&j.join.left, out);
-            collect_tables_from_ref(&j.join.right, out);
+        TableRef::Base(base) => {
+            if !cte_names.contains(&base.table.to_ascii_lowercase()) {
+                out.push((base.db.clone(), base.table.clone()));
+            }
         }
-        TableRef::Subquery(_) => {}
+        TableRef::Join(join) => {
+            collect_tables_ref_excluding_ctes(&join.join.left, cte_names, out);
+            collect_tables_ref_excluding_ctes(&join.join.right, cte_names, out);
+        }
+        TableRef::Subquery(sub) => {
+            collect_tables_query(&sub.subquery.query, cte_names, out);
+        }
     }
 }
 
@@ -30877,6 +32947,56 @@ fn collect_tables_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
 fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn next_subscription_id(id: &str) -> u64 {
+    u64::from_str_radix(id.trim_start_matches("sub_"), 16)
+        .map(|value| value.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn cdc_backpressure_warn_lag(retention_limit: u64) -> u64 {
+    std::cmp::max(1, retention_limit / 2)
+}
+
+fn cdc_backpressure_throttle_lag(retention_limit: u64) -> u64 {
+    let warn_lag = cdc_backpressure_warn_lag(retention_limit);
+    std::cmp::max(
+        warn_lag,
+        retention_limit.saturating_mul(3).saturating_add(3) / 4,
+    )
+}
+
+fn cdc_backpressure_status(
+    sub: &Subscription,
+    latest_offset: u64,
+    earliest_offset: u64,
+    retention_limit: u64,
+    warn_lag: u64,
+    throttle_lag: u64,
+) -> CdcBackpressureStatus {
+    let lag = latest_offset.saturating_sub(sub.acked_offset);
+    let remaining_until_resnapshot = retention_limit.saturating_sub(lag);
+    let resnapshot_required =
+        earliest_offset > 0 && sub.acked_offset.saturating_add(1) < earliest_offset;
+    let state = if resnapshot_required {
+        "resnapshot_required"
+    } else if sub.paused {
+        "paused"
+    } else if lag >= throttle_lag {
+        "throttle"
+    } else if lag >= warn_lag {
+        "pressure"
+    } else {
+        "healthy"
+    };
+
+    CdcBackpressureStatus {
+        state: state.to_string(),
+        lag,
+        remaining_until_resnapshot,
+        paused: sub.paused,
+    }
 }
 
 fn canonical_schema_column_name<'a>(schema: &'a TableSchema, column: &str) -> Option<&'a str> {
@@ -31692,6 +33812,571 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_optimizer_rule_supports_distinct_projection() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_distinct");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.distinct = Some(true);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("missing snapshot optimizer plan");
+        assert_eq!(plan.selection.columns, vec!["city".to_string()]);
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![
+                vec![Lit::Str {
+                    v: "Oslo".to_string(),
+                }],
+                vec![Lit::Str {
+                    v: "Tokyo".to_string(),
+                }],
+            ]
+        );
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert_eq!(hits, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_supports_projection_group_by() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_projection_group_by");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("missing snapshot optimizer plan");
+        assert_eq!(plan.selection.columns, vec!["city".to_string()]);
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![
+                vec![Lit::Str {
+                    v: "Oslo".to_string(),
+                }],
+                vec![Lit::Str {
+                    v: "Tokyo".to_string(),
+                }],
+            ]
+        );
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert_eq!(hits, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_supports_projection_group_by_having_alias() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_projection_group_by_having_alias");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.projection[0].r#as = Some("city_name".to_string());
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        select.having = Some(Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "city_name".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::Str {
+                    v: "Tokyo".to_string(),
+                },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        });
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("missing snapshot optimizer plan");
+        assert_eq!(plan.selection.columns, vec!["city".to_string()]);
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![vec![Lit::Str {
+                v: "Tokyo".to_string(),
+            }]]
+        );
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert_eq!(hits, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_supports_projection_group_by_duplicate_projection_aliases(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_projection_group_by_duplicate_projection_aliases");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.projection[1].r#as = Some("city_name".to_string());
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("missing snapshot optimizer plan");
+        assert_eq!(plan.selection.columns, vec!["city".to_string()]);
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ],
+                vec![
+                    Lit::Str {
+                        v: "Tokyo".to_string(),
+                    },
+                    Lit::Str {
+                        v: "Tokyo".to_string(),
+                    },
+                ],
+            ]
+        );
+
+        let hits = engine
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn snapshot_optimizer_rule_skips_as_of_queries() -> anyhow::Result<()> {
         let dir = temp_dir("snap_optimizer_as_of");
         let mut engine = Engine::open(&dir)?;
@@ -31807,8 +34492,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_optimizer_rule_skips_index_prefilter_queries() -> anyhow::Result<()> {
-        let dir = temp_dir("snap_optimizer_index_prefilter");
+    fn snapshot_optimizer_rule_supports_broad_index_prefilter_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_broad_index_prefilter");
         let mut engine = Engine::open(&dir)?;
         engine.create_table(
             "app",
@@ -31885,7 +34570,7 @@ mod tests {
 
         if let Ok(mut manager) = engine.snapshots.lock() {
             manager.cost_model.row_scan_cost_per_cell = 1.0;
-            manager.cost_model.snapshot_scan_cost_per_cell = 0.01;
+            manager.cost_model.snapshot_scan_cost_per_cell = 1.0;
         }
 
         let query = base_query(
@@ -31908,7 +34593,9 @@ mod tests {
             )),
         );
         let info = query_snapshot_info(&query).expect("missing snapshot info");
-        assert!(choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false).is_none());
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("snapshot plan should win over a broad index prefilter");
+        assert!(plan.estimated_snapshot_scan_cost < plan.estimated_row_scan_cost);
 
         let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows.len(), 2);
@@ -31922,14 +34609,130 @@ mod tests {
             table: "users".to_string(),
         };
         let hits = engine
-            .snapshots
-            .lock()
-            .unwrap()
-            .snapshots
-            .get(&key)
-            .unwrap()[0]
-            .stats
-            .hits;
+            .testing_snapshot_hit_count(&key.db, &key.table)
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_skips_selective_index_prefilter_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_selective_index_prefilter");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_idx".to_string(),
+            vec!["city".to_string()],
+            false,
+        )?;
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.7;
+        }
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Tokyo".to_string(),
+                    },
+                },
+            )),
+        );
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        assert!(choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false).is_none());
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0][0],
+            Lit::Str {
+                v: "Tokyo".to_string()
+            }
+        );
+
+        let hits = engine
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
         assert_eq!(hits, 0);
 
         fs::remove_dir_all(&dir).ok();
@@ -33367,6 +36170,964 @@ mod tests {
     }
 
     #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_equality_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..1024_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert(
+                    "city".to_string(),
+                    Lit::Str {
+                        v: format!("city_{:02}", idx % 32),
+                    },
+                );
+                row.insert(
+                    "email".to_string(),
+                    Lit::Str {
+                        v: format!("user{idx}@example.com"),
+                    },
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("city_lookup".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: vec!["city".to_string()],
+                    range_columns: Vec::new(),
+                    order_by_columns: Vec::new(),
+                    group_by_columns: Vec::new(),
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["email".to_string()],
+                    rows_scanned: Some(1024),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert!(benchmark.before_rows_scanned > benchmark.after_rows_scanned);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.unwrap_or(0.0) >= 1.0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_single_range_workload() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("advisor_evaluate_range_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..2048_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert(
+                    "city".to_string(),
+                    Lit::Str {
+                        v: format!("city_{:02}", idx % 16),
+                    },
+                );
+                row.insert(
+                    "email".to_string(),
+                    Lit::Str {
+                        v: format!("user{:04}@example.com", idx),
+                    },
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("city_email_range".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: vec!["city".to_string()],
+                    range_columns: vec!["email".to_string()],
+                    order_by_columns: Vec::new(),
+                    group_by_columns: Vec::new(),
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["id".to_string()],
+                    rows_scanned: Some(2048),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["city".to_string(), "email".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for range workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert!(benchmark.before_rows_scanned > benchmark.after_rows_scanned);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_order_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_order_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..1024_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert("created_at".to_string(), Lit::U64 { v: 1024 - idx });
+                row.insert(
+                    "email".to_string(),
+                    Lit::Str {
+                        v: format!("user{:04}@example.com", idx),
+                    },
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("created_at_order".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: Vec::new(),
+                    range_columns: Vec::new(),
+                    order_by_columns: vec!["created_at".to_string()],
+                    group_by_columns: Vec::new(),
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["email".to_string()],
+                    rows_scanned: Some(1024),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["created_at".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for order workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 1024);
+        assert_eq!(benchmark.after_rows_scanned, 1024);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_range_order_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_range_order_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..1024_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert("created_at".to_string(), Lit::U64 { v: 1024 - idx });
+                row.insert(
+                    "email".to_string(),
+                    Lit::Str {
+                        v: format!("user{:04}@example.com", idx),
+                    },
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("created_at_range_order".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: Vec::new(),
+                    range_columns: vec!["created_at".to_string()],
+                    order_by_columns: vec!["created_at".to_string()],
+                    group_by_columns: Vec::new(),
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["email".to_string()],
+                    rows_scanned: Some(1024),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["created_at".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for range+order workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 1024);
+        assert!(benchmark.before_rows_scanned > benchmark.after_rows_scanned);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_multi_range_order_workload(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_multi_range_order_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "sequence".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut rows = Vec::new();
+        let mut next_id = 1_u64;
+        let seed = (8_u64, 12_u64);
+        let mut push_row = |created_at: u64, sequence: u64| {
+            let mut row = RowObject::new();
+            row.insert("id".to_string(), Lit::U64 { v: next_id });
+            row.insert("created_at".to_string(), Lit::U64 { v: created_at });
+            row.insert("sequence".to_string(), Lit::U64 { v: sequence });
+            row.insert(
+                "email".to_string(),
+                Lit::Str {
+                    v: format!("user{:04}@example.com", next_id),
+                },
+            );
+            next_id = next_id.saturating_add(1);
+            rows.push(row);
+        };
+        push_row(seed.0, seed.1);
+        for created_at in 0..16_u64 {
+            for sequence in 0..16_u64 {
+                if (created_at, sequence) == seed {
+                    continue;
+                }
+                push_row(created_at, sequence);
+            }
+        }
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("created_at_sequence_multi_range_order".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: Vec::new(),
+                    range_columns: vec!["created_at".to_string(), "sequence".to_string()],
+                    order_by_columns: vec!["created_at".to_string(), "sequence".to_string()],
+                    group_by_columns: Vec::new(),
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["email".to_string()],
+                    rows_scanned: Some(256),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["created_at".to_string(), "sequence".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for multi-range+order workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 256);
+        assert_eq!(benchmark.after_rows_scanned, 32);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_group_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_group_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..2048_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert("tenant_id".to_string(), Lit::U64 { v: idx % 8 });
+                row.insert(
+                    "city".to_string(),
+                    Lit::Str {
+                        v: format!("city_{:02}", idx % 32),
+                    },
+                );
+                row.insert("score".to_string(), Lit::U64 { v: idx % 100 });
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("tenant_city_group".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: vec!["tenant_id".to_string()],
+                    range_columns: Vec::new(),
+                    order_by_columns: Vec::new(),
+                    group_by_columns: vec!["city".to_string()],
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["score".to_string()],
+                    rows_scanned: Some(2048),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["tenant_id".to_string(), "city".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for group workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 2048);
+        assert!(benchmark.after_rows_scanned < benchmark.before_rows_scanned);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_multi_group_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_multi_group_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "region".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..256_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert("tenant_id".to_string(), Lit::U64 { v: idx % 4 });
+                row.insert(
+                    "region".to_string(),
+                    Lit::Str {
+                        v: format!("region_{:02}", idx % 8),
+                    },
+                );
+                row.insert(
+                    "city".to_string(),
+                    Lit::Str {
+                        v: format!("city_{:02}", idx % 16),
+                    },
+                );
+                row.insert("score".to_string(), Lit::U64 { v: idx % 100 });
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("tenant_region_city_group".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: vec!["tenant_id".to_string()],
+                    range_columns: Vec::new(),
+                    order_by_columns: Vec::new(),
+                    group_by_columns: vec!["region".to_string(), "city".to_string()],
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["score".to_string()],
+                    rows_scanned: Some(256),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec![
+                "tenant_id".to_string(),
+                "region".to_string(),
+                "city".to_string(),
+            ])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for multi-column group workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 256);
+        assert!(benchmark.after_rows_scanned < benchmark.before_rows_scanned);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_range_group_order_workload(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_range_group_order_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "region".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut rows = Vec::new();
+        let mut next_id = 1_u64;
+        let seed = (2_u64, 4_u64, "region_00", "city_00");
+        let mut push_row = |tenant_id: u64, created_at: u64, region: &str, city: &str| {
+            let mut row = RowObject::new();
+            row.insert("id".to_string(), Lit::U64 { v: next_id });
+            row.insert("tenant_id".to_string(), Lit::U64 { v: tenant_id });
+            row.insert("created_at".to_string(), Lit::U64 { v: created_at });
+            row.insert(
+                "region".to_string(),
+                Lit::Str {
+                    v: region.to_string(),
+                },
+            );
+            row.insert(
+                "city".to_string(),
+                Lit::Str {
+                    v: city.to_string(),
+                },
+            );
+            row.insert("score".to_string(), Lit::U64 { v: next_id % 100 });
+            next_id = next_id.saturating_add(1);
+            rows.push(row);
+        };
+        push_row(seed.0, seed.1, seed.2, seed.3);
+        for tenant_id in 0..4_u64 {
+            for created_at in 0..8_u64 {
+                for region in 0..4_u64 {
+                    for city in 0..4_u64 {
+                        let region_name = format!("region_{region:02}");
+                        let city_name = format!("city_{city:02}");
+                        if tenant_id == seed.0
+                            && created_at == seed.1
+                            && region_name == seed.2
+                            && city_name == seed.3
+                        {
+                            continue;
+                        }
+                        push_row(tenant_id, created_at, &region_name, &city_name);
+                    }
+                }
+            }
+        }
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("tenant_created_at_group_order".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: vec!["tenant_id".to_string()],
+                    range_columns: vec!["created_at".to_string()],
+                    order_by_columns: vec!["city".to_string()],
+                    group_by_columns: vec!["region".to_string(), "city".to_string()],
+                    join_key_columns: Vec::new(),
+                    projection_columns: vec!["score".to_string()],
+                    rows_scanned: Some(512),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec![
+                "tenant_id".to_string(),
+                "created_at".to_string(),
+                "region".to_string(),
+                "city".to_string(),
+            ])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for mixed range+group+order workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 512);
+        assert_eq!(benchmark.after_rows_scanned, 64);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_latency_benchmark_for_join_key_workload() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_join_key_latency");
+        let mut engine = Engine::open(&dir)?;
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table_ref.db,
+            &table_ref.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (0..256_u64)
+            .map(|idx| {
+                let mut row = RowObject::new();
+                row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                row.insert("tenant_id".to_string(), Lit::U64 { v: idx % 4 });
+                row.insert(
+                    "email".to_string(),
+                    Lit::Str {
+                        v: format!("user{:04}@example.com", idx + 1),
+                    },
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table_ref, rows, None)?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: table_ref,
+            phases: vec![skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                label: Some("tenant_join_key".to_string()),
+                samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                    equality_columns: Vec::new(),
+                    range_columns: Vec::new(),
+                    order_by_columns: Vec::new(),
+                    group_by_columns: Vec::new(),
+                    join_key_columns: vec!["tenant_id".to_string()],
+                    projection_columns: vec!["email".to_string()],
+                    rows_scanned: Some(256),
+                    repeats: Some(4),
+                }],
+            }],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["tenant_id".to_string()])
+        );
+        let benchmark = report.phases[0]
+            .latency_benchmark
+            .as_ref()
+            .expect("missing latency benchmark for join-key workload");
+        assert_eq!(benchmark.benchmarkable_samples, 1);
+        assert_eq!(benchmark.before_rows_scanned, 256);
+        assert_eq!(benchmark.after_rows_scanned, 64);
+        assert!(benchmark.before.mean_ns > 0.0);
+        assert!(benchmark.after.mean_ns > 0.0);
+        assert!(benchmark.speedup.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn advisor_index_apply_builds_secondary_index() -> anyhow::Result<()> {
         let dir = temp_dir("index_apply_builds");
         let mut engine = Engine::open(&dir)?;
@@ -33644,6 +37405,8 @@ mod tests {
         assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
         assert_eq!(event.db, "app");
         assert_eq!(event.table, "events");
+        assert!(event.before.is_none());
+        assert!(event.after.is_none());
 
         let select = engine.query_select(
             &query,
@@ -33659,6 +37422,1614 @@ mod tests {
         assert_eq!(event.etag.as_deref(), select.etag.as_deref());
         assert!(event.commit_ts_ms > 0);
         assert_eq!(event.lsn, Some(1));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_over_view_invalidates_on_base_table_changes() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_view");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "event_view".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "events",
+                vec![
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Col {
+                        col: "data".to_string(),
+                        table: None,
+                    },
+                ],
+                None,
+            ),
+            if_not_exists: None,
+        })?;
+
+        let query = base_query(
+            "app",
+            "event_view",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query(&mut subs, &prepared.id, &[])?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.db, "app");
+        assert_eq!(event.table, "events");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_over_view_recomputes_change_tables_for_persisted_subscriptions(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_view_legacy");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "event_view".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "events",
+                vec![
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Col {
+                        col: "data".to_string(),
+                        table: None,
+                    },
+                ],
+                None,
+            ),
+            if_not_exists: None,
+        })?;
+
+        let query = base_query(
+            "app",
+            "event_view",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query(&mut subs, &prepared.id, &[])?;
+        let sub = subs
+            .subs
+            .get_mut(&subscribe.sub_id)
+            .expect("subscription missing");
+        match &mut sub.target {
+            SubscriptionTarget::Query { dep_tables, .. } => {
+                dep_tables.clear();
+                dep_tables.insert("app.event_view".to_string());
+            }
+            SubscriptionTarget::Table { .. } => panic!("expected query subscription"),
+        }
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.db, "app");
+        assert_eq!(event.table, "events");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_over_union_query_invalidates_on_branch_table_changes(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_union");
+        let mut engine = Engine::open(&dir)?;
+        for table in ["events", "archived_events"] {
+            engine.create_table(
+                "app",
+                table,
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "data".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+        }
+
+        let left = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let right = base_query(
+            "app",
+            "archived_events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Setop {
+                setop: SetOp {
+                    kind: SetOpKind::Union,
+                    all: true,
+                    left: left.body,
+                    right: right.body,
+                },
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query(&mut subs, &prepared.id, &[])?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "archived_events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.db, "app");
+        assert_eq!(event.table, "archived_events");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_over_cte_query_invalidates_on_base_table_changes(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_cte");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let cte_query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let query = Query {
+            with: vec![Cte {
+                name: "event_rows".to_string(),
+                query: cte_query,
+            }],
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: None,
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "data".to_string(),
+                                table: None,
+                            },
+                            r#as: None,
+                        },
+                    ],
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "event_rows".to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query(&mut subs, &prepared.id, &[])?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.db, "app");
+        assert_eq!(event.table, "events");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_filters_requested_source_ops() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_ops");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query_with_options(
+            &mut subs,
+            &prepared.id,
+            &[],
+            CdcSubscriptionOptions {
+                ops: vec!["delete".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_delete(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            None,
+            &[],
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.lsn, Some(2));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_filters_requested_primary_key() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_pk");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query_with_options(
+            &mut subs,
+            &prepared.id,
+            &[],
+            CdcSubscriptionOptions {
+                pk: vec![Lit::U64 { v: 2 }],
+                ops: vec!["delete".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "two".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_delete(
+            &table,
+            &Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            },
+            None,
+            &[],
+        )?;
+        engine.data_delete(
+            &table,
+            &Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            },
+            None,
+            &[],
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.pk.as_ref(), Some(&vec![Lit::U64 { v: 2 }]));
+        assert_eq!(event.lsn, Some(4));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_filters_requested_primary_key_range() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_pk_range");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query_with_options(
+            &mut subs,
+            &prepared.id,
+            &[],
+            CdcSubscriptionOptions {
+                pk_range: Some(CdcPrimaryKeyRange {
+                    lower_bound: Some(Lit::U64 { v: 2 }),
+                    upper_bound: Some(Lit::U64 { v: 3 }),
+                }),
+                ops: vec!["delete".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "three".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "four".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        for id in [1_u64, 3, 4] {
+            engine.data_delete(
+                &table,
+                &Expr::Op {
+                    op: "eq".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::U64 { v: id },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                None,
+                &[],
+            )?;
+        }
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.pk.as_ref(), Some(&vec![Lit::U64 { v: 3 }]));
+        assert_eq!(event.lsn, Some(5));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_filters_requested_columns() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "status".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query)?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query_with_options(
+            &mut subs,
+            &prepared.id,
+            &[],
+            CdcSubscriptionOptions {
+                ops: vec!["update".to_string()],
+                columns: vec!["status".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "open".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "two".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "status",
+                Lit::Str {
+                    v: "closed".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.lsn, Some(3));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_row_images_survive_restart_when_requested() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_row_images_restart");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                format: CdcEventFormat::ObjectsJson,
+                include_before: true,
+                include_after: true,
+                pk: Vec::new(),
+                pk_range: None,
+                ops: Vec::new(),
+                columns: Vec::new(),
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "two".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+        engine.data_delete(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            None,
+            &[],
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert!(options.include_before);
+        assert!(options.include_after);
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 3);
+
+        let insert = &poll.events[0];
+        assert_eq!(insert.op, "insert");
+        assert!(insert.before.is_none());
+        match insert.after.as_ref().and_then(|row| row.get("data")) {
+            Some(Lit::Str { v }) => assert_eq!(v, "one"),
+            other => panic!("unexpected insert after image: {other:?}"),
+        }
+
+        let update = &poll.events[1];
+        assert_eq!(update.op, "update");
+        match update.before.as_ref().and_then(|row| row.get("data")) {
+            Some(Lit::Str { v }) => assert_eq!(v, "one"),
+            other => panic!("unexpected update before image: {other:?}"),
+        }
+        match update.after.as_ref().and_then(|row| row.get("data")) {
+            Some(Lit::Str { v }) => assert_eq!(v, "two"),
+            other => panic!("unexpected update after image: {other:?}"),
+        }
+
+        let delete = &poll.events[2];
+        assert_eq!(delete.op, "delete");
+        match delete.before.as_ref().and_then(|row| row.get("data")) {
+            Some(Lit::Str { v }) => assert_eq!(v, "two"),
+            other => panic!("unexpected delete before image: {other:?}"),
+        }
+        assert!(delete.after.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_table_subscription_filters_requested_ops_and_persists_them() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_table_subscription_ops");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                ops: vec!["update".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "two".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+        engine.data_delete(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            None,
+            &[],
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert_eq!(options.ops, vec!["update"]);
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        assert_eq!(poll.events[0].op, "update");
+        assert_eq!(poll.next_offset, 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_table_subscription_filters_requested_primary_key_and_persists_it() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("cdc_table_subscription_pk");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                pk: vec![Lit::U64 { v: 2 }],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "two".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "updated".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert_eq!(options.pk, vec![Lit::U64 { v: 2 }]);
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 2);
+        assert_eq!(poll.events[0].op, "insert");
+        assert_eq!(poll.events[0].pk.as_ref(), Some(&vec![Lit::U64 { v: 2 }]));
+        assert_eq!(poll.events[1].op, "update");
+        assert_eq!(poll.events[1].pk.as_ref(), Some(&vec![Lit::U64 { v: 2 }]));
+        assert_eq!(poll.next_offset, 4);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_table_subscription_filters_requested_primary_key_range_and_persists_them(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_table_subscription_pk_range");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                pk_range: Some(CdcPrimaryKeyRange {
+                    lower_bound: Some(Lit::U64 { v: 2 }),
+                    upper_bound: Some(Lit::U64 { v: 3 }),
+                }),
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "two".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "three".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "four".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "updated".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert_eq!(
+            options.pk_range,
+            Some(CdcPrimaryKeyRange {
+                lower_bound: Some(Lit::U64 { v: 2 }),
+                upper_bound: Some(Lit::U64 { v: 3 }),
+            })
+        );
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 4);
+        assert_eq!(poll.events[0].op, "insert");
+        assert_eq!(poll.events[0].pk.as_ref(), Some(&vec![Lit::U64 { v: 2 }]));
+        assert_eq!(poll.events[1].op, "insert");
+        assert_eq!(poll.events[1].pk.as_ref(), Some(&vec![Lit::U64 { v: 3 }]));
+        assert_eq!(poll.events[2].op, "update");
+        assert_eq!(poll.events[2].pk.as_ref(), Some(&vec![Lit::U64 { v: 2 }]));
+        assert_eq!(poll.events[3].op, "update");
+        assert_eq!(poll.events[3].pk.as_ref(), Some(&vec![Lit::U64 { v: 3 }]));
+        assert_eq!(poll.next_offset, 7);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_table_subscription_filters_requested_columns_and_persists_them() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_table_subscription_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                include_before: true,
+                include_after: true,
+                ops: vec!["update".to_string()],
+                columns: vec!["status".to_string()],
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "open".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "data",
+                Lit::Str {
+                    v: "two".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+        engine.data_update(
+            &table,
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[(
+                "status",
+                Lit::Str {
+                    v: "closed".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert_eq!(options.columns, vec!["status"]);
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "update");
+        assert_eq!(event.lsn, Some(3));
+        let before = event
+            .before
+            .as_ref()
+            .expect("before image should be present");
+        let after = event.after.as_ref().expect("after image should be present");
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert!(before.get("data").is_none());
+        assert!(after.get("data").is_none());
+        match before.get("status") {
+            Some(Lit::Str { v }) => assert_eq!(v, "open"),
+            other => panic!("unexpected projected before image: {other:?}"),
+        }
+        match after.get("status") {
+            Some(Lit::Str { v }) => assert_eq!(v, "closed"),
+            other => panic!("unexpected projected after image: {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_table_subscription_plain_json_format_persists_and_serializes() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_table_subscription_plain_json");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table_with_options(
+            &mut subs,
+            "app",
+            "events",
+            CdcSubscriptionOptions {
+                format: CdcEventFormat::PlainJson,
+                include_after: true,
+                ..CdcSubscriptionOptions::default()
+            },
+        )?;
+
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("cdc_subscriptions.json"))?)?;
+        assert_eq!(disk["format_version"].as_u64(), Some(8));
+        assert_eq!(
+            disk["subs"][0]["options"]["format"].as_str(),
+            Some("plain_json")
+        );
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let options = &reopened_subs
+            .subs
+            .get(&subscribe.sub_id)
+            .expect("subscription should persist")
+            .options;
+        assert_eq!(options.format, CdcEventFormat::PlainJson);
+
+        let poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        let payload = serde_json::to_value(&poll)?;
+        assert_eq!(payload["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["events"][0]["pk"][0].as_u64(), Some(1));
+        assert_eq!(payload["events"][0]["after"]["id"].as_u64(), Some(1));
+        assert_eq!(payload["events"][0]["after"]["data"].as_str(), Some("one"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -33725,6 +39096,386 @@ mod tests {
             poll.resnapshot_reason.as_deref(),
             Some("wal_horizon_exceeded")
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_durable_cursor_survives_restart() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_durable_cursor_restart");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "two".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let first_batch = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 1)?;
+        assert_eq!(first_batch.events.len(), 1);
+        assert_eq!(first_batch.events[0].seq, 1);
+        engine.cdc_ack(&mut subs, &subscribe.sub_id, first_batch.next_offset)?;
+        assert!(dir.join("cdc_subscriptions.json").exists());
+
+        let reopened = Engine::open(&dir)?;
+        let mut reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let resumed = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, 0, 10)?;
+        assert_eq!(resumed.events.len(), 1);
+        assert_eq!(resumed.events[0].seq, 2);
+
+        reopened.cdc_close(&mut reopened_subs, &subscribe.sub_id)?;
+        assert!(!dir.join("cdc_subscriptions.json").exists());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_status_persists_profiles_and_audit_across_restart() -> anyhow::Result<()> {
+        let dir = temp_dir("encryption_state_restart");
+        let mut engine = Engine::open(&dir)?;
+        let master_key_b64 =
+            BASE64_STANDARD.encode([7u8; skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN]);
+
+        engine
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64: master_key_b64.clone(),
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine
+            .settings_encryption_set_mode(
+                skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                    db: "app".to_string(),
+                    mode: "enc_mle_db".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+
+        let disk: EncryptionStateDisk = load_json(&dir.join("encryption.json"))
+            .ok_or_else(|| anyhow::anyhow!("missing encryption.json"))?;
+        assert_eq!(disk.format_version, ENCRYPTION_STATE_FORMAT_VERSION);
+        assert_eq!(disk.databases.len(), 1);
+        assert_eq!(disk.databases[0].db_id, "app");
+        assert_eq!(
+            disk.databases[0].mode.as_str(),
+            skeindb_core::encryption::EncryptionMode::EncMleDb.as_str()
+        );
+        assert_eq!(disk.databases[0].active_key_id.as_deref(), Some("k1"));
+
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        let status = reopened.settings_encryption_status(
+            skeindb_skeinql::methods::SettingsEncryptionStatusParams {
+                db: Some("app".to_string()),
+            },
+        );
+        let databases = status
+            .get("databases")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(databases.len(), 1);
+        assert_eq!(
+            databases[0].get("db").and_then(|value| value.as_str()),
+            Some("app")
+        );
+        assert_eq!(
+            databases[0].get("mode").and_then(|value| value.as_str()),
+            Some(skeindb_core::encryption::EncryptionMode::EncMleDb.as_str())
+        );
+        assert_eq!(
+            databases[0]
+                .get("active_key_id")
+                .and_then(|value| value.as_str()),
+            Some("k1")
+        );
+        assert_eq!(
+            databases[0]
+                .get("registered_key_ids")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(0)
+        );
+
+        let audit_actions = status
+            .get("recent_audit")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert!(audit_actions.iter().any(|action| action == "register_key"));
+        assert!(audit_actions.iter().any(|action| action == "set_mode"));
+
+        reopened
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: false,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        let rehydrated = reopened.settings_encryption_status(
+            skeindb_skeinql::methods::SettingsEncryptionStatusParams {
+                db: Some("app".to_string()),
+            },
+        );
+        assert_eq!(
+            rehydrated["databases"][0]["registered_key_ids"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(1)
+        );
+        assert_eq!(
+            rehydrated["databases"][0]["active_key_id"].as_str(),
+            Some("k1")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_pause_persists_and_horizon_loss_still_requires_resnapshot() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_pause_backpressure");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
+        let paused = engine.cdc_pause(&mut subs, &subscribe.sub_id)?;
+        assert!(paused.paused);
+        assert_eq!(paused.backpressure.state, "paused");
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "one".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let paused_poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert!(paused_poll.events.is_empty());
+        assert_eq!(paused_poll.next_offset, subscribe.offset);
+        assert_eq!(paused_poll.backpressure.state, "paused");
+        assert!(paused_poll.backpressure.paused);
+
+        let mut reopened = Engine::open(&dir)?;
+        reopened.set_cdc_retention_events_for_test(2);
+        let mut reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let reopened_poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, 0, 10)?;
+        assert!(reopened_poll.events.is_empty());
+        assert_eq!(reopened_poll.backpressure.state, "paused");
+        assert!(reopened_poll.backpressure.paused);
+
+        for (id, value) in [(2u64, "two"), (3u64, "three")] {
+            reopened.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: value.to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let overflow_poll = reopened.cdc_poll(&reopened_subs, &subscribe.sub_id, 0, 10)?;
+        assert!(overflow_poll.events.is_empty());
+        assert!(overflow_poll.resnapshot_required);
+        assert_eq!(overflow_poll.backpressure.state, "resnapshot_required");
+        assert!(overflow_poll.backpressure.paused);
+
+        let resumed = reopened.cdc_resume(&mut reopened_subs, &subscribe.sub_id)?;
+        assert!(!resumed.paused);
+        assert_eq!(resumed.backpressure.state, "resnapshot_required");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_runtime_stats_snapshot_reports_lag_and_retention() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_runtime_stats");
+        let mut engine = Engine::open(&dir)?;
+        engine.cdc_retention_events = 2;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
+        assert_eq!(subscribe.offset, 0);
+
+        for id in 1..=3 {
+            engine.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: format!("event-{id}"),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let stats = engine.cdc_runtime_stats_snapshot(&subs);
+        assert_eq!(stats.active_subscriptions, 1);
+        assert_eq!(stats.table_subscriptions, 1);
+        assert_eq!(stats.query_subscriptions, 0);
+        assert_eq!(stats.total_lag, 3);
+        assert_eq!(stats.max_lag, 3);
+        assert_eq!(stats.resnapshot_subscriptions, 1);
+        assert_eq!(stats.paused_subscriptions, 0);
+        assert_eq!(stats.pressured_subscriptions, 0);
+        assert_eq!(stats.throttle_recommended_subscriptions, 0);
+        assert_eq!(stats.earliest_offset, 2);
+        assert_eq!(stats.latest_offset, 3);
+        assert_eq!(stats.retained_events, 2);
+        assert_eq!(stats.retention_limit, 2);
+        assert_eq!(stats.dropped_events_total, 1);
+        assert_eq!(stats.warn_lag, 1);
+        assert_eq!(stats.throttle_lag, 2);
+        assert_eq!(stats.min_remaining_until_resnapshot, 0);
+
+        engine.cdc_pause(&mut subs, &subscribe.sub_id)?;
+        let paused_stats = engine.cdc_runtime_stats_snapshot(&subs);
+        assert_eq!(paused_stats.paused_subscriptions, 1);
+        assert_eq!(paused_stats.pressured_subscriptions, 0);
+        assert_eq!(paused_stats.throttle_recommended_subscriptions, 0);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -43909,6 +49660,8 @@ mod tests {
             table: "users".to_string(),
             op: "unsupported".to_string(),
             pk: Some(vec![Lit::U64 { v: 1 }]),
+            before: None,
+            after: None,
             query_id: None,
             etag: None,
             commit_ts_ms: now_millis(),
@@ -44525,6 +50278,108 @@ mod tests {
                 v: "{a,b,c}".to_string()
             }
         );
+    }
+
+    #[test]
+    fn eval_pg_split_part() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "split_part".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "abc~@~def~@~ghi".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "~@~".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: 2 },
+                },
+            ],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(
+            result,
+            Lit::Str {
+                v: "def".to_string()
+            }
+        );
+
+        let reverse_expr = Expr::Func {
+            name: "split_part".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "abc,def,ghi,jkl".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str { v: ",".to_string() },
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: -2 },
+                },
+            ],
+            distinct: None,
+        };
+        let reverse_result = eval_expr(&reverse_expr, &row, None, &args).unwrap();
+        assert_eq!(
+            reverse_result,
+            Lit::Str {
+                v: "ghi".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_pg_starts_with() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "starts_with".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "alphabet".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "alph".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(result, Lit::Bool { v: true });
+
+        let miss_expr = Expr::Func {
+            name: "starts_with".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "alphabet".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "beta".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        let miss_result = eval_expr(&miss_expr, &row, None, &args).unwrap();
+        assert_eq!(miss_result, Lit::Bool { v: false });
     }
 
     #[test]

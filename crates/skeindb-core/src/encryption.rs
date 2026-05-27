@@ -349,6 +349,38 @@ impl DatabaseKeyManager {
         ids
     }
 
+    /// Sorted copy of the persisted database encryption profiles.
+    pub fn profiles(&self) -> Vec<DatabaseEncryptionProfile> {
+        let mut profiles = self.profiles.values().cloned().collect::<Vec<_>>();
+        profiles.sort_by(|a, b| a.db_id.cmp(&b.db_id));
+        profiles
+    }
+
+    /// Replace the in-memory profile catalog without importing master key bytes.
+    pub fn load_profiles(&mut self, profiles: Vec<DatabaseEncryptionProfile>) {
+        self.profiles.clear();
+        for profile in profiles {
+            let db_id = profile.db_id.trim();
+            if db_id.is_empty() {
+                continue;
+            }
+            let active_key_id = profile
+                .active_key_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+            self.profiles.insert(
+                db_id.to_string(),
+                DatabaseEncryptionProfile {
+                    db_id: db_id.to_string(),
+                    mode: profile.mode,
+                    active_key_id,
+                },
+            );
+        }
+    }
+
     pub fn encrypt(
         &self,
         ctx: &EncryptionContext,

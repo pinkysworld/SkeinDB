@@ -12,6 +12,7 @@ use std::{
 };
 
 use axum::{
+    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::Path,
     extract::Query as AxumQuery,
     extract::State,
@@ -32,14 +33,14 @@ use skeindb_skeinql::{
         AiAutoparamAnalyzeParams, AiAutoparamClassifiersParams, AiAutoparamClassifyParams,
         AiAutoparamFeedbackParams, AiAutoparamLabelSchemaParams, AiAutoparamMetricsParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcAckParams, CdcCloseParams,
-        CdcPollParams, CdcSubscribeQueryParams, CdcSubscribeTableParams,
-        ClusterJoinTokenCreateParams, ClusterNodeJoinParams, ClusterNodeLeaveParams,
-        ClusterNodeRemoveParams, ClusterNodesParams, ClusterReplicaPromoteParams,
-        ClusterShardCreateParams, ClusterShardMoveParams, ClusterShardRebalanceParams,
-        DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
-        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, DpEvaluateParams,
-        EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
-        ForensicExportParams, ForensicQueryParams, ForensicVerifyParams,
+        CdcPauseParams, CdcPollParams, CdcPrimaryKeyRange, CdcResumeParams,
+        CdcSubscribeQueryParams, CdcSubscribeTableParams, ClusterJoinTokenCreateParams,
+        ClusterNodeJoinParams, ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
+        ClusterReplicaPromoteParams, ClusterShardCreateParams, ClusterShardMoveParams,
+        ClusterShardRebalanceParams, DataDeleteParams, DataGetParams, DataInsertParams,
+        DataUpdateParams, DpAggregateParams, DpAuditLogParams, DpBudgetGetParams,
+        DpBudgetSetParams, DpEvaluateParams, EdgeBundleApplyParams, EdgeBundleRequestParams,
+        EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams, ForensicVerifyParams,
         MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
         MergeApplyParams, MergeEvaluateParams, MergeRegisterParams, MergeSimulateParams,
         MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
@@ -64,7 +65,9 @@ use skeindb_skeinql::{
 };
 
 use crate::engine::{
-    CdcPollResult, ChangeEvent, ColumnSchema, Engine, ObjectManifest, Subscriptions,
+    cdc_event_delivery_string, cdc_event_delivery_value, CdcEventFormat, CdcPollResult,
+    CdcRuntimeStats, CdcSubscriptionOptions, ChangeEvent, ColumnSchema, Engine, ObjectManifest,
+    Subscriptions,
 };
 use crate::pg_wire;
 use crate::quic;
@@ -213,6 +216,7 @@ pub(crate) struct AppState {
     transport: TransportCapabilities,
     shutdown_tx: watch::Sender<bool>,
     etag_notify: Arc<tokio::sync::broadcast::Sender<String>>,
+    alert_delivery: Arc<Mutex<StatsAlertDeliveryState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +394,7 @@ struct Counters {
     query_log: VecDeque<QuerySample>,
     compaction_samples: VecDeque<CompactionTelemetrySample>,
     compaction_pressure_events: VecDeque<CompactionPressureEvent>,
+    compaction_worker: CompactionWorkerStats,
     last_compaction_state: Option<String>,
     last_compaction_sample_ms: u64,
     // Feature flag telemetry (T110)
@@ -543,6 +548,18 @@ struct CompactionPressureEvent {
     reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CompactionWorkerStats {
+    runs: u64,
+    last_run_ms: u64,
+    bytes_rewritten: u64,
+    bytes_reclaimed: u64,
+    orphan_files_removed: u64,
+    active_task: Option<String>,
+    last_completed_task: Option<String>,
+    last_error: Option<String>,
+}
+
 const QUERY_LATENCY_SAMPLE_CAPACITY: usize = 256;
 const QUERY_LOG_CAPACITY: usize = 1024;
 const COMPACTION_SAMPLE_CAPACITY: usize = 256;
@@ -559,6 +576,7 @@ const DEFAULT_COMPACTION_SAFE_MODE_CPU_PCT: f64 = 70.0;
 const DEFAULT_COMPACTION_ENERGY_IO_JOULES_PER_MIB: f64 = 0.08;
 const DEFAULT_COMPACTION_ENERGY_CPU_JOULES_PER_PCT_S: f64 = 0.035;
 const COMPACTION_SAMPLE_INTERVAL_MS: u64 = 1000;
+const COMPACTION_WORKER_INTERVAL_MS: u64 = 1000;
 
 #[derive(Default)]
 struct QueryCoalescer {
@@ -688,6 +706,7 @@ type MySqlTextRowsRef<'a> = (&'a [String], &'a [Vec<Option<String>>]);
 #[derive(Debug)]
 struct MySqlSessionState {
     default_db: Option<String>,
+    username: String,
     last_found_rows: u64,
     last_insert_id: u64,
     connection_id: u32,
@@ -724,6 +743,7 @@ impl MySqlSessionState {
     fn new(default_db: Option<String>, connection_id: u32) -> Self {
         Self {
             default_db,
+            username: String::new(),
             last_found_rows: 0,
             last_insert_id: 0,
             connection_id,
@@ -752,7 +772,7 @@ fn pg_default_settings() -> HashMap<String, String> {
     m.insert("is_superuser".into(), "on".into());
     m.insert("intervalstyle".into(), "postgres".into());
     m.insert("extra_float_digits".into(), "3".into());
-    m.insert("search_path".into(), "\"$user\", public".into());
+    m.insert("search_path".into(), PG_DEFAULT_SEARCH_PATH.into());
     m.insert("application_name".into(), String::new());
     m.insert(
         "default_transaction_isolation".into(),
@@ -807,6 +827,518 @@ fn mysql_validate_native_password(password: &str, seed: &[u8], auth_response: &[
     }
     let expected = mysql_native_password_scramble(password, seed);
     expected == auth_response
+}
+
+fn stats_alert_item(
+    code: &str,
+    severity: &str,
+    component: &str,
+    panel: &str,
+    title: String,
+    summary: String,
+    action: String,
+) -> Value {
+    serde_json::json!({
+        "code": code,
+        "severity": severity,
+        "component": component,
+        "panel": panel,
+        "title": title,
+        "summary": summary,
+        "action": action,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct StatsAlertRoute {
+    id: String,
+    min_severity: String,
+    components: Vec<String>,
+    panels: Vec<String>,
+    codes: Vec<String>,
+    targets: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct StatsAlertDeliveryState {
+    active: HashSet<String>,
+}
+
+fn stats_alert_route_string_list(obj: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+    obj.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn stats_alert_routes(settings: &serde_json::Map<String, Value>) -> Vec<StatsAlertRoute> {
+    settings
+        .get("observability.alert_routes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(idx, value)| {
+            let obj = value.as_object()?;
+            let targets = obj
+                .get("targets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return None;
+            }
+
+            let min_severity = match obj
+                .get("min_severity")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("critical") => "critical".to_string(),
+                _ => "warning".to_string(),
+            };
+
+            Some(StatsAlertRoute {
+                id: obj
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| format!("route_{}", idx + 1)),
+                min_severity,
+                components: stats_alert_route_string_list(obj, "components"),
+                panels: stats_alert_route_string_list(obj, "panels"),
+                codes: stats_alert_route_string_list(obj, "codes"),
+                targets,
+            })
+        })
+        .collect()
+}
+
+fn stats_alert_severity_rank(severity: &str) -> u8 {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "critical" => 2,
+        "warning" => 1,
+        _ => 0,
+    }
+}
+
+fn stats_alert_item_routes(item: &Value, routes: &[StatsAlertRoute]) -> Vec<Value> {
+    let severity_rank = item
+        .get("severity")
+        .and_then(Value::as_str)
+        .map(stats_alert_severity_rank)
+        .unwrap_or_default();
+    let component = item
+        .get("component")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let panel = item
+        .get("panel")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let code = item
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    routes
+        .iter()
+        .filter(|route| {
+            severity_rank >= stats_alert_severity_rank(&route.min_severity)
+                && (route.components.is_empty()
+                    || route.components.iter().any(|value| value == &component))
+                && (route.panels.is_empty() || route.panels.iter().any(|value| value == &panel))
+                && (route.codes.is_empty() || route.codes.iter().any(|value| value == &code))
+        })
+        .map(|route| {
+            serde_json::json!({
+                "id": route.id,
+                "targets": route.targets,
+            })
+        })
+        .collect()
+}
+
+fn stats_alert_delivery_key(route_id: &str, target: &str, item: &Value) -> String {
+    let payload = serde_json::json!({
+        "route_id": route_id,
+        "target": target,
+        "code": item.get("code").cloned().unwrap_or(Value::Null),
+        "severity": item.get("severity").cloned().unwrap_or(Value::Null),
+        "component": item.get("component").cloned().unwrap_or(Value::Null),
+        "panel": item.get("panel").cloned().unwrap_or(Value::Null),
+        "title": item.get("title").cloned().unwrap_or(Value::Null),
+        "summary": item.get("summary").cloned().unwrap_or(Value::Null),
+        "action": item.get("action").cloned().unwrap_or(Value::Null),
+    });
+    let mut hasher = Sha1::new();
+    hasher.update(serde_json::to_vec(&payload).unwrap_or_default());
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+async fn deliver_stats_snapshot_alerts(state: &AppState, alerts: &mut Value) {
+    let Some(items) = alerts.get_mut("items").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => Some(client),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to create alert delivery client");
+            None
+        }
+    };
+
+    let mut delivered = 0u64;
+    let mut suppressed = 0u64;
+    let mut failed = 0u64;
+    let mut unsupported = 0u64;
+    let mut seen_active = HashSet::new();
+
+    for item in items.iter_mut() {
+        let alert_payload = {
+            let mut payload = item.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.remove("routes");
+            }
+            payload
+        };
+        let Some(route_entries) = item.get_mut("routes").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        for route in route_entries.iter_mut() {
+            let route_id = route
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let targets = route
+                .get("targets")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut route_delivered = 0u64;
+            let mut route_suppressed = 0u64;
+            let mut route_failed = 0u64;
+            let mut route_unsupported = 0u64;
+
+            for target_value in targets.iter() {
+                let Some(target) = target_value.as_str() else {
+                    continue;
+                };
+                if !(target.starts_with("http://") || target.starts_with("https://")) {
+                    route_unsupported = route_unsupported.saturating_add(1);
+                    unsupported = unsupported.saturating_add(1);
+                    continue;
+                }
+
+                let delivery_key = stats_alert_delivery_key(&route_id, target, &alert_payload);
+                seen_active.insert(delivery_key.clone());
+                let should_send = {
+                    let mut delivery = state.alert_delivery.lock().unwrap();
+                    if delivery.active.contains(&delivery_key) {
+                        false
+                    } else {
+                        delivery.active.insert(delivery_key.clone());
+                        true
+                    }
+                };
+                if !should_send {
+                    route_suppressed = route_suppressed.saturating_add(1);
+                    suppressed = suppressed.saturating_add(1);
+                    continue;
+                }
+
+                let Some(client) = client.as_ref() else {
+                    let mut delivery = state.alert_delivery.lock().unwrap();
+                    delivery.active.remove(&delivery_key);
+                    route_failed = route_failed.saturating_add(1);
+                    failed = failed.saturating_add(1);
+                    continue;
+                };
+
+                let payload = serde_json::json!({
+                    "source": "skeindb.stats.snapshot",
+                    "sent_at_ms": now_unix_ms_u64(),
+                    "route": { "id": route_id },
+                    "alert": alert_payload,
+                    "server": {
+                        "rpc_url": state.local_rpc_url,
+                    }
+                });
+
+                match client.post(target).json(&payload).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        route_delivered = route_delivered.saturating_add(1);
+                        delivered = delivered.saturating_add(1);
+                    }
+                    Ok(resp) => {
+                        let mut delivery = state.alert_delivery.lock().unwrap();
+                        delivery.active.remove(&delivery_key);
+                        route_failed = route_failed.saturating_add(1);
+                        failed = failed.saturating_add(1);
+                        tracing::warn!(target = %target, status = %resp.status(), route_id = %route_id, "alert delivery failed");
+                    }
+                    Err(err) => {
+                        let mut delivery = state.alert_delivery.lock().unwrap();
+                        delivery.active.remove(&delivery_key);
+                        route_failed = route_failed.saturating_add(1);
+                        failed = failed.saturating_add(1);
+                        tracing::warn!(target = %target, error = %err, route_id = %route_id, "alert delivery transport error");
+                    }
+                }
+            }
+
+            if let Some(obj) = route.as_object_mut() {
+                obj.insert(
+                    "delivery".to_string(),
+                    serde_json::json!({
+                        "delivered": route_delivered,
+                        "suppressed": route_suppressed,
+                        "failed": route_failed,
+                        "unsupported": route_unsupported,
+                    }),
+                );
+            }
+        }
+    }
+
+    {
+        let mut delivery = state.alert_delivery.lock().unwrap();
+        delivery.active.retain(|key| seen_active.contains(key));
+    }
+
+    if let Some(routing) = alerts.get_mut("routing").and_then(Value::as_object_mut) {
+        routing.insert(
+            "delivery".to_string(),
+            serde_json::json!({
+                "delivered": delivered,
+                "suppressed": suppressed,
+                "failed": failed,
+                "unsupported": unsupported,
+            }),
+        );
+    }
+}
+
+fn stats_snapshot_alerts(
+    compaction_runtime: &CompactionRuntimeSnapshot,
+    cdc: &CdcRuntimeStats,
+    routes: &[StatsAlertRoute],
+) -> Value {
+    let mut items = Vec::new();
+    let query_p95 = percentile_u64_slice(&compaction_runtime.recent_latency_ms, 95.0);
+    let query_p99 = percentile_u64_slice(&compaction_runtime.recent_latency_ms, 99.0);
+
+    if compaction_runtime.slow_count > 0 && query_p99 >= 200 {
+        let severity = if query_p99 >= 500 || compaction_runtime.slow_count >= 5 {
+            "critical"
+        } else {
+            "warning"
+        };
+        items.push(stats_alert_item(
+            "query_tail_latency",
+            severity,
+            "query",
+            "telemetry",
+            if severity == "critical" {
+                "Query tail latency is elevated".to_string()
+            } else {
+                "Slow queries are accumulating".to_string()
+            },
+            format!(
+                "Recent query latency is p95={} ms / p99={} ms across {} sampled calls; {} sample(s) crossed the slow-query threshold.",
+                query_p95,
+                query_p99,
+                compaction_runtime.recent_sample_count,
+                compaction_runtime.slow_count,
+            ),
+            "Open Telemetry or Slow Query Log to inspect the fingerprints driving the tail."
+                .to_string(),
+        ));
+    }
+
+    if cdc.active_subscriptions > 0 {
+        if cdc.resnapshot_subscriptions > 0
+            || (cdc.max_lag > 0 && cdc.min_remaining_until_resnapshot == 0)
+        {
+            items.push(stats_alert_item(
+                "cdc_resnapshot_required",
+                "critical",
+                "cdc",
+                "cdc",
+                "CDC subscriptions need a resnapshot".to_string(),
+                format!(
+                    "{} subscription(s) already require a resnapshot; max lag is {} event(s) with {} event(s) remaining before horizon loss.",
+                    cdc.resnapshot_subscriptions,
+                    cdc.max_lag,
+                    cdc.min_remaining_until_resnapshot,
+                ),
+                "Open CDC to acknowledge or resnapshot the affected subscriptions before the retention horizon advances further."
+                    .to_string(),
+            ));
+        } else if cdc.throttle_recommended_subscriptions > 0
+            || (cdc.throttle_lag > 0 && cdc.max_lag >= cdc.throttle_lag)
+        {
+            items.push(stats_alert_item(
+                "cdc_backpressure_throttle",
+                "warning",
+                "cdc",
+                "cdc",
+                "CDC consumers are at the throttle threshold".to_string(),
+                format!(
+                    "{} subscription(s) are at or above throttle lag; max lag is {} event(s) and throttle_lag is {}.",
+                    cdc.throttle_recommended_subscriptions.max(cdc.pressured_subscriptions),
+                    cdc.max_lag,
+                    cdc.throttle_lag,
+                ),
+                "Open CDC to pause, resume, or acknowledge lagging subscriptions before they require a resnapshot."
+                    .to_string(),
+            ));
+        } else if cdc.pressured_subscriptions > 0
+            || (cdc.warn_lag > 0 && cdc.max_lag >= cdc.warn_lag)
+        {
+            items.push(stats_alert_item(
+                "cdc_backpressure_warning",
+                "warning",
+                "cdc",
+                "cdc",
+                "CDC lag is above the warning threshold".to_string(),
+                format!(
+                    "{} subscription(s) are under CDC pressure; max lag is {} event(s) and warn_lag is {}.",
+                    cdc.pressured_subscriptions.max(1),
+                    cdc.max_lag,
+                    cdc.warn_lag,
+                ),
+                "Open CDC to inspect lagging subscriptions and drain the backlog before pressure escalates."
+                    .to_string(),
+            ));
+        }
+    }
+
+    if compaction_runtime.hard_pressure || compaction_runtime.write_admission == "throttle" {
+        let reasons = if compaction_runtime.pressure_reasons.is_empty() {
+            compaction_runtime.status.clone()
+        } else {
+            compaction_runtime.pressure_reasons.join(", ")
+        };
+        items.push(stats_alert_item(
+            "compaction_safe_mode",
+            "critical",
+            "compaction",
+            "engine",
+            "Compaction safe mode is active".to_string(),
+            format!(
+                "Write admission is {}; L0 pressure is {} file(s) / {} byte(s) with reasons: {}.",
+                compaction_runtime.write_admission,
+                compaction_runtime.l0.files,
+                compaction_runtime.l0.bytes,
+                reasons,
+            ),
+            "Open Engine or Telemetry to inspect compaction pressure, then drain or compact the affected segments."
+                .to_string(),
+        ));
+    } else if compaction_runtime.soft_pressure {
+        let reasons = if compaction_runtime.pressure_reasons.is_empty() {
+            compaction_runtime.status.clone()
+        } else {
+            compaction_runtime.pressure_reasons.join(", ")
+        };
+        items.push(stats_alert_item(
+            "compaction_pressure_relief",
+            "warning",
+            "compaction",
+            "engine",
+            "Compaction pressure relief is active".to_string(),
+            format!(
+                "Scheduler mode is {}; L0 pressure is {} file(s) / {} byte(s) with reasons: {}.",
+                compaction_runtime.scheduler_mode,
+                compaction_runtime.l0.files,
+                compaction_runtime.l0.bytes,
+                reasons,
+            ),
+            "Open Engine or Telemetry to inspect pending compaction work before write pressure escalates."
+                .to_string(),
+        ));
+    }
+
+    items.sort_by_key(|item| match item.get("severity").and_then(Value::as_str) {
+        Some("critical") => 0,
+        Some("warning") => 1,
+        _ => 2,
+    });
+
+    let mut matched_routes = 0u64;
+    let mut routed_alerts = 0u64;
+    for item in items.iter_mut() {
+        let item_routes = stats_alert_item_routes(item, routes);
+        if item_routes.is_empty() {
+            continue;
+        }
+        matched_routes = matched_routes.saturating_add(item_routes.len() as u64);
+        routed_alerts = routed_alerts.saturating_add(1);
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("routes".to_string(), Value::Array(item_routes));
+        }
+    }
+
+    let critical = items
+        .iter()
+        .filter(|item| item.get("severity").and_then(Value::as_str) == Some("critical"))
+        .count() as u64;
+    let warning = items
+        .iter()
+        .filter(|item| item.get("severity").and_then(Value::as_str) == Some("warning"))
+        .count() as u64;
+    let status = if critical > 0 {
+        "critical"
+    } else if warning > 0 {
+        "warning"
+    } else {
+        "healthy"
+    };
+
+    let mut out = serde_json::json!({
+        "status": status,
+        "summary": {
+            "critical": critical,
+            "warning": warning,
+            "total": items.len() as u64,
+        },
+        "items": items,
+    });
+    if !routes.is_empty() {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "routing".to_string(),
+                serde_json::json!({
+                    "configured": routes.len() as u64,
+                    "routed_alerts": routed_alerts,
+                    "matched_routes": matched_routes,
+                }),
+            );
+        }
+    }
+    out
 }
 
 fn parse_lenenc_int(payload: &[u8], cursor: &mut usize) -> Result<usize, String> {
@@ -7746,6 +8278,7 @@ fn mysql_stmt_expr_type(
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Func { name, args, .. } => match name.as_str() {
+            "starts_with" => MySqlStmtColumnType::Bool,
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
             | "find_in_set" | "isnull" | "datediff" | "timestampdiff" | "weekday" | "dayofweek"
             | "dayofyear" | "quarter" | "extract" | "bit_length" | "octet_length" | "ascii"
@@ -7779,6 +8312,7 @@ fn mysql_stmt_expr_type(
             | "left"
             | "right"
             | "substring"
+            | "split_part"
             | "substr"
             | "replace"
             | "concat"
@@ -7893,7 +8427,7 @@ fn mysql_stmt_expr_flags(expr: &Expr, table_descs: &[MySqlStmtPrepareTableDesc])
                 | "time_to_sec" | "sec_to_time" | "isnull" | "ifnull" | "nullif" | "coalesce"
                 | "field" | "find_in_set" | "inet_aton" | "json_length" | "json_contains"
                 | "json_valid" | "sleep" | "benchmark" | "connection_id" | "last_insert_id"
-                | "found_rows" => MYSQL_COL_FLAG_NUM,
+                | "found_rows" | "starts_with" => MYSQL_COL_FLAG_NUM,
                 _ => 0,
             }
         }
@@ -10463,6 +10997,7 @@ async fn handle_mysql_connection(
 
     let username = response.username;
     let mut session = MySqlSessionState::new(response.database, connection_id);
+    session.username = username.clone();
     let mut prepared_statements = HashMap::<u32, MySqlPreparedStatement>::new();
     let mut next_statement_id = 1u32;
     let ok = mysql_ok_packet();
@@ -10816,6 +11351,7 @@ async fn handle_mysql_connection(
 
 const PG_SERVER_VERSION_NUM: &str = "160000";
 const PG_DEFAULT_SCHEMA: &str = "public";
+const PG_DEFAULT_SEARCH_PATH: &str = "\"$user\", public";
 const PG_MAX_IDENTIFIER_LENGTH: &str = "63";
 const PG_DEFAULT_TX_ISOLATION: &str = "read committed";
 
@@ -10841,13 +11377,83 @@ fn pg_bootstrap_setting_value(
         "integer_datetimes" => Some("on".to_string()),
         "is_superuser" => Some("on".to_string()),
         "max_identifier_length" => Some(PG_MAX_IDENTIFIER_LENGTH.to_string()),
+        "search_path" => Some(PG_DEFAULT_SEARCH_PATH.to_string()),
         "default_transaction_isolation"
         | "transaction_isolation"
         | "transaction isolation level" => Some(PG_DEFAULT_TX_ISOLATION.to_string()),
         "current_database" => Some(default_db.unwrap_or("skein").to_string()),
-        "current_schema" => Some(PG_DEFAULT_SCHEMA.to_string()),
+        "current_schema" => Some(pg_bootstrap_current_schema_value(session)),
         _ => None,
     }
+}
+
+fn pg_search_path_schemas(search_path: &str, include_implicit: bool) -> Vec<String> {
+    let mut schemas: Vec<String> = Vec::new();
+    for raw_schema in split_csv_top_level(search_path) {
+        let schema = raw_schema.trim().trim_matches('"').to_string();
+        if schema.is_empty() || schema == "$user" {
+            continue;
+        }
+        if !schemas
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&schema))
+        {
+            schemas.push(schema);
+        }
+    }
+    if include_implicit
+        && !schemas
+            .iter()
+            .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
+    {
+        schemas.insert(0, "pg_catalog".to_string());
+    }
+    schemas
+}
+
+fn pg_text_array_literal(values: &[String]) -> String {
+    let mut parts = Vec::with_capacity(values.len());
+    for value in values {
+        if value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            parts.push(value.clone());
+        } else {
+            parts.push(format!(
+                "\"{}\"",
+                value.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+fn pg_bootstrap_current_schema_value(session: Option<&MySqlSessionState>) -> String {
+    let search_path = pg_bootstrap_setting_value("search_path", None, session)
+        .unwrap_or_else(|| PG_DEFAULT_SEARCH_PATH.to_string());
+    pg_search_path_schemas(&search_path, false)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PG_DEFAULT_SCHEMA.to_string())
+}
+
+fn pg_bootstrap_current_schemas_value(
+    include_implicit: bool,
+    session: Option<&MySqlSessionState>,
+) -> String {
+    let search_path = pg_bootstrap_setting_value("search_path", None, session)
+        .unwrap_or_else(|| PG_DEFAULT_SEARCH_PATH.to_string());
+    let schemas = pg_search_path_schemas(&search_path, include_implicit);
+    pg_text_array_literal(&schemas)
+}
+
+fn pg_bootstrap_role_name(session: Option<&MySqlSessionState>) -> String {
+    session
+        .map(|sess| sess.username.trim())
+        .filter(|username| !username.is_empty())
+        .unwrap_or("skein")
+        .to_string()
 }
 
 /// Parse `SET key = value` or `SET key TO value`. Returns (key, value).
@@ -10962,12 +11568,41 @@ async fn pg_lookup_pk_column(
     "id".to_string()
 }
 
-fn pg_parse_current_setting_name(sql_lower: &str) -> Option<&str> {
+fn pg_parse_current_setting_call(sql_lower: &str) -> Option<(String, bool)> {
     let inner = sql_lower
         .strip_prefix("select current_setting(")?
         .strip_suffix(')')?
         .trim();
-    inner.strip_prefix('\'')?.strip_suffix('\'')
+    let parts = split_csv_top_level(inner);
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+
+    let setting = parts[0]
+        .trim()
+        .strip_prefix('\'')?
+        .strip_suffix('\'')?
+        .to_string();
+    let missing_ok = match parts.get(1).map(|part| part.trim()) {
+        None => false,
+        Some("true" | "t" | "on") => true,
+        Some("false" | "f" | "off") => false,
+        Some(_) => return None,
+    };
+
+    Some((setting, missing_ok))
+}
+
+fn pg_parse_current_schemas_include_implicit(sql_lower: &str) -> Option<bool> {
+    let inner = sql_lower
+        .strip_prefix("select current_schemas(")?
+        .strip_suffix(')')?
+        .trim();
+    match inner {
+        "true" | "t" | "on" => Some(true),
+        "false" | "f" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 async fn pg_write_single_text_result(
@@ -10976,9 +11611,37 @@ async fn pg_write_single_text_result(
     value: &str,
     command_tag: &str,
 ) -> anyhow::Result<()> {
-    let cols = vec![pg_wire::PgColumn::text(column_name, pg_wire::oid::TEXT, -1)];
+    pg_write_single_optional_text_result(stream, column_name, Some(value), command_tag).await
+}
+
+async fn pg_write_single_optional_text_result(
+    stream: &mut TcpStream,
+    column_name: &str,
+    value: Option<&str>,
+    command_tag: &str,
+) -> anyhow::Result<()> {
+    pg_write_single_optional_typed_result(
+        stream,
+        column_name,
+        pg_wire::oid::TEXT,
+        -1,
+        value,
+        command_tag,
+    )
+    .await
+}
+
+async fn pg_write_single_optional_typed_result(
+    stream: &mut TcpStream,
+    column_name: &str,
+    type_oid: i32,
+    type_size: i16,
+    value: Option<&str>,
+    command_tag: &str,
+) -> anyhow::Result<()> {
+    let cols = vec![pg_wire::PgColumn::text(column_name, type_oid, type_size)];
     pg_wire::write_row_description(stream, &cols).await?;
-    pg_wire::write_data_row(stream, &[Some(value.as_bytes())]).await?;
+    pg_wire::write_data_row(stream, &[value.map(str::as_bytes)]).await?;
     pg_wire::write_command_complete(stream, command_tag).await?;
     Ok(())
 }
@@ -11004,9 +11667,54 @@ async fn pg_try_handle_bootstrap_query(
         return Ok(true);
     }
 
-    if sql_lower == "select current_schema()" {
-        pg_write_single_text_result(stream, "current_schema", PG_DEFAULT_SCHEMA, "SELECT 1")
-            .await?;
+    if sql_lower == "select current_catalog" {
+        let value = pg_bootstrap_setting_value("current_database", default_db, session)
+            .unwrap_or_else(|| "skein".to_string());
+        pg_write_single_text_result(stream, "current_catalog", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select current_user" {
+        let value = pg_bootstrap_role_name(session);
+        pg_write_single_text_result(stream, "current_user", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select current_role" {
+        let value = pg_bootstrap_role_name(session);
+        pg_write_single_text_result(stream, "current_role", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select user" {
+        let value = pg_bootstrap_role_name(session);
+        pg_write_single_text_result(stream, "user", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select session_user" {
+        let value = pg_bootstrap_role_name(session);
+        pg_write_single_text_result(stream, "session_user", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select current_schema" || sql_lower == "select current_schema()" {
+        let value = pg_bootstrap_current_schema_value(session);
+        pg_write_single_text_result(stream, "current_schema", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if let Some(include_implicit) = pg_parse_current_schemas_include_implicit(&sql_lower) {
+        let value = pg_bootstrap_current_schemas_value(include_implicit, session);
+        pg_write_single_optional_typed_result(
+            stream,
+            "current_schemas",
+            pg_wire::oid::TEXT_ARRAY,
+            -1,
+            Some(&value),
+            "SELECT 1",
+        )
+        .await?;
         return Ok(true);
     }
 
@@ -11017,9 +11725,16 @@ async fn pg_try_handle_bootstrap_query(
         }
     }
 
-    if let Some(setting) = pg_parse_current_setting_name(&sql_lower) {
-        if let Some(value) = pg_bootstrap_setting_value(setting, default_db, session) {
-            pg_write_single_text_result(stream, "current_setting", &value, "SELECT 1").await?;
+    if let Some((setting, missing_ok)) = pg_parse_current_setting_call(&sql_lower) {
+        let value = pg_bootstrap_setting_value(&setting, default_db, session);
+        if value.is_some() || missing_ok {
+            pg_write_single_optional_text_result(
+                stream,
+                "current_setting",
+                value.as_deref(),
+                "SELECT 1",
+            )
+            .await?;
             return Ok(true);
         }
     }
@@ -11207,11 +11922,29 @@ struct PgPreparedStatement {
 }
 
 #[derive(Debug, Clone)]
+struct PgPortalResultSet {
+    columns: Vec<pg_wire::PgColumn>,
+    rows: Vec<Vec<Option<String>>>,
+    next_row: usize,
+    command_tag: String,
+}
+
+#[derive(Debug, Clone)]
+struct PgCopyInState {
+    insert_target_sql: String,
+    column_kinds: Vec<String>,
+    options: PgCopyOptions,
+    buffer: Vec<u8>,
+    await_sync: bool,
+}
+
+#[derive(Debug, Clone)]
 struct PgPortal {
     sql: String,
     params: Vec<Lit>,
     result_columns: Vec<MySqlStmtPrepareColumn>,
     result_formats: Vec<i16>,
+    pending_result: Option<PgPortalResultSet>,
 }
 
 fn pg_stmt_column_oid_and_size(column_type: MySqlStmtColumnType) -> (i32, i16) {
@@ -11248,6 +11981,1272 @@ fn pg_text_value_for_column(
     Some(normalized.into_bytes())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgCopyFormat {
+    Text,
+    Csv,
+    Binary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PgCopyOptions {
+    format: PgCopyFormat,
+    header: bool,
+    delimiter: Option<u8>,
+}
+
+impl Default for PgCopyOptions {
+    fn default() -> Self {
+        Self {
+            format: PgCopyFormat::Text,
+            header: false,
+            delimiter: None,
+        }
+    }
+}
+
+impl PgCopyOptions {
+    fn delimiter(self) -> u8 {
+        self.delimiter.unwrap_or(match self.format {
+            PgCopyFormat::Text => b'\t',
+            PgCopyFormat::Csv => b',',
+            PgCopyFormat::Binary => unreachable!("binary COPY does not use a delimiter"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PgCopyToStdoutSource {
+    Table {
+        table: String,
+        columns: Vec<String>,
+        options: PgCopyOptions,
+    },
+    Query {
+        query: String,
+        options: PgCopyOptions,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PgCopyTableTarget {
+    table: String,
+    columns: Vec<String>,
+    options: PgCopyOptions,
+}
+
+fn pg_copy_escape_text_field(bytes: &[u8], delimiter: u8) -> Vec<u8> {
+    let mut escaped = Vec::with_capacity(bytes.len());
+    for byte in bytes {
+        match byte {
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
+            b'\t' => escaped.extend_from_slice(b"\\t"),
+            b'\n' => escaped.extend_from_slice(b"\\n"),
+            b'\r' => escaped.extend_from_slice(b"\\r"),
+            other if *other == delimiter => {
+                escaped.push(b'\\');
+                escaped.push(*other);
+            }
+            _ => escaped.push(*byte),
+        }
+    }
+    escaped
+}
+
+fn pg_copy_text_encode_row(
+    row: &[Option<String>],
+    columns: &[pg_wire::PgColumn],
+    delimiter: u8,
+) -> Vec<u8> {
+    let mut line = Vec::new();
+    for (idx, value) in row.iter().enumerate() {
+        if idx > 0 {
+            line.push(delimiter);
+        }
+        match pg_text_value_for_column(value.as_deref(), columns.get(idx)) {
+            Some(bytes) => line.extend_from_slice(&pg_copy_escape_text_field(&bytes, delimiter)),
+            None => line.extend_from_slice(b"\\N"),
+        }
+    }
+    line.push(b'\n');
+    line
+}
+
+fn pg_copy_csv_encode_field(bytes: &[u8], delimiter: u8) -> Vec<u8> {
+    let needs_quotes = bytes.is_empty()
+        || bytes.contains(&delimiter)
+        || bytes.contains(&b'"')
+        || bytes.contains(&b'\n')
+        || bytes.contains(&b'\r');
+    if !needs_quotes {
+        return bytes.to_vec();
+    }
+
+    let mut escaped = Vec::with_capacity(bytes.len() + 2);
+    escaped.push(b'"');
+    for byte in bytes {
+        if *byte == b'"' {
+            escaped.extend_from_slice(b"\"\"");
+        } else {
+            escaped.push(*byte);
+        }
+    }
+    escaped.push(b'"');
+    escaped
+}
+
+fn pg_copy_csv_encode_row(
+    row: &[Option<String>],
+    columns: &[pg_wire::PgColumn],
+    delimiter: u8,
+) -> Vec<u8> {
+    let mut line = Vec::new();
+    for (idx, value) in row.iter().enumerate() {
+        if idx > 0 {
+            line.push(delimiter);
+        }
+        if let Some(bytes) = pg_text_value_for_column(value.as_deref(), columns.get(idx)) {
+            line.extend_from_slice(&pg_copy_csv_encode_field(&bytes, delimiter));
+        }
+    }
+    line.push(b'\n');
+    line
+}
+
+fn pg_copy_header_row(columns: &[pg_wire::PgColumn], options: PgCopyOptions) -> Vec<u8> {
+    let row: Vec<Option<String>> = columns
+        .iter()
+        .map(|column| Some(column.name.clone()))
+        .collect();
+    let delimiter = options.delimiter();
+    match options.format {
+        PgCopyFormat::Text => pg_copy_text_encode_row(&row, columns, delimiter),
+        PgCopyFormat::Csv => pg_copy_csv_encode_row(&row, columns, delimiter),
+        PgCopyFormat::Binary => unreachable!("binary COPY does not emit a header row"),
+    }
+}
+
+fn pg_copy_binary_header() -> Vec<u8> {
+    let mut header = Vec::with_capacity(19);
+    header.extend_from_slice(b"PGCOPY\n\xFF\r\n\0");
+    header.extend_from_slice(&0u32.to_be_bytes());
+    header.extend_from_slice(&0u32.to_be_bytes());
+    header
+}
+
+fn pg_copy_binary_encode_value(
+    value: Option<&str>,
+    column: &pg_wire::PgColumn,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let normalized = pg_text_value_for_column(Some(value), Some(column)).ok_or_else(|| {
+        format!(
+            "COPY binary output could not normalize column '{}'",
+            column.name
+        )
+    })?;
+    let normalized = std::str::from_utf8(&normalized).map_err(|_| {
+        format!(
+            "COPY binary output requires UTF-8-compatible values for column '{}'",
+            column.name
+        )
+    })?;
+    pg_wire::encode_binary_value(column.type_oid, normalized)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "COPY binary output does not support column '{}' type oid {}",
+                column.name, column.type_oid
+            )
+        })
+}
+
+fn pg_copy_binary_encode_row(
+    row: &[Option<String>],
+    columns: &[pg_wire::PgColumn],
+) -> Result<Vec<u8>, String> {
+    if row.len() != columns.len() {
+        return Err("COPY binary output row width did not match column description".to_string());
+    }
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(columns.len() as i16).to_be_bytes());
+    for (value, column) in row.iter().zip(columns.iter()) {
+        match pg_copy_binary_encode_value(value.as_deref(), column)? {
+            Some(bytes) => {
+                payload.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                payload.extend_from_slice(&bytes);
+            }
+            None => payload.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    Ok(payload)
+}
+
+fn pg_copy_binary_trailer() -> [u8; 2] {
+    (-1i16).to_be_bytes()
+}
+
+fn pg_encode_data_row_values(
+    row: &[Option<String>],
+    pg_columns: &[pg_wire::PgColumn],
+) -> Vec<Option<Vec<u8>>> {
+    row.iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let col = pg_columns.get(idx);
+            if col.map(|c| c.format) == Some(1) {
+                let type_oid = col.map(|c| c.type_oid).unwrap_or(0);
+                match value.as_deref() {
+                    None => None,
+                    Some(v) => pg_wire::encode_binary_value(type_oid, v)
+                        .or_else(|| Some(v.as_bytes().to_vec())),
+                }
+            } else {
+                pg_text_value_for_column(value.as_deref(), col)
+            }
+        })
+        .collect()
+}
+
+async fn pg_write_data_rows(
+    stream: &mut TcpStream,
+    pg_columns: &[pg_wire::PgColumn],
+    rows: &[Vec<Option<String>>],
+) -> anyhow::Result<()> {
+    for row in rows {
+        let encoded_values = pg_encode_data_row_values(row, pg_columns);
+        let values: Vec<Option<&[u8]>> = encoded_values
+            .iter()
+            .map(|value| value.as_deref())
+            .collect();
+        pg_wire::write_data_row(stream, &values).await?;
+    }
+    Ok(())
+}
+
+fn pg_sql_supports_portal_suspension(sql: &str) -> bool {
+    sql.trim_start().to_ascii_lowercase().starts_with("select")
+}
+
+async fn pg_drain_portal_rows(
+    stream: &mut TcpStream,
+    session: &MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    portal: &mut PgPortal,
+    max_rows: i32,
+) -> anyhow::Result<()> {
+    let mut command_complete_tag = None;
+    let mut suspended = false;
+
+    {
+        let pending = portal
+            .pending_result
+            .as_mut()
+            .expect("pending portal result should exist when draining rows");
+        let remaining = pending.rows.len().saturating_sub(pending.next_row);
+        let batch_size = if max_rows == 0 {
+            remaining
+        } else {
+            remaining.min(max_rows as usize)
+        };
+
+        pg_wire::write_row_description(stream, &pending.columns).await?;
+        pg_write_data_rows(
+            stream,
+            &pending.columns,
+            &pending.rows[pending.next_row..pending.next_row + batch_size],
+        )
+        .await?;
+        pending.next_row += batch_size;
+        if pending.next_row < pending.rows.len() {
+            suspended = true;
+        } else {
+            command_complete_tag = Some(pending.command_tag.clone());
+        }
+    }
+
+    if suspended {
+        pg_wire::write_portal_suspended(stream).await?;
+    } else if let Some(tag) = command_complete_tag {
+        portal.pending_result = None;
+        pg_wire::write_command_complete(stream, &tag).await?;
+    }
+
+    *tx_status = pg_tx_status_for_session(session, false);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn pg_execute_portal(
+    state: &AppState,
+    stream: &mut TcpStream,
+    session: &mut MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    savepoints: &mut Vec<PgSavepoint>,
+    copy_in: &mut Option<PgCopyInState>,
+    portal: &mut PgPortal,
+    max_rows: i32,
+) -> anyhow::Result<bool> {
+    if portal.pending_result.is_some() {
+        pg_drain_portal_rows(stream, session, tx_status, portal, max_rows).await?;
+        return Ok(false);
+    }
+
+    let exec_sql = match pg_substitute_stmt_sql(&portal.sql, &portal.params) {
+        Ok(sql) => sql,
+        Err(message) => {
+            pg_wire::write_error_response(stream, "ERROR", "08P01", &message).await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            return Ok(true);
+        }
+    };
+
+    if let Some(target) = pg_parse_copy_from_stdin(&exec_sql) {
+        *copy_in =
+            pg_start_copy_from_stdin(state, stream, session, tx_status, &target, true).await?;
+        return Ok(copy_in.is_none());
+    }
+
+    if max_rows == 0 || !pg_sql_supports_portal_suspension(&exec_sql) {
+        return pg_dispatch_sql(
+            state,
+            stream,
+            session,
+            tx_status,
+            savepoints,
+            &exec_sql,
+            Some(&portal.result_columns),
+            &portal.result_formats,
+        )
+        .await;
+    }
+
+    let rewritten = pg_rewrite_sql(&exec_sql);
+    match mysql_execute_sql(state, &rewritten, session).await {
+        Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+            let default_db = session.default_db.clone();
+            let row_count = rows.len();
+            let mut pg_columns = pg_result_columns_to_pg(
+                state,
+                &rewritten,
+                default_db.as_deref(),
+                &columns,
+                &rows,
+                Some(&portal.result_columns),
+            )
+            .await;
+            for (idx, col) in pg_columns.iter_mut().enumerate() {
+                col.format = pg_format_code_at(&portal.result_formats, idx);
+            }
+            portal.pending_result = Some(PgPortalResultSet {
+                columns: pg_columns,
+                rows,
+                next_row: 0,
+                command_tag: format!("SELECT {}", row_count),
+            });
+            pg_drain_portal_rows(stream, session, tx_status, portal, max_rows).await?;
+            Ok(false)
+        }
+        Ok(MySqlQueryOutcome::Ok { .. }) => {
+            pg_dispatch_sql(
+                state,
+                stream,
+                session,
+                tx_status,
+                savepoints,
+                &exec_sql,
+                Some(&portal.result_columns),
+                &portal.result_formats,
+            )
+            .await
+        }
+        Err((code, state_code, message)) => {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                pg_sqlstate_from_mysql_error(code, state_code, &message),
+                &message,
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+    }
+}
+
+fn pg_collect_parenthesized_body(bytes: &[u8], start: usize) -> (String, usize) {
+    let mut depth = 1u32;
+    let mut i = start;
+    let mut body = String::new();
+    let mut quote = 0u8;
+    while i < bytes.len() && depth > 0 {
+        let b = bytes[i];
+        if quote != 0 {
+            body.push(b as char);
+            if b == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            quote = b;
+            body.push(b as char);
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+            body.push('(');
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                i += 1;
+                break;
+            }
+            body.push(')');
+            i += 1;
+            continue;
+        }
+        body.push(b as char);
+        i += 1;
+    }
+    (body, i - start)
+}
+
+fn pg_parse_copy_to_stdout(sql: &str) -> Option<PgCopyToStdoutSource> {
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("copy ") {
+        return None;
+    }
+
+    let rest = trimmed[4..].trim_start();
+    if rest.starts_with('(') {
+        let bytes = rest.as_bytes();
+        let (body, consumed) = pg_collect_parenthesized_body(bytes, 1);
+        let after = rest.get(1 + consumed..)?.trim_start();
+        let after_lower = after.to_ascii_lowercase();
+        if !after_lower.starts_with("to stdout") {
+            return None;
+        }
+        let trailing = after["to stdout".len()..].trim();
+        let options = pg_parse_copy_trailing_options(trailing)?;
+        return Some(PgCopyToStdoutSource::Query {
+            query: body.trim().to_string(),
+            options,
+        });
+    }
+
+    let rest_lower = rest.to_ascii_lowercase();
+    let to_stdout_pos = rest_lower.find(" to stdout")?;
+    let target = rest[..to_stdout_pos].trim();
+    let trailing = rest[to_stdout_pos + " to stdout".len()..].trim();
+    if target.is_empty() {
+        return None;
+    }
+    let options = pg_parse_copy_trailing_options(trailing)?;
+    let target = pg_parse_copy_table_target(target)?;
+    Some(PgCopyToStdoutSource::Table {
+        table: target.table,
+        columns: target.columns,
+        options,
+    })
+}
+
+fn pg_parse_copy_from_stdin(sql: &str) -> Option<PgCopyTableTarget> {
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("copy ") {
+        return None;
+    }
+
+    let rest = trimmed[4..].trim_start();
+    let rest_lower = rest.to_ascii_lowercase();
+    let from_stdin_pos = rest_lower.find(" from stdin")?;
+    let target = rest[..from_stdin_pos].trim();
+    let trailing = rest[from_stdin_pos + " from stdin".len()..].trim();
+    if target.is_empty() {
+        return None;
+    }
+    let options = pg_parse_copy_trailing_options(trailing)?;
+    let mut target = pg_parse_copy_table_target(target)?;
+    target.options = options;
+    Some(target)
+}
+
+fn pg_parse_copy_trailing_options(trailing: &str) -> Option<PgCopyOptions> {
+    let trimmed = trailing.trim();
+    if trimmed.is_empty() || trimmed == ";" {
+        return Some(PgCopyOptions::default());
+    }
+
+    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("with") {
+        return None;
+    }
+    let rest = trimmed[4..].trim_start();
+    if !(rest.starts_with('(') && rest.ends_with(')')) {
+        return None;
+    }
+
+    let options = &rest[1..rest.len() - 1];
+    let parts = split_csv_top_level(options);
+
+    let mut parsed = PgCopyOptions::default();
+    let mut saw_format = false;
+    let mut saw_header = false;
+    let mut saw_delimiter = false;
+    for option in parts {
+        let option_lower = option.to_ascii_lowercase();
+        match option_lower.as_str() {
+            "format text" | "format 'text'" | "format=text" => {
+                if saw_format {
+                    return None;
+                }
+                parsed.format = PgCopyFormat::Text;
+                saw_format = true;
+            }
+            "format csv" | "format 'csv'" | "format=csv" => {
+                if saw_format {
+                    return None;
+                }
+                parsed.format = PgCopyFormat::Csv;
+                saw_format = true;
+            }
+            "format binary" | "format 'binary'" | "format=binary" => {
+                if saw_format {
+                    return None;
+                }
+                parsed.format = PgCopyFormat::Binary;
+                saw_format = true;
+            }
+            "header" | "header true" | "header 'true'" | "header=true" => {
+                if saw_header {
+                    return None;
+                }
+                parsed.header = true;
+                saw_header = true;
+            }
+            "header false" | "header 'false'" | "header=false" => {
+                if saw_header {
+                    return None;
+                }
+                parsed.header = false;
+                saw_header = true;
+            }
+            _ => {
+                let delimiter = pg_parse_copy_delimiter_option(&option)?;
+                if saw_delimiter {
+                    return None;
+                }
+                parsed.delimiter = Some(delimiter);
+                saw_delimiter = true;
+            }
+        }
+    }
+
+    if parsed.header && parsed.format != PgCopyFormat::Csv {
+        return None;
+    }
+
+    if parsed.format == PgCopyFormat::Binary {
+        if parsed.delimiter.is_some() {
+            return None;
+        }
+        return Some(parsed);
+    }
+
+    let delimiter = parsed.delimiter();
+    if matches!(delimiter, b'\0' | b'\n' | b'\r') {
+        return None;
+    }
+    if parsed.format == PgCopyFormat::Text && delimiter == b'\\' {
+        return None;
+    }
+    if parsed.format == PgCopyFormat::Csv && delimiter == b'"' {
+        return None;
+    }
+
+    Some(parsed)
+}
+
+fn pg_parse_copy_option_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    parse_sql_string_literal(trimmed).or_else(|| {
+        let prefixed = trimmed
+            .strip_prefix('E')
+            .or_else(|| trimmed.strip_prefix('e'))?;
+        parse_sql_string_literal(prefixed.trim_start())
+    })
+}
+
+fn pg_parse_copy_delimiter_option(option: &str) -> Option<u8> {
+    let trimmed = option.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("delimiter") {
+        return None;
+    }
+
+    let rest = trimmed["delimiter".len()..].trim_start();
+    let value = if let Some(value) = rest.strip_prefix('=') {
+        value.trim_start()
+    } else if rest.is_empty() {
+        return None;
+    } else {
+        rest
+    };
+
+    let parsed = pg_parse_copy_option_string(value).unwrap_or_else(|| value.to_string());
+    let bytes = parsed.as_bytes();
+    if bytes.len() != 1 {
+        return None;
+    }
+    Some(bytes[0])
+}
+
+fn pg_parse_copy_table_target(target: &str) -> Option<PgCopyTableTarget> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(open) = trimmed.find('(') {
+        let close = trimmed.rfind(')')?;
+        if close <= open || !trimmed[close + 1..].trim().is_empty() {
+            return None;
+        }
+        let table = trimmed[..open].trim();
+        if table.is_empty() {
+            return None;
+        }
+        let columns: Vec<String> = trimmed[open + 1..close]
+            .split(',')
+            .map(|column| column.trim())
+            .filter(|column| !column.is_empty())
+            .map(|column| column.to_string())
+            .collect();
+        if columns.is_empty() {
+            return None;
+        }
+        return Some(PgCopyTableTarget {
+            table: table.to_string(),
+            columns,
+            options: PgCopyOptions::default(),
+        });
+    }
+    Some(PgCopyTableTarget {
+        table: trimmed.to_string(),
+        columns: Vec::new(),
+        options: PgCopyOptions::default(),
+    })
+}
+
+fn pg_split_copy_table_ref(
+    target: &PgCopyTableTarget,
+    default_db: Option<&str>,
+) -> Option<(String, String)> {
+    let trimmed = target.table.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((db, table)) = trimmed.split_once('.') {
+        let db = db.trim();
+        let table = table.trim();
+        if db.is_empty() || table.is_empty() {
+            return None;
+        }
+        return Some((db.to_string(), table.to_string()));
+    }
+    default_db.map(|db| (db.to_string(), trimmed.to_string()))
+}
+
+fn pg_copy_decode_text_field(raw: &[u8]) -> Result<Option<String>, String> {
+    if raw == b"\\N" {
+        return Ok(None);
+    }
+
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut idx = 0usize;
+    while idx < raw.len() {
+        if raw[idx] != b'\\' {
+            decoded.push(raw[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        let Some(escaped) = raw.get(idx).copied() else {
+            return Err("COPY data ended with a trailing escape".to_string());
+        };
+        match escaped {
+            b't' => decoded.push(b'\t'),
+            b'n' => decoded.push(b'\n'),
+            b'r' => decoded.push(b'\r'),
+            b'\\' => decoded.push(b'\\'),
+            other => decoded.push(other),
+        }
+        idx += 1;
+    }
+
+    String::from_utf8(decoded)
+        .map(Some)
+        .map_err(|_| "COPY text data must be valid UTF-8".to_string())
+}
+
+fn pg_copy_parse_text_rows(
+    buffer: &[u8],
+    delimiter: u8,
+) -> Result<Vec<Vec<Option<String>>>, String> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = Vec::new();
+    let mut escaped = false;
+
+    for byte in buffer {
+        if escaped {
+            field.push(*byte);
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => {
+                field.push(*byte);
+                escaped = true;
+            }
+            other if *other == delimiter => {
+                row.push(pg_copy_decode_text_field(&field)?);
+                field.clear();
+            }
+            b'\n' => {
+                row.push(pg_copy_decode_text_field(&field)?);
+                field.clear();
+                rows.push(std::mem::take(&mut row));
+            }
+            other => field.push(*other),
+        }
+    }
+
+    if escaped {
+        return Err("COPY data ended with a trailing escape".to_string());
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(pg_copy_decode_text_field(&field)?);
+        rows.push(row);
+    }
+
+    Ok(rows)
+}
+
+fn pg_copy_decode_csv_field(raw: &[u8], quoted: bool) -> Result<Option<String>, String> {
+    if !quoted && raw.is_empty() {
+        return Ok(None);
+    }
+    String::from_utf8(raw.to_vec())
+        .map(Some)
+        .map_err(|_| "COPY csv data must be valid UTF-8".to_string())
+}
+
+fn pg_copy_parse_csv_rows(
+    buffer: &[u8],
+    delimiter: u8,
+) -> Result<Vec<Vec<Option<String>>>, String> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = Vec::new();
+    let mut quoted = false;
+    let mut field_was_quoted = false;
+    let mut after_quote = false;
+    let mut idx = 0usize;
+
+    while idx < buffer.len() {
+        let byte = buffer[idx];
+        if quoted {
+            if byte == b'"' {
+                if buffer.get(idx + 1) == Some(&b'"') {
+                    field.push(b'"');
+                    idx += 2;
+                } else {
+                    quoted = false;
+                    after_quote = true;
+                    idx += 1;
+                }
+            } else {
+                field.push(byte);
+                idx += 1;
+            }
+            continue;
+        }
+
+        if after_quote {
+            match byte {
+                other if other == delimiter => {
+                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    field.clear();
+                    field_was_quoted = false;
+                    after_quote = false;
+                    idx += 1;
+                }
+                b'\n' => {
+                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    field.clear();
+                    field_was_quoted = false;
+                    after_quote = false;
+                    rows.push(std::mem::take(&mut row));
+                    idx += 1;
+                }
+                b'\r' => {
+                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    field.clear();
+                    field_was_quoted = false;
+                    after_quote = false;
+                    rows.push(std::mem::take(&mut row));
+                    idx += 1;
+                    if buffer.get(idx) == Some(&b'\n') {
+                        idx += 1;
+                    }
+                }
+                _ => return Err("unexpected character after closing CSV quote".to_string()),
+            }
+            continue;
+        }
+
+        if field.is_empty() && byte == b'"' {
+            quoted = true;
+            field_was_quoted = true;
+            idx += 1;
+            continue;
+        }
+
+        match byte {
+            other if other == delimiter => {
+                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                field.clear();
+                field_was_quoted = false;
+                idx += 1;
+            }
+            b'\n' => {
+                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                field.clear();
+                field_was_quoted = false;
+                rows.push(std::mem::take(&mut row));
+                idx += 1;
+            }
+            b'\r' => {
+                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                field.clear();
+                field_was_quoted = false;
+                rows.push(std::mem::take(&mut row));
+                idx += 1;
+                if buffer.get(idx) == Some(&b'\n') {
+                    idx += 1;
+                }
+            }
+            b'"' => return Err("unexpected quote in unquoted CSV field".to_string()),
+            other => {
+                field.push(other);
+                idx += 1;
+            }
+        }
+    }
+
+    if quoted {
+        return Err("COPY csv data ended inside a quoted field".to_string());
+    }
+
+    if after_quote || !field.is_empty() || !row.is_empty() || field_was_quoted {
+        row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+        rows.push(row);
+    }
+
+    Ok(rows)
+}
+
+fn pg_copy_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn pg_copy_value_to_sql_literal(value: Option<&str>, kind: &str) -> Result<String, String> {
+    let Some(value) = value else {
+        return Ok("NULL".to_string());
+    };
+
+    match kind {
+        "u64" => value
+            .parse::<u64>()
+            .map(|v| v.to_string())
+            .map_err(|_| format!("invalid u64 COPY value '{value}'")),
+        "u32" => value
+            .parse::<u32>()
+            .map(|v| v.to_string())
+            .map_err(|_| format!("invalid u32 COPY value '{value}'")),
+        "i64" | "int" | "integer" => value
+            .parse::<i64>()
+            .map(|v| v.to_string())
+            .map_err(|_| format!("invalid integer COPY value '{value}'")),
+        "i32" => value
+            .parse::<i32>()
+            .map(|v| v.to_string())
+            .map_err(|_| format!("invalid i32 COPY value '{value}'")),
+        "f64" | "float" | "double" => value
+            .parse::<f64>()
+            .map(|v| v.to_string())
+            .map_err(|_| format!("invalid float COPY value '{value}'")),
+        "bool" => match value.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" => Ok("TRUE".to_string()),
+            "f" | "false" | "0" => Ok("FALSE".to_string()),
+            _ => Err(format!("invalid bool COPY value '{value}'")),
+        },
+        "bytes" => Err("COPY FROM STDIN does not yet support bytes columns".to_string()),
+        _ => Ok(pg_copy_string_literal(value)),
+    }
+}
+
+async fn pg_start_copy_from_stdin(
+    state: &AppState,
+    stream: &mut TcpStream,
+    session: &MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    target: &PgCopyTableTarget,
+    await_sync: bool,
+) -> anyhow::Result<Option<PgCopyInState>> {
+    if target.options.format == PgCopyFormat::Binary {
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "0A000",
+            "COPY FROM STDIN WITH (FORMAT binary) is not supported",
+        )
+        .await?;
+        *tx_status = pg_tx_status_for_session(session, session.tx_active);
+        return Ok(None);
+    }
+
+    let Some((db, table)) = pg_split_copy_table_ref(target, session.default_db.as_deref()) else {
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "3D000",
+            "COPY FROM STDIN requires a target table and database",
+        )
+        .await?;
+        *tx_status = pg_tx_status_for_session(session, session.tx_active);
+        return Ok(None);
+    };
+
+    let desc = {
+        let eng = state.engine.read().await;
+        eng.describe_table(&db, &table)
+    };
+    let Ok(desc) = desc else {
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "42P01",
+            &format!("relation '{}' does not exist", target.table),
+        )
+        .await?;
+        *tx_status = pg_tx_status_for_session(session, session.tx_active);
+        return Ok(None);
+    };
+
+    let Some(columns) = desc.get("columns").and_then(|value| value.as_array()) else {
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "0A000",
+            "COPY FROM STDIN requires describable table columns",
+        )
+        .await?;
+        *tx_status = pg_tx_status_for_session(session, session.tx_active);
+        return Ok(None);
+    };
+
+    let selected_columns = if target.columns.is_empty() {
+        columns.iter().collect::<Vec<_>>()
+    } else {
+        let mut selected = Vec::with_capacity(target.columns.len());
+        for requested in &target.columns {
+            let Some(column) = columns.iter().find(|column| {
+                column
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|name| name.eq_ignore_ascii_case(requested))
+                    .unwrap_or(false)
+            }) else {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    "42703",
+                    &format!("column '{}' does not exist", requested),
+                )
+                .await?;
+                *tx_status = pg_tx_status_for_session(session, session.tx_active);
+                return Ok(None);
+            };
+            selected.push(column);
+        }
+        selected
+    };
+    let column_kinds: Vec<String> = selected_columns
+        .iter()
+        .map(|column| {
+            column
+                .get("type")
+                .and_then(|value| value.get("kind"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("str")
+                .to_string()
+        })
+        .collect();
+    let column_formats = vec![0i16; column_kinds.len()];
+    pg_wire::write_copy_in_response(stream, 0, &column_formats).await?;
+    let insert_columns: Vec<String> = selected_columns
+        .iter()
+        .map(|column| {
+            column
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    let insert_target_sql = format!("{db}.{table} ({})", insert_columns.join(", "));
+    Ok(Some(PgCopyInState {
+        insert_target_sql,
+        column_kinds,
+        options: target.options,
+        buffer: Vec::new(),
+        await_sync,
+    }))
+}
+
+async fn pg_finish_copy_from_stdin(
+    state: &AppState,
+    stream: &mut TcpStream,
+    session: &mut MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    copy_in: PgCopyInState,
+) -> anyhow::Result<bool> {
+    let delimiter = copy_in.options.delimiter();
+    let parse_result = match copy_in.options.format {
+        PgCopyFormat::Text => pg_copy_parse_text_rows(&copy_in.buffer, delimiter),
+        PgCopyFormat::Csv => pg_copy_parse_csv_rows(&copy_in.buffer, delimiter),
+        PgCopyFormat::Binary => {
+            unreachable!("binary COPY FROM STDIN is rejected before buffering")
+        }
+    };
+    let rows = match parse_result {
+        Ok(rows) => rows,
+        Err(message) => {
+            pg_wire::write_error_response(stream, "ERROR", "08P01", &message).await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            return Ok(true);
+        }
+    };
+
+    let rows = if copy_in.options.header && copy_in.options.format == PgCopyFormat::Csv {
+        if let Some((header, remaining)) = rows.split_first() {
+            if header.len() != copy_in.column_kinds.len() {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    "08P01",
+                    "COPY header row has the wrong column count",
+                )
+                .await?;
+                *tx_status = pg_tx_status_for_session(session, session.tx_active);
+                return Ok(true);
+            }
+            remaining.to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        rows
+    };
+
+    for row in &rows {
+        if row.len() != copy_in.column_kinds.len() {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                "08P01",
+                "COPY row has the wrong column count",
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            return Ok(true);
+        }
+    }
+
+    if rows.is_empty() {
+        pg_wire::write_command_complete(stream, "COPY 0").await?;
+        *tx_status = pg_tx_status_for_session(session, false);
+        return Ok(false);
+    }
+
+    let mut value_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut values = Vec::with_capacity(row.len());
+        for (value, kind) in row.iter().zip(copy_in.column_kinds.iter()) {
+            match pg_copy_value_to_sql_literal(value.as_deref(), kind) {
+                Ok(sql) => values.push(sql),
+                Err(message) => {
+                    pg_wire::write_error_response(stream, "ERROR", "22P02", &message).await?;
+                    *tx_status = pg_tx_status_for_session(session, session.tx_active);
+                    return Ok(true);
+                }
+            }
+        }
+        value_rows.push(format!("({})", values.join(", ")));
+    }
+
+    let insert_sql = format!(
+        "INSERT INTO {} VALUES {}",
+        copy_in.insert_target_sql,
+        value_rows.join(", ")
+    );
+    match mysql_execute_sql(state, &insert_sql, session).await {
+        Ok(MySqlQueryOutcome::Ok { .. }) => {
+            pg_wire::write_command_complete(stream, &format!("COPY {}", rows.len())).await?;
+            *tx_status = pg_tx_status_for_session(session, false);
+            Ok(false)
+        }
+        Ok(MySqlQueryOutcome::ResultSet { .. }) => {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                "0A000",
+                "COPY FROM STDIN produced an unexpected result set",
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+        Err((code, state_code, message)) => {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                pg_sqlstate_from_mysql_error(code, state_code, &message),
+                &message,
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+    }
+}
+
+async fn pg_write_copy_to_stdout(
+    state: &AppState,
+    stream: &mut TcpStream,
+    session: &mut MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    source: PgCopyToStdoutSource,
+    described_columns: Option<&[MySqlStmtPrepareColumn]>,
+) -> anyhow::Result<bool> {
+    let (copy_query, options) = match source {
+        PgCopyToStdoutSource::Table {
+            table,
+            columns,
+            options,
+        } => {
+            let select_list = if columns.is_empty() {
+                "*".to_string()
+            } else {
+                columns.join(", ")
+            };
+            (format!("SELECT {select_list} FROM {table}"), options)
+        }
+        PgCopyToStdoutSource::Query { query, options } => (query, options),
+    };
+    let rewritten = pg_rewrite_sql(&copy_query);
+
+    match mysql_execute_sql(state, &rewritten, session).await {
+        Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+            let default_db = session.default_db.clone();
+            let pg_columns = pg_result_columns_to_pg(
+                state,
+                &rewritten,
+                default_db.as_deref(),
+                &columns,
+                &rows,
+                described_columns,
+            )
+            .await;
+            if options.format == PgCopyFormat::Binary {
+                let mut encoded_rows = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    let payload = match pg_copy_binary_encode_row(row, &pg_columns) {
+                        Ok(payload) => payload,
+                        Err(message) => {
+                            pg_wire::write_error_response(stream, "ERROR", "0A000", &message)
+                                .await?;
+                            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+                            return Ok(true);
+                        }
+                    };
+                    encoded_rows.push(payload);
+                }
+
+                let column_formats = vec![1i16; pg_columns.len()];
+                pg_wire::write_copy_out_response(stream, 1, &column_formats).await?;
+                let header = pg_copy_binary_header();
+                pg_wire::write_copy_data(stream, &header).await?;
+                for payload in &encoded_rows {
+                    pg_wire::write_copy_data(stream, payload).await?;
+                }
+                let trailer = pg_copy_binary_trailer();
+                pg_wire::write_copy_data(stream, &trailer).await?;
+            } else {
+                let column_formats = vec![0i16; pg_columns.len()];
+                pg_wire::write_copy_out_response(stream, 0, &column_formats).await?;
+                let delimiter = options.delimiter();
+                if options.header && options.format == PgCopyFormat::Csv {
+                    let header = pg_copy_header_row(&pg_columns, options);
+                    pg_wire::write_copy_data(stream, &header).await?;
+                }
+                for row in &rows {
+                    let line = match options.format {
+                        PgCopyFormat::Text => pg_copy_text_encode_row(row, &pg_columns, delimiter),
+                        PgCopyFormat::Csv => pg_copy_csv_encode_row(row, &pg_columns, delimiter),
+                        PgCopyFormat::Binary => unreachable!(),
+                    };
+                    pg_wire::write_copy_data(stream, &line).await?;
+                }
+            }
+            pg_wire::write_copy_done(stream).await?;
+            pg_wire::write_command_complete(stream, &format!("COPY {}", rows.len())).await?;
+            *tx_status = pg_tx_status_for_session(session, false);
+            Ok(false)
+        }
+        Ok(MySqlQueryOutcome::Ok { .. }) => {
+            pg_wire::write_error_response(stream, "ERROR", "42601", "COPY query must return rows")
+                .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+        Err((code, state_code, message)) => {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                pg_sqlstate_from_mysql_error(code, state_code, &message),
+                &message,
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+    }
+}
+
 fn pg_column_type_to_pg(name: &str, column_type: MySqlStmtColumnType) -> pg_wire::PgColumn {
     let (type_oid, type_size) = pg_stmt_column_oid_and_size(column_type);
     pg_wire::PgColumn::text(name, type_oid, type_size)
@@ -11281,7 +13280,8 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "usesysid" | "grosysid" | "spcowner" | "relnamespace" | "relowner" | "relam"
         | "reltablespace" | "reloftype" | "attrelid" | "atttypid" | "attcollation"
         | "indexrelid" | "indrelid" | "connamespace" | "conrelid" | "contypid" | "conindid"
-        | "conparentid" | "confrelid" => (26, 4),
+        | "conparentid" | "confrelid" | "pronamespace" | "proowner" | "prolang" | "provariadic"
+        | "prosupport" | "prorettype" => (26, 4),
         "datistemplate"
         | "datallowconn"
         | "pending_restart"
@@ -11334,8 +13334,10 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
         "rolconnlimit" | "numbackends" | "avg_width" | "relnatts" | "relchecks" | "attlen"
         | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "indnatts" | "indnkeyatts"
-        | "coninhcount" => (pg_wire::oid::INT4, 4),
-        "null_frac" | "n_distinct" | "correlation" => (pg_wire::oid::FLOAT4, 4),
+        | "coninhcount" | "pronargs" | "pronargdefaults" => (pg_wire::oid::INT4, 4),
+        "null_frac" | "n_distinct" | "correlation" | "procost" | "prorows" => {
+            (pg_wire::oid::FLOAT4, 4)
+        }
         "blk_read_time"
         | "blk_write_time"
         | "session_time"
@@ -12507,10 +14509,27 @@ async fn pg_dispatch_sql(
         return Ok(false);
     }
 
-    // COPY FROM STDIN / COPY TO STDOUT — not yet supported
+    if let Some(copy_source) = pg_parse_copy_to_stdout(sql) {
+        return pg_write_copy_to_stdout(
+            state,
+            stream,
+            session,
+            tx_status,
+            copy_source,
+            described_columns,
+        )
+        .await;
+    }
+
+    // Only default/text/csv/binary COPY TO STDOUT and default/text/csv COPY FROM STDIN are implemented.
     if sql_lower.starts_with("copy ") {
-        pg_wire::write_error_response(stream, "ERROR", "0A000", "COPY is not yet supported")
-            .await?;
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "0A000",
+            "only default/text/csv/binary COPY TO STDOUT and default/text/csv COPY FROM STDIN are supported",
+        )
+        .await?;
         *tx_status = pg_tx_status_for_session(session, session.tx_active);
         return Ok(true);
     }
@@ -12817,10 +14836,12 @@ async fn handle_pg_connection(
     pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
 
     let mut session = MySqlSessionState::new(database, connection_id);
+    session.username = username.clone();
     let mut tx_status = TxStatus::Idle;
     let mut savepoints = Vec::new();
     let mut prepared_statements: HashMap<String, PgPreparedStatement> = HashMap::new();
     let mut portals: HashMap<String, PgPortal> = HashMap::new();
+    let mut copy_in: Option<PgCopyInState> = None;
     let mut skip_until_sync = false;
 
     // Command loop.
@@ -12846,6 +14867,81 @@ async fn handle_pg_connection(
             }
         };
 
+        if let Some(active_copy_in) = copy_in.as_mut() {
+            match msg.tag {
+                frontend::TERMINATE => return Ok(()),
+                frontend::COPY_DATA => {
+                    active_copy_in.buffer.extend_from_slice(&msg.payload);
+                    continue;
+                }
+                frontend::COPY_DONE => {
+                    let active_copy_in = copy_in.take().expect("active COPY state should exist");
+                    let await_sync = active_copy_in.await_sync;
+                    let had_error = pg_finish_copy_from_stdin(
+                        &state,
+                        &mut stream,
+                        &mut session,
+                        &mut tx_status,
+                        active_copy_in,
+                    )
+                    .await?;
+                    if had_error {
+                        if await_sync {
+                            skip_until_sync = true;
+                        } else {
+                            pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                        }
+                    } else if !await_sync {
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    }
+                    continue;
+                }
+                frontend::COPY_FAIL => {
+                    let await_sync = copy_in
+                        .as_ref()
+                        .map(|state| state.await_sync)
+                        .unwrap_or(false);
+                    let message = pg_wire::read_cstring_from(&msg.payload, 0).0;
+                    copy_in = None;
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "57014",
+                        &format!("COPY failed: {message}"),
+                    )
+                    .await?;
+                    tx_status = pg_tx_status_for_session(&session, session.tx_active);
+                    if await_sync {
+                        skip_until_sync = true;
+                    } else {
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    }
+                    continue;
+                }
+                _ => {
+                    let await_sync = copy_in
+                        .as_ref()
+                        .map(|state| state.await_sync)
+                        .unwrap_or(false);
+                    copy_in = None;
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "expected CopyData or CopyDone while COPY FROM STDIN is active",
+                    )
+                    .await?;
+                    tx_status = pg_tx_status_for_session(&session, session.tx_active);
+                    if await_sync {
+                        skip_until_sync = true;
+                    } else {
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    }
+                    continue;
+                }
+            }
+        }
+
         if skip_until_sync && !matches!(msg.tag, frontend::SYNC | frontend::TERMINATE) {
             continue;
         }
@@ -12858,6 +14954,21 @@ async fn handle_pg_connection(
                 prepared_statements.remove("");
                 portals.remove("");
                 let sql_raw = pg_wire::parse_query(&msg.payload);
+                if let Some(target) = pg_parse_copy_from_stdin(&sql_raw) {
+                    copy_in = pg_start_copy_from_stdin(
+                        &state,
+                        &mut stream,
+                        &session,
+                        &mut tx_status,
+                        &target,
+                        false,
+                    )
+                    .await?;
+                    if copy_in.is_none() {
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    }
+                    continue;
+                }
                 let _ = pg_dispatch_sql(
                     &state,
                     &mut stream,
@@ -13097,6 +15208,7 @@ async fn handle_pg_connection(
                         params,
                         result_columns: statement.result_columns,
                         result_formats,
+                        pending_result: None,
                     },
                 );
                 pg_wire::write_bind_complete(&mut stream).await?;
@@ -13183,7 +15295,7 @@ async fn handle_pg_connection(
                     continue;
                 }
 
-                let Some(portal) = portals.get(&portal_name).cloned() else {
+                let Some(mut portal) = portals.remove(&portal_name) else {
                     pg_wire::write_error_response(
                         &mut stream,
                         "ERROR",
@@ -13194,26 +15306,18 @@ async fn handle_pg_connection(
                     skip_until_sync = true;
                     continue;
                 };
-                let exec_sql = match pg_substitute_stmt_sql(&portal.sql, &portal.params) {
-                    Ok(sql) => sql,
-                    Err(message) => {
-                        pg_wire::write_error_response(&mut stream, "ERROR", "08P01", &message)
-                            .await?;
-                        skip_until_sync = true;
-                        continue;
-                    }
-                };
-                let had_error = pg_dispatch_sql(
+                let had_error = pg_execute_portal(
                     &state,
                     &mut stream,
                     &mut session,
                     &mut tx_status,
                     &mut savepoints,
-                    &exec_sql,
-                    Some(&portal.result_columns),
-                    &portal.result_formats,
+                    &mut copy_in,
+                    &mut portal,
+                    max_rows,
                 )
                 .await?;
+                portals.insert(portal_name, portal);
                 if had_error {
                     skip_until_sync = true;
                 }
@@ -13387,6 +15491,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (etag_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
+    let subs = engine.load_cdc_subscriptions_best_effort();
     let state = AppState {
         started: Instant::now(),
         data_dir,
@@ -13400,11 +15505,12 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         counters: Arc::new(Mutex::new(Counters::default())),
         txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
-        subs: Arc::new(Mutex::new(Subscriptions::default())),
+        subs: Arc::new(Mutex::new(subs)),
         coalesce: Arc::new(QueryCoalescer::default()),
         transport,
         shutdown_tx,
         etag_notify: Arc::new(etag_tx),
+        alert_delivery: Arc::new(Mutex::new(StatsAlertDeliveryState::default())),
     };
 
     // Load persisted settings if present.
@@ -13418,6 +15524,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .route("/api/v1/q/:query_id", get(prepared_get_handler))
         .route("/api/v1/q/:query_id/events", get(prepared_sse_handler))
         .route("/api/v1/cdc/sse/:sub_id", get(cdc_sse_handler))
+        .route("/api/v1/cdc/ws/:sub_id", get(cdc_ws_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/console", get(console_handler))
@@ -13485,6 +15592,13 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             }
         }))
     };
+    let compaction_handle = {
+        let state = app_state.clone();
+        let shutdown_rx = app_state.shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            run_compaction_worker_loop(state, shutdown_rx).await;
+        }))
+    };
 
     tracing::info!(
         bind = %opts.bind,
@@ -13537,6 +15651,9 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         handle.abort();
     }
     if let Some(handle) = pg_handle {
+        handle.abort();
+    }
+    if let Some(handle) = compaction_handle {
         handle.abort();
     }
 
@@ -13895,6 +16012,104 @@ fn cdc_sse_url(sub_id: &str) -> String {
     format!("/api/v1/cdc/sse/{sub_id}")
 }
 
+fn cdc_ws_url(sub_id: &str) -> String {
+    format!("/api/v1/cdc/ws/{sub_id}")
+}
+
+fn normalize_cdc_subscription_ops(ops: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(ops.len());
+    for op in ops {
+        let op = op.trim().to_ascii_lowercase();
+        if op.is_empty() {
+            anyhow::bail!("invalid_request: cdc ops entries must be non-empty strings");
+        }
+        if !matches!(op.as_str(), "insert" | "update" | "delete") {
+            anyhow::bail!("invalid_request: unsupported cdc op filter {op}");
+        }
+        normalized.push(op);
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn normalize_cdc_subscription_columns(columns: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(columns.len());
+    for column in columns {
+        let column = column.trim().to_string();
+        if column.is_empty() {
+            anyhow::bail!("invalid_request: cdc columns entries must be non-empty strings");
+        }
+        normalized.push(column);
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn normalize_cdc_subscription_pk_range(
+    pk_range: Option<CdcPrimaryKeyRange>,
+) -> anyhow::Result<Option<CdcPrimaryKeyRange>> {
+    let Some(pk_range) = pk_range else {
+        return Ok(None);
+    };
+    if pk_range.lower_bound.is_none() && pk_range.upper_bound.is_none() {
+        anyhow::bail!("invalid_request: cdc pk_range requires at least one bound");
+    }
+    Ok(Some(pk_range))
+}
+
+fn parse_cdc_subscription_options(
+    include: Option<Value>,
+    format: Option<String>,
+    ops: Vec<String>,
+    pk: Vec<Lit>,
+    pk_range: Option<CdcPrimaryKeyRange>,
+    columns: Vec<String>,
+) -> anyhow::Result<CdcSubscriptionOptions> {
+    let format = parse_cdc_event_format(format)?;
+
+    let mut options = CdcSubscriptionOptions {
+        format,
+        ops: normalize_cdc_subscription_ops(ops)?,
+        pk,
+        pk_range: normalize_cdc_subscription_pk_range(pk_range)?,
+        columns: normalize_cdc_subscription_columns(columns)?,
+        ..CdcSubscriptionOptions::default()
+    };
+
+    let Some(include) = include else {
+        return Ok(options);
+    };
+    let Value::Object(fields) = include else {
+        anyhow::bail!("invalid_request: cdc include must be an object");
+    };
+
+    for (key, value) in fields {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: cdc include.{key} must be boolean"))?;
+        match key.as_str() {
+            "before" => options.include_before = enabled,
+            "after" => options.include_after = enabled,
+            _ => anyhow::bail!("invalid_request: unsupported cdc include option {key}"),
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_cdc_event_format(format: Option<String>) -> anyhow::Result<CdcEventFormat> {
+    let Some(format) = format else {
+        return Ok(CdcEventFormat::ObjectsJson);
+    };
+    match format.as_str() {
+        "objects_json" => Ok(CdcEventFormat::ObjectsJson),
+        "plain_json" => Ok(CdcEventFormat::PlainJson),
+        _ => anyhow::bail!("invalid_request: unsupported cdc format {format}"),
+    }
+}
+
 fn parse_last_event_id(headers: &HeaderMap) -> Result<Option<u64>, &'static str> {
     let Some(value) = headers.get("Last-Event-ID") else {
         return Ok(None);
@@ -13912,11 +16127,14 @@ fn parse_last_event_id(headers: &HeaderMap) -> Result<Option<u64>, &'static str>
         .map_err(|_| "invalid Last-Event-ID header")
 }
 
-fn build_cdc_sse_event(change: &ChangeEvent) -> Result<sse::Event, serde_json::Error> {
+fn build_cdc_sse_event(
+    change: &ChangeEvent,
+    format: CdcEventFormat,
+) -> Result<sse::Event, serde_json::Error> {
     Ok(sse::Event::default()
         .id(change.seq.to_string())
         .event(change.op.clone())
-        .data(serde_json::to_string(change)?))
+        .data(cdc_event_delivery_string(change, format)?))
 }
 
 fn build_cdc_sse_resnapshot_event(
@@ -13936,6 +16154,72 @@ fn build_cdc_sse_resnapshot_event(
             "resnapshot_from_offset": batch.resnapshot_from_offset,
             "reason": batch.resnapshot_reason.clone(),
         }))?))
+}
+
+fn build_cdc_sse_backpressure_event(
+    sub_id: &str,
+    batch: &CdcPollResult,
+) -> Result<sse::Event, serde_json::Error> {
+    Ok(sse::Event::default()
+        .id(batch.next_offset.to_string())
+        .event("backpressure")
+        .data(serde_json::to_string(&serde_json::json!({
+            "sub_id": sub_id,
+            "state": batch.backpressure.state,
+            "lag": batch.backpressure.lag,
+            "remaining_until_resnapshot": batch.backpressure.remaining_until_resnapshot,
+            "paused": batch.backpressure.paused,
+            "earliest_offset": batch.earliest_offset,
+            "latest_offset": batch.latest_offset,
+        }))?))
+}
+
+fn build_cdc_ws_event(
+    change: &ChangeEvent,
+    format: CdcEventFormat,
+) -> Result<String, serde_json::Error> {
+    let data = cdc_event_delivery_value(change, format)?;
+    serde_json::to_string(&serde_json::json!({
+        "id": change.seq,
+        "event": &change.op,
+        "data": data,
+    }))
+}
+
+fn build_cdc_ws_resnapshot_event(
+    sub_id: &str,
+    batch: &CdcPollResult,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "id": batch.resnapshot_from_offset.unwrap_or(batch.next_offset),
+        "event": "resnapshot",
+        "data": {
+            "sub_id": sub_id,
+            "earliest_offset": batch.earliest_offset,
+            "latest_offset": batch.latest_offset,
+            "resnapshot_from_offset": batch.resnapshot_from_offset,
+            "reason": batch.resnapshot_reason.clone(),
+        }
+    }))
+}
+
+fn build_cdc_ws_backpressure_event(
+    sub_id: &str,
+    batch: &CdcPollResult,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "id": batch.next_offset,
+        "event": "backpressure",
+        "data": {
+            "sub_id": sub_id,
+            "state": batch.backpressure.state,
+            "lag": batch.backpressure.lag,
+            "remaining_until_resnapshot": batch.backpressure.remaining_until_resnapshot,
+            "paused": batch.backpressure.paused,
+            "earliest_offset": batch.earliest_offset,
+            "latest_offset": batch.latest_offset,
+        }
+    }))
 }
 
 fn advisor_build_failure_reason() -> Option<String> {
@@ -13981,6 +16265,7 @@ async fn cdc_sse_handler(
     tokio::spawn(async move {
         let mut cursor = start_offset;
         let mut wake_rx = stream_state.etag_notify.subscribe();
+        let mut last_backpressure_state: Option<String> = None;
 
         loop {
             let batch = {
@@ -13999,10 +16284,28 @@ async fn cdc_sse_handler(
                         let _ = tx.send(Ok(sse_event)).await;
                         return;
                     }
+                    if batch.backpressure.state != "healthy" {
+                        if last_backpressure_state.as_deref()
+                            != Some(batch.backpressure.state.as_str())
+                        {
+                            let Ok(sse_event) =
+                                build_cdc_sse_backpressure_event(&stream_sub_id, &batch)
+                            else {
+                                return;
+                            };
+                            if tx.send(Ok(sse_event)).await.is_err() {
+                                return;
+                            }
+                            last_backpressure_state = Some(batch.backpressure.state.clone());
+                        }
+                    } else {
+                        last_backpressure_state = None;
+                    }
                     if !batch.events.is_empty() {
+                        let event_format = batch.format;
                         for event in batch.events {
                             cursor = event.seq;
-                            let Ok(sse_event) = build_cdc_sse_event(&event) else {
+                            let Ok(sse_event) = build_cdc_sse_event(&event, event_format) else {
                                 return;
                             };
                             if tx.send(Ok(sse_event)).await.is_err() {
@@ -14027,6 +16330,101 @@ async fn cdc_sse_handler(
 
     sse::Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
         .keep_alive(sse::KeepAlive::default())
+        .into_response()
+}
+
+async fn cdc_ws_session(
+    mut socket: WebSocket,
+    state: AppState,
+    stream_sub_id: String,
+    start_offset: u64,
+) {
+    let mut cursor = start_offset;
+    let mut wake_rx = state.etag_notify.subscribe();
+    let mut last_backpressure_state: Option<String> = None;
+
+    loop {
+        let batch = {
+            let eng = state.engine.read().await;
+            let subs = state.subs.lock().unwrap();
+            eng.cdc_poll(&subs, &stream_sub_id, cursor, CDC_SSE_BATCH_LIMIT)
+        };
+
+        match batch {
+            Ok(batch) => {
+                if batch.resnapshot_required {
+                    let Ok(message) = build_cdc_ws_resnapshot_event(&stream_sub_id, &batch) else {
+                        return;
+                    };
+                    let _ = socket.send(WsMessage::Text(message)).await;
+                    return;
+                }
+                if batch.backpressure.state != "healthy" {
+                    if last_backpressure_state.as_deref() != Some(batch.backpressure.state.as_str())
+                    {
+                        let Ok(message) = build_cdc_ws_backpressure_event(&stream_sub_id, &batch)
+                        else {
+                            return;
+                        };
+                        if socket.send(WsMessage::Text(message)).await.is_err() {
+                            return;
+                        }
+                        last_backpressure_state = Some(batch.backpressure.state.clone());
+                    }
+                } else {
+                    last_backpressure_state = None;
+                }
+                if !batch.events.is_empty() {
+                    let event_format = batch.format;
+                    for event in batch.events {
+                        cursor = event.seq;
+                        let Ok(message) = build_cdc_ws_event(&event, event_format) else {
+                            return;
+                        };
+                        if socket.send(WsMessage::Text(message)).await.is_err() {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+            }
+            Err(_) => return,
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(CDC_SSE_FALLBACK_POLL_MS)) => {}
+            wake = wake_rx.recv() => match wake {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+async fn cdc_ws_handler(
+    ws: WebSocketUpgrade,
+    Path(sub_id): Path<String>,
+    AxumQuery(params): AxumQuery<CdcSseParams>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let last_event_id = match parse_last_event_id(&headers) {
+        Ok(value) => value,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+
+    let start_offset = {
+        let subs = state.subs.lock().unwrap();
+        let Some(sub) = subs.subs.get(&sub_id) else {
+            return (StatusCode::NOT_FOUND, "unknown sub_id").into_response();
+        };
+        params
+            .from_offset
+            .or(last_event_id)
+            .unwrap_or(sub.acked_offset)
+    };
+
+    ws.on_upgrade(move |socket| cdc_ws_session(socket, state, sub_id, start_offset))
         .into_response()
 }
 
@@ -14204,6 +16602,43 @@ fn percentile_u64_slice(samples: &[u64], percentile: f64) -> u64 {
 
 fn percentile_ms(samples: &VecDeque<u64>, percentile: f64) -> u64 {
     percentile_u64_slice(&samples.iter().copied().collect::<Vec<_>>(), percentile)
+}
+
+const QUERY_LATENCY_HISTOGRAM_BOUNDS_MS: &[u64] =
+    &[1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
+
+fn query_latency_histogram_json(samples: &[u64]) -> Value {
+    let mut counts = vec![0u64; QUERY_LATENCY_HISTOGRAM_BOUNDS_MS.len()];
+    let mut overflow_count = 0u64;
+
+    for sample in samples {
+        if let Some(index) = QUERY_LATENCY_HISTOGRAM_BOUNDS_MS
+            .iter()
+            .position(|bound| sample <= bound)
+        {
+            counts[index] = counts[index].saturating_add(1);
+        } else {
+            overflow_count = overflow_count.saturating_add(1);
+        }
+    }
+
+    let buckets = QUERY_LATENCY_HISTOGRAM_BOUNDS_MS
+        .iter()
+        .zip(counts)
+        .map(|(le_ms, count)| {
+            serde_json::json!({
+                "le_ms": le_ms,
+                "count": count,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "unit": "ms",
+        "sample_count": samples.len(),
+        "buckets": buckets,
+        "overflow_count": overflow_count,
+    })
 }
 
 /// Record a MySQL feature flag hit for telemetry (T110).
@@ -14708,6 +17143,121 @@ fn stats_top_queries(state: &AppState, params: Option<Value>) -> Result<Value, R
     }))
 }
 
+fn stats_query_fingerprint_latency(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, RpcError> {
+    #[derive(Clone)]
+    struct Row {
+        method: String,
+        fingerprint: String,
+        count: u64,
+        error_count: u64,
+        avg_ms: f64,
+        p50_ms: u64,
+        p95_ms: u64,
+        p99_ms: u64,
+        max_ms: u64,
+        last_status: u16,
+        last_seen_ms: u64,
+        histogram: Value,
+    }
+
+    let limit = params
+        .as_ref()
+        .and_then(|v| v.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 100) as usize;
+
+    let sort_by = params
+        .as_ref()
+        .and_then(|v| v.get("sort_by"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("p95_ms");
+
+    let fingerprint_filter = params
+        .as_ref()
+        .and_then(|v| v.get("fingerprint"))
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+
+    let mut rows = {
+        let counters = state.counters.lock().unwrap();
+        counters
+            .query_stats
+            .iter()
+            .filter(|(fingerprint, _)| {
+                fingerprint_filter
+                    .as_ref()
+                    .map(|filter| *fingerprint == filter)
+                    .unwrap_or(true)
+            })
+            .map(|(fingerprint, agg)| {
+                let samples = agg.latency_samples_ms.iter().copied().collect::<Vec<_>>();
+                Row {
+                    method: agg.method.clone(),
+                    fingerprint: fingerprint.clone(),
+                    count: agg.count,
+                    error_count: agg.error_count,
+                    avg_ms: agg.avg_ms(),
+                    p50_ms: percentile_u64_slice(&samples, 50.0),
+                    p95_ms: percentile_u64_slice(&samples, 95.0),
+                    p99_ms: percentile_u64_slice(&samples, 99.0),
+                    max_ms: agg.max_ms,
+                    last_status: agg.last_status,
+                    last_seen_ms: agg.last_seen_ms,
+                    histogram: query_latency_histogram_json(&samples),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    rows.sort_by(|a, b| {
+        let ord = match sort_by {
+            "count" => b.count.cmp(&a.count),
+            "avg_ms" => b
+                .avg_ms
+                .partial_cmp(&a.avg_ms)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            "p50_ms" => b.p50_ms.cmp(&a.p50_ms),
+            "p99_ms" => b.p99_ms.cmp(&a.p99_ms),
+            "max_ms" => b.max_ms.cmp(&a.max_ms),
+            _ => b.p95_ms.cmp(&a.p95_ms),
+        };
+        ord.then_with(|| b.count.cmp(&a.count))
+            .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
+    });
+
+    let queries = rows
+        .into_iter()
+        .take(limit)
+        .map(|row| {
+            serde_json::json!({
+                "method": row.method,
+                "fingerprint": row.fingerprint,
+                "count": row.count,
+                "error_count": row.error_count,
+                "avg_ms": row.avg_ms,
+                "p50_ms": row.p50_ms,
+                "p95_ms": row.p95_ms,
+                "p99_ms": row.p99_ms,
+                "max_ms": row.max_ms,
+                "last_status": row.last_status,
+                "last_seen_ms": row.last_seen_ms,
+                "histogram": row.histogram,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!({
+        "limit": limit,
+        "sort_by": sort_by,
+        "fingerprint": fingerprint_filter,
+        "queries": queries,
+    }))
+}
+
 fn stats_slow_queries(state: &AppState, params: Option<Value>) -> Result<Value, RpcError> {
     let limit = params
         .as_ref()
@@ -14983,6 +17533,9 @@ pub(crate) async fn handle_rpc(
                 }
                 "stats.snapshot" => Ok(stats_snapshot(state).await),
                 "stats.top_queries" => stats_top_queries(state, params.clone()),
+                "stats.query_fingerprint_latency" => {
+                    stats_query_fingerprint_latency(state, params.clone())
+                }
                 "stats.slow_queries" => stats_slow_queries(state, params.clone()),
                 "settings.get" => handle_settings_get(state, params.clone()),
                 "settings.list" => handle_settings_list(state),
@@ -16776,30 +19329,52 @@ pub(crate) async fn handle_rpc(
                 // --------------------
                 "cdc.subscribe_table" => {
                     let p: CdcSubscribeTableParams = parse_params(params.clone())?;
+                    let options = parse_cdc_subscription_options(
+                        p.include,
+                        p.format,
+                        p.ops,
+                        p.pk,
+                        p.pk_range,
+                        p.columns,
+                    )
+                    .map_err(to_rpc_error)?;
                     let eng = state.engine.read().await;
                     let mut subs = state.subs.lock().unwrap();
                     let r = eng
-                        .cdc_subscribe_table(&mut subs, &p.db, &p.table)
+                        .cdc_subscribe_table_with_options(&mut subs, &p.db, &p.table, options)
                         .map_err(to_rpc_error)?;
                     let sse_url = cdc_sse_url(&r.sub_id);
+                    let ws_url = cdc_ws_url(&r.sub_id);
                     Ok(serde_json::json!({
                         "sub_id": r.sub_id,
                         "offset": r.offset,
                         "sse_url": sse_url,
+                        "ws_url": ws_url,
                     }))
                 }
                 "cdc.subscribe_query" => {
                     let p: CdcSubscribeQueryParams = parse_params(params.clone())?;
+                    let options = parse_cdc_subscription_options(
+                        p.include,
+                        p.format,
+                        p.ops,
+                        p.pk,
+                        p.pk_range,
+                        p.columns,
+                    )
+                    .map_err(to_rpc_error)?;
                     let eng = state.engine.read().await;
                     let mut subs = state.subs.lock().unwrap();
                     let r = eng
-                        .cdc_subscribe_query(&mut subs, &p.query_id, &p.args)
+                        .cdc_subscribe_query_with_options(&mut subs, &p.query_id, &p.args, options)
                         .map_err(to_rpc_error)?;
                     let sse_url = cdc_sse_url(&r.sub_id);
+                    let ws_url = cdc_ws_url(&r.sub_id);
                     Ok(serde_json::json!({
                         "sub_id": r.sub_id,
                         "offset": r.offset,
                         "sse_url": sse_url,
+                        "ws_url": ws_url,
                     }))
                 }
                 "cdc.poll" => {
@@ -16820,6 +19395,22 @@ pub(crate) async fn handle_rpc(
                     let r = eng
                         .cdc_ack(&mut subs, &p.sub_id, p.offset)
                         .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "cdc.pause" => {
+                    let p: CdcPauseParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng.cdc_pause(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "cdc.resume" => {
+                    let p: CdcResumeParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng.cdc_resume(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -25124,6 +27715,112 @@ fn pg_catalog_builtin_type_rows() -> Vec<BTreeMap<String, Lit>> {
     rows
 }
 
+fn pg_catalog_builtin_proc_rows() -> Vec<BTreeMap<String, Lit>> {
+    let namespace_oid = pg_catalog_namespace_oid("pg_catalog");
+    let owner_oid = 10u64;
+    let internal_lang_oid = 12u64;
+    let specs = [
+        ("array_agg", "a", 1i64, pg_wire::oid::TEXT as u64),
+        ("array_length", "f", 2i64, pg_wire::oid::INT8 as u64),
+        ("array_lower", "f", 2i64, pg_wire::oid::INT8 as u64),
+        ("array_upper", "f", 2i64, pg_wire::oid::INT8 as u64),
+        ("char_length", "f", 1i64, pg_wire::oid::INT8 as u64),
+        ("clock_timestamp", "f", 0i64, pg_wire::oid::TIMESTAMP as u64),
+        ("current_database", "f", 0i64, pg_wire::oid::TEXT as u64),
+        ("current_schema", "f", 0i64, pg_wire::oid::TEXT as u64),
+        (
+            "current_schemas",
+            "f",
+            1i64,
+            pg_wire::oid::TEXT_ARRAY as u64,
+        ),
+        ("current_setting", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("current_setting", "f", 2i64, pg_wire::oid::TEXT as u64),
+        ("date_trunc", "f", 2i64, pg_wire::oid::TIMESTAMP as u64),
+        ("gen_random_uuid", "f", 0i64, pg_wire::oid::UUID as u64),
+        ("left", "f", 2i64, pg_wire::oid::TEXT as u64),
+        ("length", "f", 1i64, pg_wire::oid::INT8 as u64),
+        ("lower", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("ltrim", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("pg_typeof", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("replace", "f", 3i64, pg_wire::oid::TEXT as u64),
+        ("right", "f", 2i64, pg_wire::oid::TEXT as u64),
+        ("rtrim", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("split_part", "f", 3i64, pg_wire::oid::TEXT as u64),
+        ("starts_with", "f", 2i64, pg_wire::oid::BOOL as u64),
+        (
+            "statement_timestamp",
+            "f",
+            0i64,
+            pg_wire::oid::TIMESTAMP as u64,
+        ),
+        ("string_agg", "a", 2i64, pg_wire::oid::TEXT as u64),
+        (
+            "string_to_array",
+            "f",
+            2i64,
+            pg_wire::oid::TEXT_ARRAY as u64,
+        ),
+        ("substring", "f", 2i64, pg_wire::oid::TEXT as u64),
+        ("substring", "f", 3i64, pg_wire::oid::TEXT as u64),
+        ("to_char", "f", 2i64, pg_wire::oid::TEXT as u64),
+        (
+            "transaction_timestamp",
+            "f",
+            0i64,
+            pg_wire::oid::TIMESTAMP as u64,
+        ),
+        ("trim", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("upper", "f", 1i64, pg_wire::oid::TEXT as u64),
+        ("version", "f", 0i64, pg_wire::oid::TEXT as u64),
+    ];
+    let mut rows = Vec::with_capacity(specs.len());
+    for (name, prokind, pronargs, prorettype) in specs {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "oid".to_string(),
+            Lit::U64 {
+                v: pg_catalog_hash_oid(&["pg_proc", name, prokind, &pronargs.to_string()]),
+            },
+        );
+        row.insert(
+            "proname".to_string(),
+            Lit::Str {
+                v: name.to_string(),
+            },
+        );
+        row.insert("pronamespace".to_string(), Lit::U64 { v: namespace_oid });
+        row.insert("proowner".to_string(), Lit::U64 { v: owner_oid });
+        row.insert(
+            "prolang".to_string(),
+            Lit::U64 {
+                v: internal_lang_oid,
+            },
+        );
+        row.insert("procost".to_string(), Lit::F64 { v: 1.0 });
+        row.insert("prorows".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("provariadic".to_string(), Lit::U64 { v: 0 });
+        row.insert("prosupport".to_string(), Lit::U64 { v: 0 });
+        row.insert(
+            "prokind".to_string(),
+            Lit::Str {
+                v: prokind.to_string(),
+            },
+        );
+        row.insert("prosecdef".to_string(), Lit::Bool { v: false });
+        row.insert("proleakproof".to_string(), Lit::Bool { v: false });
+        row.insert("proisstrict".to_string(), Lit::Bool { v: false });
+        row.insert("proretset".to_string(), Lit::Bool { v: false });
+        row.insert("provolatile".to_string(), Lit::Str { v: "s".to_string() });
+        row.insert("proparallel".to_string(), Lit::Str { v: "s".to_string() });
+        row.insert("pronargs".to_string(), Lit::I64 { v: pronargs });
+        row.insert("pronargdefaults".to_string(), Lit::I64 { v: 0 });
+        row.insert("prorettype".to_string(), Lit::U64 { v: prorettype });
+        rows.push(row);
+    }
+    rows
+}
+
 fn pg_catalog_select_result(
     eng: &Engine,
     table: &BaseTableRef,
@@ -25815,6 +28512,7 @@ fn pg_catalog_select_result(
             "stats_reset",
         ]
     } else if table.table.eq_ignore_ascii_case("pg_proc") {
+        rows.extend(pg_catalog_builtin_proc_rows());
         vec![
             "oid",
             "proname",
@@ -27512,6 +30210,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "tx.rollback",
         "stats.snapshot",
         "stats.top_queries",
+        "stats.query_fingerprint_latency",
         "stats.slow_queries",
         "settings.get",
         "settings.list",
@@ -27635,6 +30334,8 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cdc.subscribe_query",
         "cdc.poll",
         "cdc.ack",
+        "cdc.pause",
+        "cdc.resume",
         "cdc.close",
         "security.token.create",
         "security.token.list",
@@ -27745,6 +30446,59 @@ fn collect_l0_segment_stats(data_dir: &std::path::Path) -> L0SegmentStats {
     stats
 }
 
+fn collect_compaction_worker_tasks(data_dir: &std::path::Path) -> Vec<CompactionWorkerTask> {
+    let mut tasks = Vec::new();
+    let tables_dir = data_dir.join("tables");
+    let Ok(db_dirs) = std::fs::read_dir(&tables_dir) else {
+        return tasks;
+    };
+    for db_dir in db_dirs.flatten() {
+        let Ok(file_type) = db_dir.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let db = match db_dir.file_name().to_str() {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => continue,
+        };
+        let Ok(entries) = std::fs::read_dir(db_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rseg") {
+                continue;
+            }
+            let Some(table) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            tasks.push(CompactionWorkerTask {
+                db: db.clone(),
+                table,
+                path,
+                bytes,
+            });
+        }
+    }
+    tasks.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.db.cmp(&right.db))
+            .then_with(|| left.table.cmp(&right.table))
+    });
+    tasks
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactionPolicyKind {
     FixedLeveling,
@@ -27835,6 +30589,7 @@ struct CompactionRuntimeSnapshot {
     point_reads: WorkloadTelemetryBucket,
     range_reads: WorkloadTelemetryBucket,
     writes: WorkloadTelemetryBucket,
+    recent_latency_ms: Vec<u64>,
     read_latency_ms: Vec<u64>,
     avg_latency_ms: f64,
     slow_count: u64,
@@ -27851,12 +30606,58 @@ struct CompactionRuntimeSnapshot {
     effective_cpu_pct: f64,
     pending_tasks: u64,
     current_task: Option<String>,
+    compaction_runs: u64,
+    compaction_last_run_ms: u64,
+    compaction_bytes_rewritten: u64,
+    compaction_bytes_reclaimed: u64,
+    compaction_orphan_files_removed: u64,
+    compaction_last_completed_task: Option<String>,
+    compaction_last_error: Option<String>,
     priority_stall_risk: f64,
     priority_space_pressure: f64,
     priority_read_pressure: f64,
     priority_health: f64,
     priority_score: f64,
     energy: CompactionEnergyRuntime,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionWorkerTask {
+    db: String,
+    table: String,
+    path: PathBuf,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionWorkerTaskKind {
+    SegmentRewrite,
+    LegacySegmentCleanup,
+    OrphanCleanup,
+}
+
+impl CompactionWorkerTaskKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SegmentRewrite => "segment_rewrite",
+            Self::LegacySegmentCleanup => "legacy_segment_cleanup",
+            Self::OrphanCleanup => "orphan_cleanup",
+        }
+    }
+
+    fn file_pressure_rank(self) -> u8 {
+        match self {
+            Self::OrphanCleanup => 0,
+            Self::LegacySegmentCleanup => 1,
+            Self::SegmentRewrite => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlannedCompactionWorkerTask {
+    task: CompactionWorkerTask,
+    kind: CompactionWorkerTaskKind,
 }
 
 fn setting_bool(
@@ -28326,9 +31127,11 @@ fn collect_compaction_runtime(
     let mut point_reads = WorkloadTelemetryBucket::default();
     let mut range_reads = WorkloadTelemetryBucket::default();
     let mut writes = WorkloadTelemetryBucket::default();
+    let mut recent_latency_ms = Vec::with_capacity(recent_queries.len());
     let mut total_recent_latency_ms = 0u64;
     let mut slow_count = 0u64;
     for sample in &recent_queries {
+        recent_latency_ms.push(sample.duration_ms);
         total_recent_latency_ms = total_recent_latency_ms.saturating_add(sample.duration_ms);
         if sample.duration_ms >= 200 {
             slow_count = slow_count.saturating_add(1);
@@ -28352,7 +31155,7 @@ fn collect_compaction_runtime(
         total_recent_latency_ms as f64 / recent_queries.len() as f64
     };
 
-    let (stall_rate, pressure_rate, pressure_events_total, last_pressure_event) = {
+    let (stall_rate, pressure_rate, pressure_events_total, last_pressure_event, worker_stats) = {
         let mut counters = state.counters.lock().unwrap();
         if record_sample {
             maybe_record_compaction_sample(
@@ -28364,7 +31167,15 @@ fn collect_compaction_runtime(
                 &pressure_reasons,
             );
         }
-        compaction_sampling_snapshot(&counters)
+        let (stall_rate, pressure_rate, pressure_events_total, last_pressure_event) =
+            compaction_sampling_snapshot(&counters);
+        (
+            stall_rate,
+            pressure_rate,
+            pressure_events_total,
+            last_pressure_event,
+            counters.compaction_worker.clone(),
+        )
     };
 
     let now_minute = current_utc_minute_of_day(now_ms);
@@ -28497,7 +31308,9 @@ fn collect_compaction_runtime(
         energy_constraint_score,
     );
 
-    let scheduler_mode = if !config.enabled {
+    let scheduler_mode = if worker_stats.active_task.is_some() {
+        "running"
+    } else if !config.enabled {
         "disabled"
     } else if hard_pressure {
         "safe_mode"
@@ -28525,22 +31338,24 @@ fn collect_compaction_runtime(
     }
     .to_string();
 
-    let pending_tasks = if l0.files == 0 && !soft_pressure && !hard_pressure {
+    let pending_tasks = if !config.enabled
+        || (config.paused && !hard_pressure)
+        || (!soft_pressure && !hard_pressure)
+    {
         0
     } else {
-        1 + u64::from(soft_pressure) + u64::from(hard_pressure)
+        collect_compaction_worker_tasks(&state.data_dir).len() as u64
     };
-    let current_task = if effective_io_bytes_per_s == 0 {
+    let planned_task = if effective_io_bytes_per_s == 0 || pending_tasks == 0 {
         None
     } else if hard_pressure {
         Some(format!("l0_emergency_drain:{}", config.policy.as_str()))
     } else if soft_pressure {
         Some(format!("l0_pressure_relief:{}", config.policy.as_str()))
-    } else if l0.files > 0 {
-        Some(format!("opportunistic_merge:{}", config.policy.as_str()))
     } else {
         None
     };
+    let current_task = worker_stats.active_task.clone().or(planned_task);
 
     CompactionRuntimeSnapshot {
         config,
@@ -28556,6 +31371,7 @@ fn collect_compaction_runtime(
         point_reads,
         range_reads,
         writes,
+        recent_latency_ms,
         read_latency_ms,
         avg_latency_ms,
         slow_count,
@@ -28572,6 +31388,13 @@ fn collect_compaction_runtime(
         effective_cpu_pct: round_metric(effective_cpu_pct),
         pending_tasks,
         current_task,
+        compaction_runs: worker_stats.runs,
+        compaction_last_run_ms: worker_stats.last_run_ms,
+        compaction_bytes_rewritten: worker_stats.bytes_rewritten,
+        compaction_bytes_reclaimed: worker_stats.bytes_reclaimed,
+        compaction_orphan_files_removed: worker_stats.orphan_files_removed,
+        compaction_last_completed_task: worker_stats.last_completed_task,
+        compaction_last_error: worker_stats.last_error,
         priority_stall_risk: round_metric(stall_risk * 100.0),
         priority_space_pressure: round_metric(space_pressure.min(1.5) * 100.0),
         priority_read_pressure: round_metric(read_pressure.min(1.5) * 100.0),
@@ -28590,7 +31413,7 @@ fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
         })
     });
     serde_json::json!({
-        "runs": 0,
+        "runs": snapshot.compaction_runs,
         "status": snapshot.status,
         "l0_files": snapshot.l0.files,
         "l0_bytes": snapshot.l0.bytes,
@@ -28675,7 +31498,13 @@ fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
             },
             "tasks": {
                 "pending": snapshot.pending_tasks,
-                "current": snapshot.current_task
+                "current": snapshot.current_task,
+                "last_completed": snapshot.compaction_last_completed_task,
+                "last_run_ms": snapshot.compaction_last_run_ms,
+                "bytes_rewritten": snapshot.compaction_bytes_rewritten,
+                "bytes_reclaimed": snapshot.compaction_bytes_reclaimed,
+                "orphan_files_removed": snapshot.compaction_orphan_files_removed,
+                "last_error": snapshot.compaction_last_error
             },
             "priority": {
                 "stall_risk": snapshot.priority_stall_risk,
@@ -28706,6 +31535,219 @@ fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
     })
 }
 
+fn compaction_has_file_pressure(runtime: &CompactionRuntimeSnapshot) -> bool {
+    runtime
+        .pressure_reasons
+        .iter()
+        .any(|reason| reason.starts_with("l0_files_"))
+}
+
+async fn collect_compaction_worker_queue(
+    state: &AppState,
+    runtime: &CompactionRuntimeSnapshot,
+) -> Vec<PlannedCompactionWorkerTask> {
+    if !runtime.config.enabled
+        || runtime.config.paused
+        || runtime.effective_io_bytes_per_s == 0
+        || (!runtime.soft_pressure && !runtime.hard_pressure)
+    {
+        return Vec::new();
+    }
+
+    let raw_tasks = collect_compaction_worker_tasks(&state.data_dir);
+    if raw_tasks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut planned = {
+        let engine = state.engine.read().await;
+        let json_mode = engine.storage_mode_name() == "json";
+        raw_tasks
+            .into_iter()
+            .filter(|task| task.bytes > 0)
+            .map(|task| {
+                let kind = if !engine.maintenance_compaction_table_exists(&task.db, &task.table) {
+                    CompactionWorkerTaskKind::OrphanCleanup
+                } else if json_mode {
+                    CompactionWorkerTaskKind::LegacySegmentCleanup
+                } else {
+                    CompactionWorkerTaskKind::SegmentRewrite
+                };
+                PlannedCompactionWorkerTask { task, kind }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if compaction_has_file_pressure(runtime) {
+        planned.sort_by(|left, right| {
+            left.kind
+                .file_pressure_rank()
+                .cmp(&right.kind.file_pressure_rank())
+                .then_with(|| left.task.bytes.cmp(&right.task.bytes))
+                .then_with(|| left.task.db.cmp(&right.task.db))
+                .then_with(|| left.task.table.cmp(&right.task.table))
+        });
+    } else {
+        planned.sort_by(|left, right| {
+            right
+                .task
+                .bytes
+                .cmp(&left.task.bytes)
+                .then_with(|| {
+                    left.kind
+                        .file_pressure_rank()
+                        .cmp(&right.kind.file_pressure_rank())
+                })
+                .then_with(|| left.task.db.cmp(&right.task.db))
+                .then_with(|| left.task.table.cmp(&right.task.table))
+        });
+    }
+
+    planned
+}
+
+fn compaction_worker_task_limit(runtime: &CompactionRuntimeSnapshot) -> usize {
+    if compaction_has_file_pressure(runtime) {
+        runtime.l0.files.clamp(1, 8) as usize
+    } else {
+        1
+    }
+}
+
+async fn run_compaction_worker_task(
+    state: &AppState,
+    planned: &PlannedCompactionWorkerTask,
+    now_ms: u64,
+) -> anyhow::Result<String> {
+    let task_name = format!(
+        "{}:{}.{}",
+        planned.kind.as_str(),
+        planned.task.db,
+        planned.task.table
+    );
+    {
+        let mut counters = state.counters.lock().unwrap();
+        counters.compaction_worker.active_task = Some(task_name.clone());
+        counters.compaction_worker.last_error = None;
+    }
+
+    let before_bytes = std::fs::metadata(&planned.task.path)
+        .map(|meta| meta.len())
+        .unwrap_or(planned.task.bytes);
+    let (storage_mode, persisted) = {
+        let engine = state.engine.write().await;
+        let storage_mode = engine.storage_mode_name().to_string();
+        let persisted = match planned.kind {
+            CompactionWorkerTaskKind::OrphanCleanup => false,
+            CompactionWorkerTaskKind::SegmentRewrite
+            | CompactionWorkerTaskKind::LegacySegmentCleanup => engine
+                .maintenance_compaction_rewrite_table(&planned.task.db, &planned.task.table)?,
+        };
+        (storage_mode, persisted)
+    };
+
+    let after_bytes = if persisted {
+        if storage_mode == "json" {
+            match std::fs::remove_file(&planned.task.path) {
+                Ok(()) => 0,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(err) => return Err(err.into()),
+            }
+        } else {
+            std::fs::metadata(&planned.task.path)
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        }
+    } else {
+        match std::fs::remove_file(&planned.task.path) {
+            Ok(()) => 0,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err.into()),
+        }
+    };
+
+    let bytes_reclaimed = before_bytes.saturating_sub(after_bytes);
+    {
+        let mut counters = state.counters.lock().unwrap();
+        counters.compaction_worker.active_task = None;
+        counters.compaction_worker.runs = counters.compaction_worker.runs.saturating_add(1);
+        counters.compaction_worker.last_run_ms = now_ms;
+        counters.compaction_worker.bytes_rewritten = counters
+            .compaction_worker
+            .bytes_rewritten
+            .saturating_add(before_bytes);
+        counters.compaction_worker.bytes_reclaimed = counters
+            .compaction_worker
+            .bytes_reclaimed
+            .saturating_add(bytes_reclaimed);
+        if planned.kind == CompactionWorkerTaskKind::OrphanCleanup {
+            counters.compaction_worker.orphan_files_removed = counters
+                .compaction_worker
+                .orphan_files_removed
+                .saturating_add(1);
+        }
+        counters.compaction_worker.last_completed_task = Some(task_name.clone());
+    }
+
+    Ok(task_name)
+}
+
+async fn run_compaction_worker_once(state: &AppState) -> anyhow::Result<Option<String>> {
+    let now_ms = now_unix_ms_u64();
+    let runtime = collect_compaction_runtime(state, now_ms, false);
+    let queue = collect_compaction_worker_queue(state, &runtime).await;
+    if queue.is_empty() {
+        return Ok(None);
+    }
+
+    let mut remaining_io_budget = runtime.effective_io_bytes_per_s.max(1);
+    let mut completed = Vec::new();
+    let task_limit = compaction_worker_task_limit(&runtime);
+
+    for planned in queue.into_iter() {
+        if completed.len() >= task_limit {
+            break;
+        }
+
+        let estimated_bytes = planned.task.bytes.max(1);
+        if !completed.is_empty() && estimated_bytes > remaining_io_budget {
+            continue;
+        }
+
+        let task_name = run_compaction_worker_task(state, &planned, now_ms).await?;
+        completed.push(task_name);
+        remaining_io_budget = remaining_io_budget.saturating_sub(estimated_bytes);
+    }
+
+    if completed.is_empty() {
+        Ok(None)
+    } else if completed.len() == 1 {
+        Ok(completed.pop())
+    } else {
+        Ok(Some(format!("batch:{} task(s)", completed.len())))
+    }
+}
+
+async fn run_compaction_worker_loop(state: AppState, mut shutdown_rx: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(Duration::from_millis(COMPACTION_WORKER_INTERVAL_MS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                break;
+            }
+            _ = ticker.tick() => {
+                if let Err(err) = run_compaction_worker_once(&state).await {
+                    let mut counters = state.counters.lock().unwrap();
+                    counters.compaction_worker.active_task = None;
+                    counters.compaction_worker.last_error = Some(err.to_string());
+                    tracing::warn!(?err, "compaction worker tick failed");
+                }
+            }
+        }
+    }
+}
+
 async fn maintenance_compaction_status(state: &AppState) -> Value {
     let runtime = collect_compaction_runtime(state, now_unix_ms_u64(), true);
     compaction_runtime_json(&runtime)
@@ -28733,16 +31775,24 @@ async fn stats_snapshot(state: &AppState) -> Value {
 
     let uptime_s = state.started.elapsed().as_secs();
     let now_ms = now_unix_ms_u64();
-    let (storage, value_lookup, learned_index) = {
+    let (storage, value_lookup, learned_index, cdc) = {
         let eng = state.engine.read().await;
+        let subs = state.subs.lock().unwrap();
         (
             eng.storage_stats_snapshot(),
             eng.value_lookup_distribution_snapshot(),
             eng.learned_index_report_snapshot(),
+            eng.cdc_runtime_stats_snapshot(&subs),
         )
     };
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
     let compaction = compaction_runtime_json(&compaction_runtime);
+    let alert_routes = {
+        let settings = state.settings.lock().unwrap();
+        stats_alert_routes(&settings)
+    };
+    let mut alerts = stats_snapshot_alerts(&compaction_runtime, &cdc, &alert_routes);
+    deliver_stats_snapshot_alerts(state, &mut alerts).await;
     let cluster = state.cluster.lock().unwrap().clone();
     let (
         total_rpc,
@@ -28798,6 +31848,11 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "recent_samples": query_samples,
             "slow_count": compaction_runtime.slow_count,
             "avg_latency_ms": round_metric(compaction_runtime.avg_latency_ms),
+            "latency_ms": {
+                "p50": percentile_u64_slice(&compaction_runtime.recent_latency_ms, 50.0),
+                "p95": percentile_u64_slice(&compaction_runtime.recent_latency_ms, 95.0),
+                "p99": percentile_u64_slice(&compaction_runtime.recent_latency_ms, 99.0)
+            },
             "etag_hits": etag_hits,
             "coalesced": coalesced_total
         },
@@ -28810,6 +31865,25 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "size_bytes": 0,
             "hits": plan_cache_hits,
             "misses": plan_cache_misses
+        },
+        "cdc": {
+            "active_subscriptions": cdc.active_subscriptions,
+            "table_subscriptions": cdc.table_subscriptions,
+            "query_subscriptions": cdc.query_subscriptions,
+            "total_lag": cdc.total_lag,
+            "max_lag": cdc.max_lag,
+            "resnapshot_subscriptions": cdc.resnapshot_subscriptions,
+            "paused_subscriptions": cdc.paused_subscriptions,
+            "pressured_subscriptions": cdc.pressured_subscriptions,
+            "throttle_recommended_subscriptions": cdc.throttle_recommended_subscriptions,
+            "earliest_offset": cdc.earliest_offset,
+            "latest_offset": cdc.latest_offset,
+            "retained_events": cdc.retained_events,
+            "retention_limit": cdc.retention_limit,
+            "dropped_events_total": cdc.dropped_events_total,
+            "warn_lag": cdc.warn_lag,
+            "throttle_lag": cdc.throttle_lag,
+            "min_remaining_until_resnapshot": cdc.min_remaining_until_resnapshot
         },
         "storage": {
             "wal_bytes": storage.wal_bytes,
@@ -28825,6 +31899,7 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "value_lookup": value_lookup,
             "learned_index": learned_index
         },
+        "alerts": alerts,
         "compaction": compaction,
         "background": {"compaction": compaction_runtime.scheduler_mode, "snapshots": "idle"},
         "cluster": {
@@ -29064,8 +32139,11 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 142);
+        assert_eq!(methods.len(), 145);
         assert!(methods.contains(&"migration.report_export"));
+        assert!(methods.contains(&"stats.query_fingerprint_latency"));
+        assert!(methods.contains(&"cdc.pause"));
+        assert!(methods.contains(&"cdc.resume"));
     }
 
     #[test]
@@ -29073,6 +32151,8 @@ mod tests {
         let html = admin_index_html();
         assert!(html.contains("SkeinAdmin"));
         assert!(html.contains("Feature Center"));
+        assert!(html.contains("Operational Alerts"));
+        assert!(html.contains("operationalAlertsGrid"));
         assert!(html.contains("RPC Explorer"));
         assert!(html.contains("Easy Viewer"));
         assert!(html.contains("data-etab=\"browse\""));
@@ -29100,6 +32180,8 @@ mod tests {
         assert!(js.contains("advisor.apply_index"));
         assert!(js.contains("telemetry.compat_summary"));
         assert!(js.contains("telemetry.workload_features"));
+        assert!(js.contains("function snapshotAlerts()"));
+        assert!(js.contains("function renderOperationalAlerts()"));
         assert!(js.contains("vector.benchmark"));
         assert!(js.contains("vector.index.status"));
         assert!(js.contains("dp.audit.log"));
@@ -29235,6 +32317,7 @@ mod tests {
         let local_node_id = "node-test".to_string();
         let (shutdown_tx, _) = watch::channel(false);
         let (etag_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+        let subs = engine.load_cdc_subscriptions_best_effort();
         AppState {
             started: Instant::now(),
             data_dir: dir,
@@ -29248,7 +32331,7 @@ mod tests {
             counters: Arc::new(Mutex::new(Counters::default())),
             txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
-            subs: Arc::new(Mutex::new(Subscriptions::default())),
+            subs: Arc::new(Mutex::new(subs)),
             coalesce: Arc::new(QueryCoalescer::default()),
             transport: TransportCapabilities {
                 http: true,
@@ -29256,6 +32339,7 @@ mod tests {
             },
             shutdown_tx,
             etag_notify: Arc::new(etag_tx),
+            alert_delivery: Arc::new(Mutex::new(StatsAlertDeliveryState::default())),
         }
     }
 
@@ -29950,6 +33034,222 @@ mod tests {
         assert_eq!(namespace_rows.len(), 1);
         assert_eq!(namespace_rows[0][0]["v"].as_str(), Some("public"));
 
+        let procs = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT proname, prokind, pronargs, prorettype FROM pg_catalog.pg_proc WHERE proname IN ('array_agg', 'array_length', 'array_lower', 'array_upper', 'char_length', 'clock_timestamp', 'current_schemas', 'current_setting', 'date_trunc', 'gen_random_uuid', 'left', 'length', 'lower', 'ltrim', 'pg_typeof', 'replace', 'right', 'rtrim', 'split_part', 'starts_with', 'statement_timestamp', 'string_agg', 'string_to_array', 'substring', 'to_char', 'transaction_timestamp', 'trim', 'upper') ORDER BY proname, pronargs"
+            }),
+        )
+        .await;
+        assert!(procs.ok);
+        let proc_rows = procs
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let proc_summary = proc_rows
+            .iter()
+            .map(|row| {
+                (
+                    row[0]["v"].as_str().unwrap_or_default().to_string(),
+                    row[1]["v"].as_str().unwrap_or_default().to_string(),
+                    row[2]["v"].as_i64().unwrap_or_default(),
+                    row[3]["v"].as_u64().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(proc_rows.len(), 30);
+        assert_eq!(
+            proc_summary,
+            vec![
+                (
+                    "array_agg".to_string(),
+                    "a".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "array_length".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::INT8 as u64
+                ),
+                (
+                    "array_lower".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::INT8 as u64
+                ),
+                (
+                    "array_upper".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::INT8 as u64
+                ),
+                (
+                    "char_length".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::INT8 as u64
+                ),
+                (
+                    "clock_timestamp".to_string(),
+                    "f".to_string(),
+                    0,
+                    pg_wire::oid::TIMESTAMP as u64,
+                ),
+                (
+                    "current_schemas".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT_ARRAY as u64,
+                ),
+                (
+                    "current_setting".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "current_setting".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64,
+                ),
+                (
+                    "date_trunc".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TIMESTAMP as u64
+                ),
+                (
+                    "gen_random_uuid".to_string(),
+                    "f".to_string(),
+                    0,
+                    pg_wire::oid::UUID as u64
+                ),
+                (
+                    "left".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "length".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::INT8 as u64
+                ),
+                (
+                    "lower".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "ltrim".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "pg_typeof".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "replace".to_string(),
+                    "f".to_string(),
+                    3,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "right".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "rtrim".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "split_part".to_string(),
+                    "f".to_string(),
+                    3,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "starts_with".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::BOOL as u64
+                ),
+                (
+                    "statement_timestamp".to_string(),
+                    "f".to_string(),
+                    0,
+                    pg_wire::oid::TIMESTAMP as u64,
+                ),
+                (
+                    "string_agg".to_string(),
+                    "a".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "string_to_array".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT_ARRAY as u64,
+                ),
+                (
+                    "substring".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "substring".to_string(),
+                    "f".to_string(),
+                    3,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "to_char".to_string(),
+                    "f".to_string(),
+                    2,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "transaction_timestamp".to_string(),
+                    "f".to_string(),
+                    0,
+                    pg_wire::oid::TIMESTAMP as u64,
+                ),
+                (
+                    "trim".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+                (
+                    "upper".to_string(),
+                    "f".to_string(),
+                    1,
+                    pg_wire::oid::TEXT as u64
+                ),
+            ]
+        );
+
         let roles = call_sql_exec_http(
             &state,
             json!({
@@ -30330,6 +33630,529 @@ mod tests {
             .as_f64()
             .unwrap_or_default();
         assert!(remaining < 1.0);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_table_subscription_roundtrip_can_include_row_images() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_row_images_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+
+        let unsupported = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events","format":"rows_json"}),
+        )
+        .await;
+        assert!(!unsupported.ok, "{unsupported:?}");
+        assert_eq!(
+            unsupported.error.as_ref().map(|err| err.code.as_str()),
+            Some("invalid_request")
+        );
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"events",
+                "format":"objects_json",
+                "include":{"before":true,"after":true}
+            }),
+        )
+        .await;
+        assert!(subscribe.ok, "{subscribe:?}");
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("sub_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("offset"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            eng.data_update(
+                &table,
+                &Expr::Lit {
+                    lit: Lit::Bool { v: true },
+                },
+                &row(&[(
+                    "data",
+                    Lit::Str {
+                        v: "two".to_string(),
+                    },
+                )]),
+                None,
+                None,
+                &[],
+            )?;
+        }
+
+        let poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await;
+        assert!(poll.ok, "{poll:?}");
+        let events = poll
+            .result
+            .as_ref()
+            .and_then(|result| result.get("events"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(events.len(), 2);
+        assert!(events[0]["before"].is_null());
+        assert_eq!(
+            events[0]["after"]["data"],
+            serde_json::to_value(Lit::Str {
+                v: "one".to_string(),
+            })?
+        );
+        assert_eq!(
+            events[1]["before"]["data"],
+            serde_json::to_value(Lit::Str {
+                v: "one".to_string(),
+            })?
+        );
+        assert_eq!(
+            events[1]["after"]["data"],
+            serde_json::to_value(Lit::Str {
+                v: "two".to_string(),
+            })?
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_table_subscription_plain_json_format_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_plain_json_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"events",
+                "format":"plain_json",
+                "include":{"after":true}
+            }),
+        )
+        .await;
+        assert!(subscribe.ok, "{subscribe:?}");
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("sub_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("offset"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await;
+        assert!(poll.ok, "{poll:?}");
+        let events = poll
+            .result
+            .as_ref()
+            .and_then(|result| result.get("events"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["pk"][0].as_u64(), Some(1));
+        assert_eq!(events[0]["after"]["id"].as_u64(), Some(1));
+        assert_eq!(events[0]["after"]["data"].as_str(), Some("one"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_durable_cursor_roundtrip_survives_state_restart() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_durable_cursor_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok, "{subscribe:?}");
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|r| r.get("sub_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|r| r.get("offset"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let first_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 1}),
+        )
+        .await;
+        assert!(first_poll.ok, "{first_poll:?}");
+        let first_offset = first_poll
+            .result
+            .as_ref()
+            .and_then(|r| r.get("next_offset"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ack = call_rpc(
+            &state,
+            "cdc.ack",
+            json!({"sub_id": sub_id, "offset": first_offset}),
+        )
+        .await;
+        assert!(ack.ok, "{ack:?}");
+
+        let reopened = Engine::open(&dir)?;
+        let reopened_state = build_state(dir.clone(), reopened);
+        {
+            let mut eng = reopened_state.engine.write().await;
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "two".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let resumed = call_rpc(
+            &reopened_state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": 0, "limit": 10}),
+        )
+        .await;
+        assert!(resumed.ok, "{resumed:?}");
+        let events = resumed
+            .result
+            .as_ref()
+            .and_then(|r| r.get("events"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["seq"].as_u64(), Some(2));
+
+        let close = call_rpc(&reopened_state, "cdc.close", json!({"sub_id": sub_id})).await;
+        assert!(close.ok, "{close:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_pause_and_resume_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_pause_resume_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok, "{subscribe:?}");
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|value| value.get("sub_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|value| value.get("offset"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        let paused = call_rpc(&state, "cdc.pause", json!({"sub_id": sub_id})).await;
+        assert!(paused.ok, "{paused:?}");
+        assert_eq!(
+            paused
+                .result
+                .as_ref()
+                .and_then(|value| value.get("paused"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            paused
+                .result
+                .as_ref()
+                .and_then(|value| value.get("backpressure"))
+                .and_then(|value| value.get("state"))
+                .and_then(|value| value.as_str()),
+            Some("paused")
+        );
+
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let paused_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await;
+        assert!(paused_poll.ok, "{paused_poll:?}");
+        assert_eq!(
+            paused_poll
+                .result
+                .as_ref()
+                .and_then(|value| value.get("events"))
+                .and_then(|value| value.as_array())
+                .map(|value| value.len()),
+            Some(0)
+        );
+        assert_eq!(
+            paused_poll
+                .result
+                .as_ref()
+                .and_then(|value| value.get("backpressure"))
+                .and_then(|value| value.get("state"))
+                .and_then(|value| value.as_str()),
+            Some("paused")
+        );
+
+        let resumed = call_rpc(&state, "cdc.resume", json!({"sub_id": sub_id})).await;
+        assert!(resumed.ok, "{resumed:?}");
+        assert_eq!(
+            resumed
+                .result
+                .as_ref()
+                .and_then(|value| value.get("paused"))
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+
+        let resumed_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await;
+        assert!(resumed_poll.ok, "{resumed_poll:?}");
+        assert_eq!(
+            resumed_poll
+                .result
+                .as_ref()
+                .and_then(|value| value.get("events"))
+                .and_then(|value| value.as_array())
+                .map(|value| value.len()),
+            Some(1)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -32600,6 +36423,594 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_select_roundtrip_uses_snapshot_for_distinct_projection() -> anyhow::Result<()> {
+        let dir = temp_dir("query_select_snapshot_distinct");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.build_column_snapshot("app", "users", Some(vec!["city".to_string()]), u64::MAX)?;
+        engine.testing_set_snapshot_cost_model(1.0, 0.1);
+
+        let state = build_state(dir.clone(), engine);
+
+        let mut query = select_query("app", "users", vec!["city"], None);
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.distinct = Some(true);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let rows = resp.result.expect("missing result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["v"].as_str(), Some("Oslo"));
+        assert_eq!(rows[1][0]["v"].as_str(), Some("Tokyo"));
+
+        let hits = state
+            .engine
+            .read()
+            .await
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_select_roundtrip_uses_snapshot_for_projection_group_by() -> anyhow::Result<()> {
+        let dir = temp_dir("query_select_snapshot_projection_group_by");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.build_column_snapshot("app", "users", Some(vec!["city".to_string()]), u64::MAX)?;
+        engine.testing_set_snapshot_cost_model(1.0, 0.1);
+
+        let state = build_state(dir.clone(), engine);
+
+        let mut query = select_query("app", "users", vec!["city"], None);
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let rows = resp.result.expect("missing result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["v"].as_str(), Some("Oslo"));
+        assert_eq!(rows[1][0]["v"].as_str(), Some("Tokyo"));
+
+        let hits = state
+            .engine
+            .read()
+            .await
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_select_roundtrip_uses_snapshot_for_projection_group_by_having_alias(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("query_select_snapshot_projection_group_by_having_alias");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.build_column_snapshot("app", "users", Some(vec!["city".to_string()]), u64::MAX)?;
+        engine.testing_set_snapshot_cost_model(1.0, 0.1);
+
+        let state = build_state(dir.clone(), engine);
+
+        let mut query = select_query("app", "users", vec!["city"], None);
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.projection[0].r#as = Some("city_name".to_string());
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        select.having = Some(Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "city_name".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::Str {
+                    v: "Tokyo".to_string(),
+                },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        });
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let rows = resp.result.expect("missing result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["v"].as_str(), Some("Tokyo"));
+
+        let hits = state
+            .engine
+            .read()
+            .await
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_select_roundtrip_uses_snapshot_for_projection_group_by_duplicate_projection_aliases(
+    ) -> anyhow::Result<()> {
+        let dir =
+            temp_dir("query_select_snapshot_projection_group_by_duplicate_projection_aliases");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.build_column_snapshot("app", "users", Some(vec!["city".to_string()]), u64::MAX)?;
+        engine.testing_set_snapshot_cost_model(1.0, 0.1);
+
+        let state = build_state(dir.clone(), engine);
+
+        let mut query = select_query("app", "users", vec!["city"], None);
+        let QueryBody::Select { select } = query.body.as_mut() else {
+            unreachable!();
+        };
+        select.projection.push(SelectItem {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            r#as: Some("city_name".to_string()),
+        });
+        select.group_by = Some(vec![Expr::Col {
+            col: "city".to_string(),
+            table: None,
+        }]);
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let rows = resp.result.expect("missing result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["v"].as_str(), Some("Oslo"));
+        assert_eq!(rows[0][1]["v"].as_str(), Some("Oslo"));
+        assert_eq!(rows[1][0]["v"].as_str(), Some("Tokyo"));
+        assert_eq!(rows[1][1]["v"].as_str(), Some("Tokyo"));
+
+        let hits = state
+            .engine
+            .read()
+            .await
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_select_roundtrip_uses_snapshot_for_broad_index_prefilter() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("query_select_snapshot_broad_index_prefilter");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_idx".to_string(),
+            vec!["city".to_string()],
+            false,
+        )?;
+        engine.build_column_snapshot("app", "users", Some(vec!["city".to_string()]), u64::MAX)?;
+        engine.testing_set_snapshot_cost_model(1.0, 0.5);
+
+        let state = build_state(dir.clone(), engine);
+
+        let query = select_query(
+            "app",
+            "users",
+            vec!["city"],
+            Some(eq_expr(
+                "city",
+                Lit::Str {
+                    v: "Oslo".to_string(),
+                },
+            )),
+        );
+
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let rows = resp.result.expect("missing result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row[0]["v"].as_str() == Some("Oslo")));
+
+        let hits = state
+            .engine
+            .read()
+            .await
+            .testing_snapshot_hit_count("app", "users")
+            .unwrap_or_default();
+        assert_eq!(hits, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn advisor_evaluate_roundtrip_reports_shift_convergence() -> anyhow::Result<()> {
         let dir = temp_dir("advisor_evaluate_roundtrip");
         let engine = Engine::open(&dir)?;
@@ -32685,6 +37096,565 @@ mod tests {
         assert_eq!(
             result["phases"][1]["final_top_stable_after_observation"].as_u64(),
             Some(3)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_latency_benchmark() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_latency_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "users",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "city".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "email".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation table");
+            let rows = (0..1024_u64)
+                .map(|idx| {
+                    let mut row = RowObject::new();
+                    row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                    row.insert(
+                        "city".to_string(),
+                        Lit::Str {
+                            v: format!("city_{:02}", idx % 16),
+                        },
+                    );
+                    row.insert(
+                        "email".to_string(),
+                        Lit::Str {
+                            v: format!("user{idx}@example.com"),
+                        },
+                    );
+                    row
+                })
+                .collect::<Vec<_>>();
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                rows,
+                None,
+            )
+            .expect("seed advisor evaluation rows");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "city_lookup",
+                        "samples": [
+                            {
+                                "equality_columns": ["city"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 1024,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert!(result["phases"][0]["latency_benchmark"].is_object());
+        assert!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+                .as_u64()
+                .unwrap_or(0)
+                > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                    .as_u64()
+                    .unwrap_or(u64::MAX)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_single_range_latency_benchmark(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_range_latency_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "users",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "city".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "email".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation range table");
+            let rows = (0..2048_u64)
+                .map(|idx| {
+                    let mut row = RowObject::new();
+                    row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                    row.insert(
+                        "city".to_string(),
+                        Lit::Str {
+                            v: format!("city_{:02}", idx % 16),
+                        },
+                    );
+                    row.insert(
+                        "email".to_string(),
+                        Lit::Str {
+                            v: format!("user{:04}@example.com", idx),
+                        },
+                    );
+                    row
+                })
+                .collect::<Vec<_>>();
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                rows,
+                None,
+            )
+            .expect("seed advisor evaluation range rows");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "city_email_range",
+                        "samples": [
+                            {
+                                "equality_columns": ["city"],
+                                "range_columns": ["email"],
+                                "projection_columns": ["id"],
+                                "rows_scanned": 2048,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert_eq!(
+            result["phases"][0]["top_after"]["columns"],
+            json!(["city", "email"])
+        );
+        assert!(result["phases"][0]["latency_benchmark"].is_object());
+        assert!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+                .as_u64()
+                .unwrap_or(0)
+                > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                    .as_u64()
+                    .unwrap_or(u64::MAX)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_order_latency_benchmark() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_order_latency_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "users",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "created_at".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "email".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation order table");
+            let rows = (0..512_u64)
+                .map(|idx| {
+                    let mut row = RowObject::new();
+                    row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                    row.insert("created_at".to_string(), Lit::U64 { v: 512 - idx });
+                    row.insert(
+                        "email".to_string(),
+                        Lit::Str {
+                            v: format!("user{:04}@example.com", idx),
+                        },
+                    );
+                    row
+                })
+                .collect::<Vec<_>>();
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                rows,
+                None,
+            )
+            .expect("seed advisor evaluation order rows");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "created_at_order",
+                        "samples": [
+                            {
+                                "order_by_columns": ["created_at"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert_eq!(
+            result["phases"][0]["top_after"]["columns"],
+            json!(["created_at"])
+        );
+        assert!(result["phases"][0]["latency_benchmark"].is_object());
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+            Some(512)
+        );
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["after_rows_scanned"].as_u64(),
+            Some(512)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_range_order_latency_benchmark() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("advisor_evaluate_range_order_latency_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "users",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "created_at".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "email".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation range+order table");
+            let rows = (0..1024_u64)
+                .map(|idx| {
+                    let mut row = RowObject::new();
+                    row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                    row.insert("created_at".to_string(), Lit::U64 { v: 1024 - idx });
+                    row.insert(
+                        "email".to_string(),
+                        Lit::Str {
+                            v: format!("user{:04}@example.com", idx),
+                        },
+                    );
+                    row
+                })
+                .collect::<Vec<_>>();
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                rows,
+                None,
+            )
+            .expect("seed advisor evaluation range+order rows");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "created_at_range_order",
+                        "samples": [
+                            {
+                                "range_columns": ["created_at"],
+                                "order_by_columns": ["created_at"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 1024,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert_eq!(
+            result["phases"][0]["top_after"]["columns"],
+            json!(["created_at"])
+        );
+        assert!(result["phases"][0]["latency_benchmark"].is_object());
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+            Some(1024)
+        );
+        assert!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+                .as_u64()
+                .unwrap_or(0)
+                > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                    .as_u64()
+                    .unwrap_or(u64::MAX)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_group_latency_benchmark() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_group_latency_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "events",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "tenant_id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "city".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "score".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation group table");
+            let rows = (0..512_u64)
+                .map(|idx| {
+                    let mut row = RowObject::new();
+                    row.insert("id".to_string(), Lit::U64 { v: idx + 1 });
+                    row.insert("tenant_id".to_string(), Lit::U64 { v: idx % 8 });
+                    row.insert(
+                        "city".to_string(),
+                        Lit::Str {
+                            v: format!("city_{:02}", idx % 32),
+                        },
+                    );
+                    row.insert("score".to_string(), Lit::U64 { v: idx % 100 });
+                    row
+                })
+                .collect::<Vec<_>>();
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                rows,
+                None,
+            )
+            .expect("seed advisor evaluation group rows");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"events"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "tenant_city_group",
+                        "samples": [
+                            {
+                                "equality_columns": ["tenant_id"],
+                                "group_by_columns": ["city"],
+                                "projection_columns": ["score"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert_eq!(
+            result["phases"][0]["top_after"]["columns"],
+            json!(["tenant_id", "city"])
+        );
+        assert!(result["phases"][0]["latency_benchmark"].is_object());
+        assert_eq!(
+            result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+            Some(1)
+        );
+        assert!(
+            result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+                .as_u64()
+                .unwrap_or(0)
+                > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                    .as_u64()
+                    .unwrap_or(u64::MAX)
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -36491,6 +41461,291 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_snapshot_reports_cdc_metrics() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_cdc_metrics");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|value| value.get("sub_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        for id in 1..=3 {
+            let insert = call_rpc(
+                &state,
+                "data.insert",
+                json!({
+                    "into": {"db":"app","table":"events"},
+                    "rows": [{"id": {"t":"u64","v": id}}]
+                }),
+            )
+            .await;
+            assert!(insert.ok);
+        }
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let cdc = stats
+            .result
+            .as_ref()
+            .and_then(|value| value.get("cdc"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            cdc.get("active_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc.get("table_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc.get("query_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc.get("total_lag").and_then(|value| value.as_u64()),
+            Some(3)
+        );
+        assert_eq!(cdc.get("max_lag").and_then(|value| value.as_u64()), Some(3));
+        assert_eq!(
+            cdc.get("resnapshot_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc.get("paused_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc.get("pressured_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc.get("throttle_recommended_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc.get("earliest_offset").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            cdc.get("latest_offset").and_then(|value| value.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            cdc.get("retained_events").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            cdc.get("retention_limit").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            cdc.get("dropped_events_total")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc.get("warn_lag").and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc.get("throttle_lag").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            cdc.get("min_remaining_until_resnapshot")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+
+        let paused = call_rpc(&state, "cdc.pause", json!({"sub_id": sub_id})).await;
+        assert!(paused.ok);
+
+        let paused_stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(paused_stats.ok);
+        let paused_cdc = paused_stats
+            .result
+            .as_ref()
+            .and_then(|value| value.get("cdc"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            paused_cdc
+                .get("paused_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+
+        let ack = call_rpc(&state, "cdc.ack", json!({"sub_id": sub_id, "offset": 3})).await;
+        assert!(ack.ok);
+
+        let stats_after_ack = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats_after_ack.ok);
+        let cdc_after_ack = stats_after_ack
+            .result
+            .as_ref()
+            .and_then(|value| value.get("cdc"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            cdc_after_ack
+                .get("total_lag")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc_after_ack
+                .get("max_lag")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            cdc_after_ack
+                .get("resnapshot_subscriptions")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+
+        let resumed = call_rpc(&state, "cdc.resume", json!({"sub_id": sub_id})).await;
+        assert!(resumed.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_reports_query_latency_percentiles() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_query_latency_percentiles");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        let now_ms = now_unix_ms_u64();
+
+        {
+            let mut counters = state.counters.lock().unwrap();
+            counters.total_rpc = 5;
+            counters.query_log.extend([
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "data.get".to_string(),
+                    fingerprint: "get:a".to_string(),
+                    workload_kind: QueryWorkloadKind::PointRead,
+                    duration_ms: 5,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 1,
+                    io_bytes: 32,
+                },
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "query.select".to_string(),
+                    fingerprint: "select:b".to_string(),
+                    workload_kind: QueryWorkloadKind::RangeRead,
+                    duration_ms: 10,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 2,
+                    io_bytes: 64,
+                },
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "data.insert".to_string(),
+                    fingerprint: "insert:c".to_string(),
+                    workload_kind: QueryWorkloadKind::Write,
+                    duration_ms: 20,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 1,
+                    io_bytes: 96,
+                },
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "system.ping".to_string(),
+                    fingerprint: "ping:d".to_string(),
+                    workload_kind: QueryWorkloadKind::Other,
+                    duration_ms: 30,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 1,
+                    io_bytes: 0,
+                },
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "query.select".to_string(),
+                    fingerprint: "select:e".to_string(),
+                    workload_kind: QueryWorkloadKind::RangeRead,
+                    duration_ms: 100,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 4,
+                    io_bytes: 128,
+                },
+            ]);
+        }
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let query = stats
+            .result
+            .as_ref()
+            .and_then(|value| value.get("query"))
+            .cloned()
+            .unwrap_or_default();
+        let latency = query.get("latency_ms").cloned().unwrap_or_default();
+        assert_eq!(
+            query.get("recent_samples").and_then(|value| value.as_u64()),
+            Some(5)
+        );
+        assert_eq!(
+            latency.get("p50").and_then(|value| value.as_u64()),
+            Some(20)
+        );
+        assert_eq!(
+            latency.get("p95").and_then(|value| value.as_u64()),
+            Some(100)
+        );
+        assert_eq!(
+            latency.get("p99").and_then(|value| value.as_u64()),
+            Some(100)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stats_snapshot_reports_compaction_telemetry() -> anyhow::Result<()> {
         let dir = temp_dir("stats_compaction_telemetry");
         let mut engine = Engine::open(&dir)?;
@@ -36630,6 +41885,450 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_snapshot_reports_operator_alerts() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_operator_alerts");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+
+        for id in 1..=3 {
+            let insert = call_rpc(
+                &state,
+                "data.insert",
+                json!({
+                    "into": {"db":"app","table":"events"},
+                    "rows": [{"id": {"t":"u64","v": id}}]
+                }),
+            )
+            .await;
+            assert!(insert.ok);
+        }
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        std::fs::write(segment_dir.join("events.rseg"), vec![9u8; 128])?;
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "enabled": true,
+                "policy": "workload_guided",
+                "max_l0_files": 1,
+                "max_l0_bytes": 128,
+                "budget": {
+                    "max_io_bytes_per_s": 65536,
+                    "max_cpu_pct": 15.0,
+                    "safe_mode_io_multiplier": 2.0,
+                    "safe_mode_cpu_pct": 75.0
+                }
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let now_ms = now_unix_ms_u64();
+        {
+            let mut counters = state.counters.lock().unwrap();
+            counters.query_log.extend([
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "query.select".to_string(),
+                    fingerprint: "alerts:select:a".to_string(),
+                    workload_kind: QueryWorkloadKind::RangeRead,
+                    duration_ms: 250,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 3,
+                    io_bytes: 64,
+                },
+                QuerySample {
+                    ts_ms: now_ms,
+                    method: "query.select".to_string(),
+                    fingerprint: "alerts:select:b".to_string(),
+                    workload_kind: QueryWorkloadKind::RangeRead,
+                    duration_ms: 275,
+                    status: 200,
+                    ok: true,
+                    rows_returned: 2,
+                    io_bytes: 64,
+                },
+            ]);
+        }
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let alerts = stats
+            .result
+            .as_ref()
+            .and_then(|value| value.get("alerts"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            alerts.get("status").and_then(|value| value.as_str()),
+            Some("critical")
+        );
+        assert_eq!(
+            alerts
+                .get("summary")
+                .and_then(|value| value.get("critical"))
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            alerts
+                .get("summary")
+                .and_then(|value| value.get("warning"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+
+        let items = alerts
+            .get("items")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(items.len(), 3);
+
+        let codes = items
+            .iter()
+            .filter_map(|item| item.get("code").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"compaction_safe_mode"));
+        assert!(codes.contains(&"cdc_resnapshot_required"));
+        assert!(codes.contains(&"query_tail_latency"));
+
+        let compaction_alert = items
+            .iter()
+            .find(|item| {
+                item.get("code").and_then(|value| value.as_str()) == Some("compaction_safe_mode")
+            })
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            compaction_alert
+                .get("severity")
+                .and_then(|value| value.as_str()),
+            Some("critical")
+        );
+        assert_eq!(
+            compaction_alert
+                .get("panel")
+                .and_then(|value| value.as_str()),
+            Some("engine")
+        );
+
+        let cdc_alert = items
+            .iter()
+            .find(|item| {
+                item.get("code").and_then(|value| value.as_str()) == Some("cdc_resnapshot_required")
+            })
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            cdc_alert.get("severity").and_then(|value| value.as_str()),
+            Some("critical")
+        );
+        assert_eq!(
+            cdc_alert.get("panel").and_then(|value| value.as_str()),
+            Some("cdc")
+        );
+
+        let query_alert = items
+            .iter()
+            .find(|item| {
+                item.get("code").and_then(|value| value.as_str()) == Some("query_tail_latency")
+            })
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            query_alert.get("severity").and_then(|value| value.as_str()),
+            Some("warning")
+        );
+        assert_eq!(
+            query_alert.get("panel").and_then(|value| value.as_str()),
+            Some("telemetry")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_routes_operator_alerts_from_settings() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_operator_alert_routes");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let configured = call_rpc(
+            &state,
+            "settings.set",
+            json!({
+                "observability.alert_routes": [
+                    {
+                        "id": "ops-critical",
+                        "min_severity": "critical",
+                        "components": ["cdc"],
+                        "targets": ["slack://ops", "pagerduty://primary"]
+                    },
+                    {
+                        "id": "perf-warning",
+                        "min_severity": "warning",
+                        "panels": ["telemetry"],
+                        "targets": ["slack://perf"]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(configured.ok);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+
+        for id in 1..=3 {
+            let insert = call_rpc(
+                &state,
+                "data.insert",
+                json!({
+                    "into": {"db":"app","table":"events"},
+                    "rows": [{"id": {"t":"u64","v": id}}]
+                }),
+            )
+            .await;
+            assert!(insert.ok);
+        }
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let alerts = stats
+            .result
+            .as_ref()
+            .and_then(|value| value.get("alerts"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            alerts
+                .get("routing")
+                .and_then(|value| value.get("configured"))
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            alerts
+                .get("routing")
+                .and_then(|value| value.get("routed_alerts"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            alerts
+                .get("routing")
+                .and_then(|value| value.get("matched_routes"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+
+        let cdc_alert = alerts
+            .get("items")
+            .and_then(|value| value.as_array())
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("code").and_then(|value| value.as_str())
+                        == Some("cdc_resnapshot_required")
+                })
+            })
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            cdc_alert
+                .get("routes")
+                .and_then(|value| value.as_array())
+                .map(|routes| routes.len()),
+            Some(1)
+        );
+        assert_eq!(
+            cdc_alert
+                .get("routes")
+                .and_then(|value| value.as_array())
+                .and_then(|routes| routes.first())
+                .and_then(|route| route.get("id"))
+                .and_then(|value| value.as_str()),
+            Some("ops-critical")
+        );
+        assert_eq!(
+            cdc_alert
+                .get("routes")
+                .and_then(|value| value.as_array())
+                .and_then(|routes| routes.first())
+                .and_then(|route| route.get("targets"))
+                .cloned(),
+            Some(json!(["slack://ops", "pagerduty://primary"]))
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_delivers_http_alert_routes_once_per_active_alert() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("stats_operator_alert_webhook_delivery");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let seen_payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let payloads_ref = seen_payloads.clone();
+        let app = Router::new().route(
+            "/notify",
+            post(move |Json(payload): Json<Value>| {
+                let payloads_ref = payloads_ref.clone();
+                async move {
+                    payloads_ref.lock().unwrap().push(payload);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let remote = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let configured = call_rpc(
+            &state,
+            "settings.set",
+            serde_json::json!({
+                "observability.alert_routes": [
+                    {
+                        "id": "ops-webhook",
+                        "min_severity": "critical",
+                        "components": ["cdc"],
+                        "targets": [format!("http://{}/notify", addr)]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(configured.ok);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            serde_json::json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+
+        for id in 1..=3 {
+            let insert = call_rpc(
+                &state,
+                "data.insert",
+                serde_json::json!({
+                    "into": {"db":"app","table":"events"},
+                    "rows": [{"id": {"t":"u64","v": id}}]
+                }),
+            )
+            .await;
+            assert!(insert.ok);
+        }
+
+        let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
+        assert!(first.ok);
+        let first_alerts = first.result.unwrap()["alerts"].clone();
+        assert_eq!(
+            first_alerts["routing"]["delivery"]["delivered"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            first_alerts["routing"]["delivery"]["suppressed"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(seen_payloads.lock().unwrap().len(), 1);
+        let delivered_payload = seen_payloads.lock().unwrap()[0].clone();
+        assert_eq!(
+            delivered_payload["route"]["id"].as_str(),
+            Some("ops-webhook")
+        );
+        assert_eq!(
+            delivered_payload["alert"]["code"].as_str(),
+            Some("cdc_resnapshot_required")
+        );
+
+        let second = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
+        assert!(second.ok);
+        let second_alerts = second.result.unwrap()["alerts"].clone();
+        assert_eq!(
+            second_alerts["routing"]["delivery"]["delivered"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            second_alerts["routing"]["delivery"]["suppressed"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(seen_payloads.lock().unwrap().len(), 1);
+
+        remote.abort();
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stats_top_and_slow_queries_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("stats_top_slow_queries");
         let engine = Engine::open(&dir)?;
@@ -36689,6 +42388,82 @@ mod tests {
                 .map(|m| m == "system.ping")
                 .unwrap_or(false)
         }));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_query_fingerprint_latency_reports_histogram() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_query_fingerprint_latency");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        let now_ms = now_unix_ms_u64();
+
+        {
+            let mut counters = state.counters.lock().unwrap();
+            let mut agg = QueryStatsAgg::new("query.select".to_string());
+            for sample in [4u64, 9, 15, 60, 500] {
+                agg.record(sample, 200, true, 1, now_ms);
+            }
+            counters
+                .query_stats
+                .insert("fp-query-select".to_string(), agg);
+        }
+
+        let resp = call_rpc(
+            &state,
+            "stats.query_fingerprint_latency",
+            json!({"fingerprint": "fp-query-select"}),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let queries = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("queries"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(queries.len(), 1);
+        let row = &queries[0];
+        assert_eq!(
+            row.get("method").and_then(|v| v.as_str()),
+            Some("query.select")
+        );
+        assert_eq!(row.get("count").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(row.get("p50_ms").and_then(|v| v.as_u64()), Some(15));
+        assert_eq!(row.get("p95_ms").and_then(|v| v.as_u64()), Some(500));
+        assert_eq!(row.get("p99_ms").and_then(|v| v.as_u64()), Some(500));
+
+        let histogram = row.get("histogram").cloned().unwrap_or_default();
+        assert_eq!(
+            histogram.get("sample_count").and_then(|v| v.as_u64()),
+            Some(5)
+        );
+        let buckets = histogram
+            .get("buckets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let bucket_count = |le_ms| {
+            buckets
+                .iter()
+                .find(|bucket| bucket.get("le_ms").and_then(|v| v.as_u64()) == Some(le_ms))
+                .and_then(|bucket| bucket.get("count"))
+                .and_then(|count| count.as_u64())
+                .unwrap_or(0)
+        };
+        assert_eq!(bucket_count(5), 1);
+        assert_eq!(bucket_count(10), 1);
+        assert_eq!(bucket_count(25), 1);
+        assert_eq!(bucket_count(100), 1);
+        assert_eq!(bucket_count(500), 1);
+        assert_eq!(
+            histogram.get("overflow_count").and_then(|v| v.as_u64()),
+            Some(0)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -39691,6 +45466,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_worker_tick_rewrites_pressure_segment() -> anyhow::Result<()> {
+        let dir = temp_dir("compaction_worker_tick");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let insert = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db":"app","table":"users"},
+                "rows": [{"id": {"t":"u64","v":1}}]
+            }),
+        )
+        .await;
+        assert!(insert.ok, "{insert:?}");
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        std::fs::write(segment_dir.join("users.rseg"), vec![7u8; 16 * 1024])?;
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "enabled": true,
+                "policy": "workload_guided",
+                "max_l0_files": 8,
+                "max_l0_bytes": 2048,
+                "budget": {
+                    "max_io_bytes_per_s": 1048576,
+                    "max_cpu_pct": 20.0,
+                    "safe_mode_io_multiplier": 2.0,
+                    "safe_mode_cpu_pct": 75.0
+                }
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+
+        let before = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(before.ok, "{before:?}");
+        let before = before.result.expect("missing before status");
+        assert_eq!(before["status"].as_str(), Some("safe_mode"));
+        let before_bytes = before["l0_bytes"].as_u64().unwrap_or(0);
+        assert!(before_bytes >= 16 * 1024);
+        assert_eq!(before["runs"].as_u64(), Some(0));
+
+        let ran_task = run_compaction_worker_once(&state).await?;
+        assert_eq!(ran_task.as_deref(), Some("segment_rewrite:app.users"));
+
+        let after = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(after.ok, "{after:?}");
+        let after = after.result.expect("missing after status");
+        let after_bytes = after["l0_bytes"].as_u64().unwrap_or(u64::MAX);
+        assert!(after_bytes < before_bytes);
+        assert!(
+            after_bytes < 2048,
+            "expected worker to drain byte pressure: {after:?}"
+        );
+        assert_eq!(after["runs"].as_u64(), Some(1));
+        assert_eq!(
+            after["scheduler"]["tasks"]["last_completed"].as_str(),
+            Some("segment_rewrite:app.users")
+        );
+        assert!(
+            after["scheduler"]["tasks"]["bytes_reclaimed"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compaction_worker_tick_batches_file_pressure_cleanup_tasks() -> anyhow::Result<()> {
+        let dir = temp_dir("compaction_worker_batch");
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "json")?;
+        create_test_table(&mut engine, "app", "events")?;
+        create_test_table(&mut engine, "app", "sessions")?;
+        create_test_table(&mut engine, "app", "users")?;
+        let state = build_state(dir.clone(), engine);
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        for table in ["events", "sessions", "users"] {
+            std::fs::write(segment_dir.join(format!("{table}.rseg")), vec![5u8; 256])?;
+        }
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "enabled": true,
+                "policy": "workload_guided",
+                "max_l0_files": 1,
+                "max_l0_bytes": 1048576,
+                "budget": {
+                    "max_io_bytes_per_s": 2048,
+                    "max_cpu_pct": 20.0,
+                    "safe_mode_io_multiplier": 2.0,
+                    "safe_mode_cpu_pct": 75.0
+                }
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+
+        let before = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(before.ok, "{before:?}");
+        let before = before.result.expect("missing before status");
+        assert_eq!(before["status"].as_str(), Some("safe_mode"));
+        assert_eq!(before["l0_files"].as_u64(), Some(3));
+        assert_eq!(before["scheduler"]["tasks"]["pending"].as_u64(), Some(3));
+        assert_eq!(before["runs"].as_u64(), Some(0));
+
+        let ran_task = run_compaction_worker_once(&state).await?;
+        assert_eq!(ran_task.as_deref(), Some("batch:3 task(s)"));
+
+        let after = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(after.ok, "{after:?}");
+        let after = after.result.expect("missing after status");
+        assert_eq!(after["l0_files"].as_u64(), Some(0));
+        assert_eq!(after["runs"].as_u64(), Some(3));
+        assert_eq!(after["scheduler"]["tasks"]["pending"].as_u64(), Some(0));
+        assert_eq!(
+            after["scheduler"]["tasks"]["last_completed"].as_str(),
+            Some("legacy_segment_cleanup:app.users")
+        );
+        assert_eq!(
+            after["scheduler"]["tasks"]["orphan_files_removed"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            after["scheduler"]["tasks"]["bytes_reclaimed"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 3 * 256
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn compaction_safe_mode_throttles_skeinql_writes() -> anyhow::Result<()> {
         let dir = temp_dir("compaction_safe_mode_throttle");
         let mut engine = Engine::open(&dir)?;
@@ -39876,6 +45810,15 @@ mod tests {
     }
 
     #[test]
+    fn pg_bootstrap_role_name_defaults_and_preserves_startup_user() {
+        let mut session = MySqlSessionState::new(None, 1);
+        assert_eq!(pg_bootstrap_role_name(Some(&session)), "skein");
+
+        session.username = "app_user".to_string();
+        assert_eq!(pg_bootstrap_role_name(Some(&session)), "app_user");
+    }
+
+    #[test]
     fn pg_bootstrap_setting_value_prefers_session() {
         let mut session = MySqlSessionState::new(Some("mydb".to_string()), 1);
         session
@@ -39986,14 +45929,65 @@ mod tests {
     }
 
     #[test]
-    fn pg_parse_current_setting_name_roundtrip() {
+    fn pg_parse_current_setting_call_roundtrip() {
         assert_eq!(
-            pg_parse_current_setting_name("select current_setting('server_version_num')"),
-            Some("server_version_num")
+            pg_parse_current_setting_call("select current_setting('server_version_num')"),
+            Some(("server_version_num".to_string(), false))
         );
         assert_eq!(
-            pg_parse_current_setting_name("select current_setting('timezone')"),
-            Some("timezone")
+            pg_parse_current_setting_call("select current_setting('timezone')"),
+            Some(("timezone".to_string(), false))
+        );
+        assert_eq!(
+            pg_parse_current_setting_call("select current_setting('timezone', true)"),
+            Some(("timezone".to_string(), true))
+        );
+        assert_eq!(
+            pg_parse_current_setting_call("select current_setting('timezone', false)"),
+            Some(("timezone".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn pg_parse_current_schemas_include_implicit_roundtrip() {
+        assert_eq!(
+            pg_parse_current_schemas_include_implicit("select current_schemas(true)"),
+            Some(true)
+        );
+        assert_eq!(
+            pg_parse_current_schemas_include_implicit("select current_schemas(false)"),
+            Some(false)
+        );
+        assert_eq!(
+            pg_parse_current_schemas_include_implicit("select current_schemas(on)"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn pg_bootstrap_current_schema_and_schemas_follow_search_path() {
+        let mut session = MySqlSessionState::new(None, 1);
+        assert_eq!(pg_bootstrap_current_schema_value(Some(&session)), "public");
+        assert_eq!(
+            pg_bootstrap_current_schemas_value(false, Some(&session)),
+            "{public}"
+        );
+        assert_eq!(
+            pg_bootstrap_current_schemas_value(true, Some(&session)),
+            "{pg_catalog,public}"
+        );
+
+        session
+            .pg_settings
+            .insert("search_path".into(), "app, public".into());
+        assert_eq!(pg_bootstrap_current_schema_value(Some(&session)), "app");
+        assert_eq!(
+            pg_bootstrap_current_schemas_value(false, Some(&session)),
+            "{app,public}"
+        );
+        assert_eq!(
+            pg_bootstrap_current_schemas_value(true, Some(&session)),
+            "{pg_catalog,app,public}"
         );
     }
 
@@ -40125,6 +46119,328 @@ mod tests {
     }
 
     #[test]
+    fn pg_copy_text_encode_row_escapes_nulls_and_bool_text() {
+        let columns = vec![
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("active", pg_wire::oid::BOOL, 1),
+            pg_wire::PgColumn::text("note", pg_wire::oid::TEXT, -1),
+        ];
+        let row = vec![
+            Some("Ada\tLovelace".to_string()),
+            Some("1".to_string()),
+            None,
+        ];
+
+        let encoded = pg_copy_text_encode_row(&row, &columns, b'\t');
+        assert_eq!(
+            String::from_utf8(encoded).as_deref(),
+            Ok("Ada\\tLovelace\tt\t\\N\n")
+        );
+
+        let encoded = pg_copy_text_encode_row(&row, &columns, b'|');
+        assert_eq!(
+            String::from_utf8(encoded).as_deref(),
+            Ok("Ada\\tLovelace|t|\\N\n")
+        );
+    }
+
+    #[test]
+    fn pg_copy_csv_encode_and_parse_rows_handle_quotes_empty_nulls_and_newlines() {
+        let columns = vec![
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("note", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("active", pg_wire::oid::BOOL, 1),
+            pg_wire::PgColumn::text("comment", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("empty_text", pg_wire::oid::TEXT, -1),
+        ];
+        let row = vec![
+            Some("Ada, Lovelace".to_string()),
+            Some("line1\nline2".to_string()),
+            Some("t".to_string()),
+            None,
+            Some(String::new()),
+        ];
+
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b',');
+        assert_eq!(
+            String::from_utf8(encoded.clone()).as_deref(),
+            Ok("\"Ada, Lovelace\",\"line1\nline2\",t,,\"\"\n")
+        );
+
+        let decoded = pg_copy_parse_csv_rows(&encoded, b',').expect("parse csv rows");
+        assert_eq!(decoded, vec![row.clone()]);
+
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b';');
+        assert_eq!(
+            String::from_utf8(encoded.clone()).as_deref(),
+            Ok("Ada, Lovelace;\"line1\nline2\";t;;\"\"\n")
+        );
+
+        let decoded = pg_copy_parse_csv_rows(&encoded, b';').expect("parse csv rows");
+        assert_eq!(decoded, vec![row]);
+    }
+
+    #[test]
+    fn pg_parse_copy_to_stdout_recognizes_table_and_query_sources() {
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users (id, name) TO STDOUT"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: vec!["id".to_string(), "name".to_string()],
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT text);"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY (SELECT id FROM app.users ORDER BY id) TO STDOUT;"),
+            Some(PgCopyToStdoutSource::Query {
+                query: "SELECT id FROM app.users ORDER BY id".to_string(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout(
+                "COPY (SELECT id FROM app.users ORDER BY id) TO STDOUT WITH (FORMAT text)"
+            ),
+            Some(PgCopyToStdoutSource::Query {
+                query: "SELECT id FROM app.users ORDER BY id".to_string(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: false,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, DELIMITER ';')"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: false,
+                    delimiter: Some(b';'),
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, HEADER)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: true,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (HEADER, FORMAT csv)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: true,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT binary)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: false,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(pg_parse_copy_to_stdout("COPY app.users FROM STDIN"), None);
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (HEADER)"),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT binary, HEADER)"),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT binary, DELIMITER ';')"),
+            None
+        );
+    }
+
+    #[test]
+    fn pg_parse_copy_from_stdin_and_decode_rows() {
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users (id, active) FROM STDIN;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: vec!["id".to_string(), "active".to_string()],
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT text);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: false,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv, DELIMITER ';');"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: false,
+                    delimiter: Some(b';'),
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv, HEADER);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: true,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT binary);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: false,
+                    delimiter: None,
+                },
+            })
+        );
+        assert_eq!(pg_parse_copy_from_stdin("COPY app.users TO STDOUT"), None);
+
+        let rows = pg_copy_parse_text_rows(b"1\tAda\tt\n2\t\\N\tf\n", b'\t').unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Some("1".to_string()),
+                    Some("Ada".to_string()),
+                    Some("t".to_string())
+                ],
+                vec![Some("2".to_string()), None, Some("f".to_string())]
+            ]
+        );
+
+        let rows = pg_copy_parse_text_rows(b"1|Ada\\|Lovelace|t\n", b'|').unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Some("1".to_string()),
+                Some("Ada|Lovelace".to_string()),
+                Some("t".to_string())
+            ]]
+        );
+
+        let csv_rows = pg_copy_parse_csv_rows(b"1,\"Ada, Lovelace\",t\n2,,\"\"\n", b',').unwrap();
+        assert_eq!(
+            csv_rows,
+            vec![
+                vec![
+                    Some("1".to_string()),
+                    Some("Ada, Lovelace".to_string()),
+                    Some("t".to_string())
+                ],
+                vec![Some("2".to_string()), None, Some(String::new())]
+            ]
+        );
+
+        let csv_rows = pg_copy_parse_csv_rows(b"1;Ada, Lovelace;t\n2;;\"\"\n", b';').unwrap();
+        assert_eq!(
+            csv_rows,
+            vec![
+                vec![
+                    Some("1".to_string()),
+                    Some("Ada, Lovelace".to_string()),
+                    Some("t".to_string())
+                ],
+                vec![Some("2".to_string()), None, Some(String::new())]
+            ]
+        );
+
+        let header_rows = pg_copy_parse_csv_rows(b"id,name,active\n1,Ada,t\n", b',').unwrap();
+        assert_eq!(
+            header_rows,
+            vec![
+                vec![
+                    Some("id".to_string()),
+                    Some("name".to_string()),
+                    Some("active".to_string())
+                ],
+                vec![
+                    Some("1".to_string()),
+                    Some("Ada".to_string()),
+                    Some("t".to_string())
+                ]
+            ]
+        );
+    }
+
+    #[test]
     fn pg_decode_text_param_lit_prefers_oid_hints() {
         assert_eq!(
             pg_decode_text_param_lit("42", pg_wire::oid::INT8),
@@ -40219,6 +46535,13 @@ mod tests {
         assert!(pg_catalog_result_column_override("conrelid").is_some());
         assert!(pg_catalog_result_column_override("contype").is_none()); // string, not overridden
         assert!(pg_catalog_result_column_override("convalidated").is_some());
+        // pg_proc columns
+        assert!(pg_catalog_result_column_override("pronamespace").is_some());
+        assert!(pg_catalog_result_column_override("proowner").is_some());
+        assert!(pg_catalog_result_column_override("prolang").is_some());
+        assert!(pg_catalog_result_column_override("procost").is_some());
+        assert!(pg_catalog_result_column_override("pronargs").is_some());
+        assert!(pg_catalog_result_column_override("prorettype").is_some());
     }
 
     #[test]
@@ -41100,6 +47423,7 @@ mod tests {
             params: vec![],
             result_columns: vec![],
             result_formats: vec![0, 1],
+            pending_result: None,
         };
         assert_eq!(portal.result_formats, vec![0, 1]);
     }

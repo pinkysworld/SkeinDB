@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-05-09
+Last updated: 2026-05-27
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -27,7 +27,7 @@ The repo is intentionally written so you can read it in two ways:
    - `ETAG_VALIDATORS.md` (ETags, If-None-Match)
    - `QUERY_PATCH.md` (query-scoped deltas)
    - `TRAFFIC_REDUCTION.md` (overview of protocol + transport techniques)
-   - `CDC_CHANGEFEED.md` (dependency-driven change feeds)
+   - `CDC_CHANGEFEED.md` (dependency-driven change feeds, including polling/SSE/WebSocket delivery and query dependency invalidation)
 
 4) **Storage + security**
    - `ON_DISK_FORMAT.md` (formats + record versions)
@@ -43,8 +43,10 @@ The repo is intentionally written so you can read it in two ways:
    - `TELEMETRY_AND_MIGRATION.md` (compatibility telemetry + migration hints)
 
 6) **Research roadmap**
-   - `RESEARCH_AGENDA.md` (20-track status matrix + priorities)
-   - `TRUE_STATUS_MATRIX.md` (runtime reality sync: implemented vs prototype vs planned)
+   - `RESEARCH_AGENDA.md` (20-track research agenda + priorities)
+   - `TRUE_STATUS_MATRIX.md` (short current truth snapshot for compatibility, partial core phases, and research maturity)
+   - `RESEARCH_BACKLOG.md` (task inventory for the research tracks)
+   - `PROJECT_BACKLOG.md` (task inventory for the core roadmap)
    - `research_agenda/` (prioritized research directions)
    - `site/index.html` (generated docs site with architecture and paper summary)
 

@@ -132,6 +132,7 @@
       .rewrite-tags{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
       .tag{font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border-radius:999px;border:1px solid rgba(43,108,176,.25);background:rgba(43,108,176,.1);color:var(--accent)}
       .tag.secondary{border-color:rgba(47,133,90,.25);background:rgba(47,133,90,.1);color:var(--accent-2)}
+      .tag.danger{border-color:rgba(197,48,48,.25);background:rgba(197,48,48,.1);color:var(--danger)}
       .rewrite-grid{display:grid;gap:6px;grid-template-columns:1fr 1fr;margin-top:6px}
       .rewrite-block{background:#f5f7fb;border:1px solid var(--line);border-radius:8px;padding:6px;font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:10px;white-space:pre-wrap}
       .toggle-row{display:flex;gap:10px;align-items:center;margin-bottom:8px}
@@ -574,6 +575,8 @@
                 <div class="stat"><div class="stat-label">Compaction Status</div><div class="stat-value" id="statCompactionStatus">--</div></div>
                 <div class="stat"><div class="stat-label">L0 Files</div><div class="stat-value" id="statL0Files">--</div></div>
                 <div class="stat"><div class="stat-label">Stall Rate</div><div class="stat-value" id="statStallRate">--</div></div>
+                <div class="stat"><div class="stat-label">Bytes Reclaimed</div><div class="stat-value" id="statCompactionReclaimed">--</div></div>
+                <div class="stat"><div class="stat-label">Current / Last Task</div><div class="stat-value" id="statCompactionTask">--</div></div>
               </div>
             </div>
 
@@ -587,6 +590,11 @@
                 <div class="stat"><div class="stat-label">ETag Hits</div><div class="stat-value" id="statEtagHits">--</div></div>
                 <div class="stat"><div class="stat-label">Coalesced</div><div class="stat-value" id="statCoalesced">--</div></div>
               </div>
+            </div>
+
+            <!-- Operational Alerts -->
+            <div class="card wide"><div class="card-header-row"><h2>&#x26A0; Operational Alerts</h2><div id="operationalAlertsSummary" class="card-summary">Load stats to synthesize query, CDC, and compaction alerts from the current telemetry window.</div></div>
+              <div id="operationalAlertsGrid" class="glance-grid"><div class="glance-card"><div class="glance-label">Status</div><div class="glance-value">No snapshot</div><div class="glance-detail">Run Stats to load the current operator alert view.</div></div></div>
             </div>
 
             <!-- Profiles -->
@@ -615,7 +623,7 @@
               <div class="stat-grid" id="activeSessionsStats">
                 <div class="stat"><div class="stat-label">Sessions</div><div class="stat-value" id="statActiveSessions">--</div></div>
                 <div class="stat"><div class="stat-label">Open Txns</div><div class="stat-value" id="statIdleSessions">--</div></div>
-                <div class="stat"><div class="stat-label">Avg Latency</div><div class="stat-value" id="statLongestQuery">--</div></div>
+                <div class="stat"><div class="stat-label">P95 Latency</div><div class="stat-value" id="statP95Latency">--</div></div>
               </div>
               <div class="actions" style="margin-top:6px"><button id="btnRefreshSessions" class="ghost sm">&#x21bb; Refresh</button></div>
             </div>
@@ -1179,6 +1187,11 @@
               <div class="actions"><button id="btnTelemetryPlanCacheStatus" class="sm">Plan Cache Status</button><button id="btnTelemetryPlanCacheClear" class="ghost sm">Clear Plan Cache</button><button id="btnTelemetryTopQueries" class="sm">Top Queries</button><button id="btnTelemetrySlowQueries" class="sm">Slow Queries</button><button id="btnTelemetryCoalescing" class="sm">Coalescing</button></div>
               <pre id="telemetryPlanOut">Load runtime query telemetry.</pre>
             </div>
+            <div class="card wide"><div class="card-header-row"><h2>Latency Histograms by Fingerprint</h2><div id="telemetryLatencySummary" class="card-summary">Inspect recent p95 and p99 tails per fingerprint before they escalate into slow-query incidents.</div></div>
+              <div class="callout">Recent per-fingerprint latency buckets from <code>stats.query_fingerprint_latency</code>. Use them to spot noisy tails, compare hotspots, and decide which fingerprints need plan-cache or parameterization work first.</div>
+              <div class="actions"><button id="btnTelemetryLatencyHistograms" class="sm">Refresh Histograms</button></div>
+              <div class="table-wrap" style="margin-top:8px"><table id="telemetryLatencyGrid"></table></div>
+            </div>
           </div>
         </section>
 
@@ -1276,12 +1289,12 @@
                 <div><div class="section-kicker">Live Feeds</div><h2>CDC Control Surface</h2><p class="section-body">Operate table subscriptions and prepared-query invalidation feeds side by side, then watch lag and recent events without leaving the panel.</p></div>
                 <div class="section-links"><button class="sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="replay">Open Replay</button><button class="ghost sm" data-panel="telemetry">Open Telemetry</button></div>
               </div>
-              <div id="cdcSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Subscriptions</div><div class="glance-value">No feeds yet</div><div class="glance-detail">Create a table feed or reuse the latest prepared query to start a query-scoped invalidation stream.</div></div></div>
+              <div id="cdcSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Runtime Feeds</div><div class="glance-value">No live feeds</div><div class="glance-detail">Create a table feed or reuse the latest prepared query to start a query-scoped invalidation stream.</div></div></div>
             </div>
             <div class="card wide"><h2>CDC Subscriptions</h2>
-              <div class="callout">Create table subscriptions with <code>cdc.subscribe_table</code>, then poll, ACK, and close the current browser session's handles. Query-scoped invalidation subscriptions are available below via <code>cdc.subscribe_query</code>, so the lag view reflects both table and prepared-query feeds created from this page.</div>
+              <div class="callout">Create table subscriptions with <code>cdc.subscribe_table</code>, then poll, pause, resume, ACK, and close the current browser session's handles. Query-scoped invalidation subscriptions are available below via <code>cdc.subscribe_query</code>, so the lag view reflects table, query, and backpressure state created from this page.</div>
               <div class="row"><div class="field"><label>Database</label><input id="cdcDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="cdcTable" placeholder="events" /></div><div class="field"><label>Poll Limit</label><input id="cdcLimit" type="number" value="200" min="1" /></div></div>
-              <div class="actions"><button id="btnCdcSubscribe" class="primary sm">Subscribe Table</button><button id="btnCdcPoll" class="sm">Poll</button><button id="btnCdcAck" class="secondary sm">Ack</button><button id="btnCdcClose" class="ghost sm">Close</button></div>
+              <div class="actions"><button id="btnCdcSubscribe" class="primary sm">Subscribe Table</button><button id="btnCdcPoll" class="sm">Poll</button><button id="btnCdcPause" class="ghost sm">Pause</button><button id="btnCdcResume" class="secondary sm">Resume</button><button id="btnCdcAck" class="secondary sm">Ack</button><button id="btnCdcClose" class="ghost sm">Close</button></div>
               <div class="row"><div class="field"><label>Subscription</label><select id="cdcSubId"><option value="">No subscriptions</option></select></div><div class="field"><label>From Offset</label><input id="cdcFromOffset" type="number" value="0" min="0" /></div><div class="field"><label>Ack Offset</label><input id="cdcAckOffset" type="number" value="0" min="0" /></div></div>
               <pre id="cdcOut">Ready.</pre>
             </div>

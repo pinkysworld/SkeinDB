@@ -126,8 +126,8 @@
     </div>
     <article class="doc-article">
       <h1 id="observability-and-server-statistics">Observability and Server Statistics<a class="headerlink" href="#observability-and-server-statistics" title="Permanent link">¶</a></h1>
-<p>Status: Draft v0.1
-Last updated: 2026-01-17</p>
+<p>Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, and <code>stats.snapshot</code>-driven HTTP(S) webhook delivery landed; standalone escalation automation is still evolving
+Last updated: 2026-05-27</p>
 <p>This document defines the observability surface of SkeinDB:
 - server load and resource stats
 - query and storage statistics
@@ -171,7 +171,7 @@ while still integrating cleanly with standard monitoring stacks.</p>
 <li>QPS (queries/sec) recent window</li>
 <li>TPS (transactions/sec)</li>
 <li>commit rate</li>
-<li>p50/p95/p99 latency (if enabled)</li>
+<li>average latency plus <code>p50</code> / <code>p95</code> / <code>p99</code> latency over the recent query sample window</li>
 <li>cache hit rates (row cache, value cache)</li>
 <li>coalescing hit rate (if enabled)</li>
 <li>in-flight query groups</li>
@@ -179,6 +179,48 @@ while still integrating cleanly with standard monitoring stacks.</p>
 <li>plan cache entries (if enabled)</li>
 <li>index advisor: suggestions_pending (if enabled)</li>
 </ul>
+<p>Current runtime surface in <code>stats.snapshot.query</code>:
+- <code>tracked_calls</code>
+- <code>fingerprints</code>
+- <code>recent_samples</code>
+- <code>slow_count</code>
+- <code>avg_latency_ms</code>
+- <code>latency_ms.p50</code>
+- <code>latency_ms.p95</code>
+- <code>latency_ms.p99</code>
+- <code>etag_hits</code>
+- <code>coalesced</code></p>
+<p>Current synthesized alert surface in <code>stats.snapshot.alerts</code>:
+- overall <code>status</code>
+- <code>summary.critical</code>
+- <code>summary.warning</code>
+- <code>summary.total</code>
+- optional <code>routing.configured</code>
+- optional <code>routing.routed_alerts</code>
+- optional <code>routing.matched_routes</code>
+- optional <code>routing.delivery.delivered</code>
+- optional <code>routing.delivery.suppressed</code>
+- optional <code>routing.delivery.failed</code>
+- optional <code>routing.delivery.unsupported</code>
+- per-item <code>code</code>, <code>severity</code>, <code>component</code>, <code>panel</code>, <code>title</code>, <code>summary</code>, and <code>action</code>
+- optional per-item <code>routes[].id</code>
+- optional per-item <code>routes[].targets</code>
+- optional per-item <code>routes[].delivery.delivered</code>
+- optional per-item <code>routes[].delivery.suppressed</code>
+- optional per-item <code>routes[].delivery.failed</code>
+- optional per-item <code>routes[].delivery.unsupported</code></p>
+<p>Current routing config surface:
+- <code>settings.set { "observability.alert_routes": [...] }</code>
+- each route can declare <code>id</code>, <code>min_severity</code>, <code>components</code>, <code>panels</code>, <code>codes</code>, and <code>targets</code>
+- <code>stats.snapshot.alerts</code> resolves matching routes against the current synthesized alerts
+- <code>http://</code> and <code>https://</code> targets receive a JSON <code>POST</code> the first time a matching alert is observed in <code>stats.snapshot</code>
+- identical active alerts are suppressed on subsequent <code>stats.snapshot</code> calls until the alert clears
+- non-HTTP targets are still annotated in the snapshot but are not delivered externally yet</p>
+<p>Current drill-down surface in <code>stats.query_fingerprint_latency</code>:
+- bounded recent per-fingerprint latency samples
+- <code>p50_ms</code>, <code>p95_ms</code>, and <code>p99_ms</code>
+- millisecond histogram buckets with <code>overflow_count</code>
+- optional filtering by exact fingerprint for operator drill-down</p>
 <h3 id="23-storage-engine-snapshot">2.3 Storage engine snapshot<a class="headerlink" href="#23-storage-engine-snapshot" title="Permanent link">¶</a></h3>
 <ul>
 <li>WAL size and append rate</li>
@@ -201,6 +243,24 @@ while still integrating cleanly with standard monitoring stacks.</p>
 <p>CDC (if enabled):
 - active subscriptions
 - max lag (producer_offset - consumer_offset)</p>
+<p>Current runtime surface in <code>stats.snapshot.cdc</code>:
+- <code>active_subscriptions</code>
+- <code>table_subscriptions</code>
+- <code>query_subscriptions</code>
+- <code>total_lag</code>
+- <code>max_lag</code>
+- <code>paused_subscriptions</code>
+- <code>pressured_subscriptions</code>
+- <code>throttle_recommended_subscriptions</code>
+- <code>warn_lag</code>
+- <code>throttle_lag</code>
+- <code>min_remaining_until_resnapshot</code>
+- <code>resnapshot_subscriptions</code>
+- <code>earliest_offset</code>
+- <code>latest_offset</code>
+- <code>retained_events</code>
+- <code>retention_limit</code>
+- <code>dropped_events_total</code></p>
 <h3 id="24-cluster-snapshot-if-enabled">2.4 Cluster snapshot (if enabled)<a class="headerlink" href="#24-cluster-snapshot-if-enabled" title="Permanent link">¶</a></h3>
 <ul>
 <li>node role (primary/replica/router)</li>
@@ -215,6 +275,7 @@ while still integrating cleanly with standard monitoring stacks.</p>
 <ul>
 <li><code>stats.snapshot</code> -&gt; JSON summary for dashboards</li>
 <li><code>stats.top_queries</code> -&gt; top by total time / p95 / rows</li>
+<li><code>stats.query_fingerprint_latency</code> -&gt; per-fingerprint p50/p95/p99 plus bounded latency histogram buckets</li>
 <li><code>stats.slow_queries</code> -&gt; recent slow query log</li>
 <li><code>stats.storage</code> -&gt; compaction + disk + dedup</li>
 <li><code>stats.cluster</code> -&gt; node + shard view</li>
@@ -250,7 +311,7 @@ while still integrating cleanly with standard monitoring stacks.</p>
 - QPS/TPS
 - active sessions</p>
 <p>2) <strong>Latency</strong>
-- p50/p95/p99 over last N minutes
+- average latency plus p50/p95/p99 over the recent query sample window
 - slow query list</p>
 <p>3) <strong>Storage</strong>
 - WAL growth
@@ -261,6 +322,18 @@ while still integrating cleanly with standard monitoring stacks.</p>
 - node list with health
 - replication lag
 - shard placement</p>
+<p>Delivered baseline in SkeinAdmin:
+- overview cards for cache, average latency, and p95 tail latency
+- overview <code>Operational Alerts</code> card synthesized from current query, CDC, and compaction telemetry
+- active-session summary text with average, p95, and p99 latency
+- telemetry panel table for per-fingerprint latency histograms with p95/p99 drill-down
+- CDC panel summary cards for runtime subscription counts, lag, retention horizon, and dropped-event totals</p>
+<p>Delivered operator routing baseline:
+- persisted alert-route configuration via <code>observability.alert_routes</code>
+- per-alert matched route IDs/targets in <code>stats.snapshot.alerts.items[*].routes</code>
+- top-level route summary counters in <code>stats.snapshot.alerts.routing</code>
+- HTTP(S) route targets receive JSON <code>POST</code> delivery once per active alert while <code>stats.snapshot</code> is being evaluated
+- broader escalation policies, retries, and non-HTTP sinks remain backlog work</p>
 <hr />
 <h2 id="6-backlog">6) Backlog<a class="headerlink" href="#6-backlog" title="Permanent link">¶</a></h2>
 <ul>

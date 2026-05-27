@@ -1,7 +1,7 @@
 # Dedup-preserving encryption (message-locked / convergent mode)
 
-Status: Shipped baseline (T190-T193 implemented; background re-encryption orchestration and durable key catalog persistence remain follow-ups)
-Last updated: 2026-05-08
+Status: Partial baseline (T190-T193 library/control surfaces implemented; encryption profile/audit metadata now persists, but main engine read/write integration and durable master-key persistence remain follow-ups)
+Last updated: 2026-05-27
 
 SkeinDB's storage design uses content addressing and optional deduplication in the ValueStore.
 Traditional randomized encryption breaks deduplication because identical plaintexts produce different ciphertexts.
@@ -26,7 +26,8 @@ Current implementation note:
 - `ENC_MLE_DB` derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts.
 - T191 adds `EncryptedValueStore`, which stores self-describing encryption envelopes as ordinary `ValueKind::Cell` blobs and computes `ValueID` over the stored bytes without changing the `.vseg` format.
 - T192 adds key rotation plans and per-envelope / per-value re-encryption helpers with progress counters.
-- T193 exposes `settings.encryption.*` JSON-RPC methods plus the SkeinAdmin Encryption panel. Master key bytes are accepted as base64 but never persisted; operators re-register keys after restart.
+- T193 exposes `settings.encryption.*` JSON-RPC methods plus the SkeinAdmin Encryption panel. `data/encryption.json` now persists per-database mode/active-key metadata plus the redacted encryption audit ring across restart, but master key bytes are still accepted as base64 and never persisted; operators re-register keys after restart.
+- Current engine boundary: normal table reads/writes are not yet routed through `EncryptedValueStore`, so the encryption controls remain a standalone/runtime-control baseline rather than full at-rest coverage.
 
 ## 2. Threat model (explicit)
 
@@ -261,7 +262,8 @@ to work under prior keys until a separate GC pass collects them.
 
 The engine exposes the runtime key-management surface via JSON-RPC. Master key
 bytes are **never persisted to disk** by these methods — operators must
-re-register keys after restart.
+re-register keys after restart. The non-secret control metadata (`mode`,
+`active_key_id`, recent audit events) is persisted in `data/encryption.json`.
 
 | Method                                   | Direction | Notes                                              |
 | ---------------------------------------- | --------- | -------------------------------------------------- |

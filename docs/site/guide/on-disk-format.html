@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="skeindb-on-disk-format-v03-v02-compatible">SkeinDB On-Disk Format v0.3 (v0.2 compatible)<a class="headerlink" href="#skeindb-on-disk-format-v03-v02-compatible" title="Permanent link">¶</a></h1>
 <p>Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-05-15</p>
+Last updated: 2026-05-27</p>
 <p>This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.</p>
 <p>Design goals:
@@ -153,7 +153,8 @@ All formats MUST be versioned. Any breaking change requires a format version bum
   schema_versions.json        (prototype schema versions, format v1)
   schema_changes.json         (prototype schema change log, format v2)
   schema_flags.json           (prototype schema flags, format v1)
-  changes.json                (prototype retained CDC change log, format v1)
+  changes.json                (prototype retained CDC change log, format v2)
+  cdc_subscriptions.json      (prototype CDC subscription cursors, format v8)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
@@ -291,8 +292,8 @@ with a <code>rec_type</code> tag, then uses VarU fields.</p>
 <p>Current <code>skeindb-core</code> implementation status for T012:</p>
 <ul>
 <li><code>.vseg</code> files are append-only and use <code>FileHeader(file_kind=ValSeg)</code> followed by framed VE1 records.</li>
-<li><code>ValueSegmentWriter</code> / <code>ValueSegmentReader</code> currently support <code>codec=0</code> (RAW).</li>
-<li><code>codec=1</code> (ZSTD) is reserved in the format but not yet implemented by the core reader/writer.</li>
+<li><code>ValueSegmentWriter</code> / <code>ValueSegmentReader</code> support <code>codec=0</code> (RAW) and <code>codec=1</code> (ZSTD).</li>
+<li>The writer stores ZSTD only when it produces a smaller payload; otherwise it falls back to RAW.</li>
 <li>DELTA entries persist <code>DELTA1</code> inside <code>raw_bytes</code>; skip patches are runtime-only metadata and are rebuilt lazily rather than stored on disk.</li>
 </ul>
 <hr />
@@ -787,11 +788,45 @@ The FileHeader format_ver remains 1; extensions use new record types and/or high
 </ul>
 <h2 id="a5-cdc-retained-change-log-prototype">A.5 CDC retained change log (prototype)<a class="headerlink" href="#a5-cdc-retained-change-log-prototype" title="Permanent link">¶</a></h2>
 <ul>
-<li><code>changes.json</code> stores the retained change-log window used for CDC replay (format v1).</li>
-<li>Each record persists <code>seq</code>, <code>db</code>, <code>table</code>, <code>op</code>, optional <code>pk</code> / <code>query_id</code> / <code>etag</code>, plus <code>commit_ts_ms</code> and optional <code>lsn</code> metadata.</li>
-<li>Older unversioned array snapshots are still accepted on load and rewritten to the versioned envelope on the next persist.</li>
+<li><code>changes.json</code> stores the retained change-log window used for CDC replay (format v2).</li>
+<li>Each record persists <code>seq</code>, <code>db</code>, <code>table</code>, <code>op</code>, optional <code>pk</code> / <code>before</code> / <code>after</code> / <code>query_id</code> / <code>etag</code>, plus <code>commit_ts_ms</code> and optional <code>lsn</code> metadata.</li>
+<li>Legacy format v1 envelopes and older unversioned array snapshots are still accepted on load and rewritten to the current versioned envelope on the next persist.</li>
 </ul>
-<p>Files are optional and written only when <code>SKEINDB_ADVISOR_PERSIST=1</code>.</p>
+<p><code>cdc_subscriptions.json</code> stores durable consumer cursor and control state for CDC subscriptions (format v8):</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;subs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sub_1&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;acked_offset&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;plain_json&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;include_before&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;include_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;pk_range&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;lower_bound&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;upper_bound&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">}},</span><span class="w"> </span><span class="nt">&quot;ops&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;update&quot;</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;status&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;table&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;events&quot;</span><span class="p">}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sub_2&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;acked_offset&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;paused&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;include_before&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;include_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;query&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;query_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;query_1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Change-log format v2 adds optional retained <code>before</code> / <code>after</code> row images for CDC replay; format v1 envelopes and unversioned arrays still load.
+- Format v3 adds per-subscription <code>options.include_before</code> / <code>options.include_after</code> flags used by <code>cdc.subscribe_table</code> / <code>cdc.subscribe_query</code> row-image delivery.
+- Format v4 adds per-subscription <code>options.ops</code> allowlists used by <code>cdc.subscribe_table</code> / <code>cdc.subscribe_query</code> source-op filtering.
+- Format v5 adds per-subscription <code>options.pk</code> exact-match primary-key filters used by <code>cdc.subscribe_table</code> / <code>cdc.subscribe_query</code> replay filtering.
+- Format v6 adds per-subscription <code>options.columns</code> changed-column filters used by <code>cdc.subscribe_table</code> / <code>cdc.subscribe_query</code> replay filtering and row-image projection.
+- Format v7 adds per-subscription <code>options.pk_range</code> inclusive primary-key range filters used by <code>cdc.subscribe_table</code> / <code>cdc.subscribe_query</code> replay filtering.
+- Format v8 adds per-subscription <code>options.format</code> delivery encoding. Missing values default to <code>objects_json</code>; supported values are <code>objects_json</code> and <code>plain_json</code>.
+- Format v2 adds the per-subscription <code>paused</code> flag used by <code>cdc.pause</code> / <code>cdc.resume</code> and the CDC backpressure state machine.
+- Format v1/v2/v3/v4/v5/v6/v7 subscription files are still accepted on load; missing <code>paused</code> defaults to <code>false</code>, missing <code>options</code> default to both row images disabled, missing <code>options.ops</code> defaults to an empty allowlist, missing <code>options.pk</code> defaults to an empty tuple filter, missing <code>options.pk_range</code> defaults to no primary-key range filter, missing <code>options.columns</code> defaults to an empty changed-column filter, missing <code>options.format</code> defaults to <code>objects_json</code>, and the file is rewritten as v8 on the next subscription persist.
+- If all subscriptions are closed, <code>cdc_subscriptions.json</code> is removed.</p>
+<p>The CDC files are optional: missing <code>changes.json</code> means no retained replay window has been loaded, and missing <code>cdc_subscriptions.json</code> means there are no durable subscriptions to restore.</p>
 <h2 id="a6-embedding-valueentries">A.6 Embedding ValueEntries<a class="headerlink" href="#a6-embedding-valueentries" title="Permanent link">¶</a></h2>
 <p>Value segments (.vseg) add a new value kind:
 - val_kind = 6 (EMBEDDING)</p>

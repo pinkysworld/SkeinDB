@@ -1461,8 +1461,35 @@ pub struct AdvisorEvaluatePhaseResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_top_stable_after_observation: Option<u64>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_benchmark: Option<AdvisorEvaluateLatencyReport>,
+
     pub top_changes: u64,
     pub distinct_top_suggestions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluateLatencyStats {
+    pub min_ns: u64,
+    pub p50_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub max_ns: u64,
+    pub mean_ns: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluateLatencyReport {
+    pub benchmarkable_samples: u64,
+    pub benchmark_runs: u64,
+    pub observed_rows_scanned: u64,
+    pub before_rows_scanned: u64,
+    pub after_rows_scanned: u64,
+    pub before: AdvisorEvaluateLatencyStats,
+    pub after: AdvisorEvaluateLatencyStats,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speedup: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3038,14 +3065,31 @@ pub struct ObjectsPullResult {
 // cdc.* (selected)
 // --------------------------------
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CdcPrimaryKeyRange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower_bound: Option<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_bound: Option<Lit>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcSubscribeTableParams {
     pub db: String,
     pub table: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk: Vec<Lit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk_range: Option<CdcPrimaryKeyRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3055,18 +3099,38 @@ pub struct CdcSubscribeQueryParams {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<Lit>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk_range: Option<CdcPrimaryKeyRange>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include: Option<serde_json::Value>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcSubscribeResult {
     pub sub_id: String,
     pub offset: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_url: Option<String>,
 }
+
+pub type CdcRowObject = std::collections::BTreeMap<String, serde_json::Value>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcEvent {
@@ -3076,7 +3140,13 @@ pub struct CdcEvent {
     pub op: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pk: Option<Vec<Lit>>,
+    pub pk: Option<Vec<serde_json::Value>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<CdcRowObject>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<CdcRowObject>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_id: Option<String>,
@@ -3106,6 +3176,30 @@ pub struct CdcAckParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcPauseParams {
+    pub sub_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcResumeParams {
+    pub sub_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CdcBackpressureStatus {
+    pub state: String,
+
+    #[serde(default)]
+    pub lag: u64,
+
+    #[serde(default)]
+    pub remaining_until_resnapshot: u64,
+
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcPollResult {
     pub events: Vec<CdcEvent>,
     pub next_offset: u64,
@@ -3124,12 +3218,25 @@ pub struct CdcPollResult {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resnapshot_reason: Option<String>,
+
+    #[serde(default)]
+    pub backpressure: CdcBackpressureStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcAckResult {
     pub sub_id: String,
     pub acked_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscriptionControlResult {
+    pub sub_id: String,
+    pub paused: bool,
+    pub acked_offset: u64,
+
+    #[serde(default)]
+    pub backpressure: CdcBackpressureStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

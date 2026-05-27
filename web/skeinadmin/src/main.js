@@ -50,6 +50,7 @@ const STATE = {
   advisorSelection: null,
   cdcSubscriptions: [],
   cdcSelectedSubId: '',
+  lastStatsSnapshot: null,
   replayHistoryStatus: null,
   replayLastBundle: null,
   edgeLastBundle: null,
@@ -395,13 +396,103 @@ function currentSelectionLabel() {
 
 function cdcSubscriptionStats() {
   const subs = Array.isArray(STATE.cdcSubscriptions) ? STATE.cdcSubscriptions : [];
-  const stats = { total: subs.length, tableCount: 0, queryCount: 0, selected: null };
+  const stats = { total: subs.length, tableCount: 0, queryCount: 0, pausedCount: 0, pressuredCount: 0, selected: null };
   subs.forEach((sub) => {
     if (sub.kind === 'query') stats.queryCount += 1;
     else stats.tableCount += 1;
+    if (sub.paused) stats.pausedCount += 1;
+    if (cdcBackpressureState(sub) !== 'healthy') stats.pressuredCount += 1;
   });
   stats.selected = cdcFindSubscription(STATE.cdcSelectedSubId);
   return stats;
+}
+
+function cdcRuntimeStats() {
+  const cdc = STATE.lastStatsSnapshot && STATE.lastStatsSnapshot.cdc ? STATE.lastStatsSnapshot.cdc : {};
+  return {
+    activeSubscriptions: Number(cdc.active_subscriptions) || 0,
+    tableSubscriptions: Number(cdc.table_subscriptions) || 0,
+    querySubscriptions: Number(cdc.query_subscriptions) || 0,
+    totalLag: Number(cdc.total_lag) || 0,
+    maxLag: Number(cdc.max_lag) || 0,
+    resnapshotSubscriptions: Number(cdc.resnapshot_subscriptions) || 0,
+    pausedSubscriptions: Number(cdc.paused_subscriptions) || 0,
+    pressuredSubscriptions: Number(cdc.pressured_subscriptions) || 0,
+    throttleRecommendedSubscriptions: Number(cdc.throttle_recommended_subscriptions) || 0,
+    warnLag: Number(cdc.warn_lag) || 0,
+    throttleLag: Number(cdc.throttle_lag) || 0,
+    minRemainingUntilResnapshot: Number(cdc.min_remaining_until_resnapshot) || 0,
+    earliestOffset: Number(cdc.earliest_offset) || 0,
+    latestOffset: Number(cdc.latest_offset) || 0,
+    retainedEvents: Number(cdc.retained_events) || 0,
+    retentionLimit: Number(cdc.retention_limit) || 0,
+    droppedEventsTotal: Number(cdc.dropped_events_total) || 0,
+  };
+}
+
+function statsAlertPanelLabel(panel) {
+  switch (String(panel || '')) {
+    case 'telemetry':
+      return 'Telemetry';
+    case 'cdc':
+      return 'CDC';
+    case 'engine':
+      return 'Engine';
+    default:
+      return panel ? String(panel) : 'Overview';
+  }
+}
+
+function snapshotAlerts() {
+  const alerts = STATE.lastStatsSnapshot && STATE.lastStatsSnapshot.alerts ? STATE.lastStatsSnapshot.alerts : {};
+  const summary = alerts.summary || {};
+  return {
+    status: String(alerts.status || 'unknown'),
+    critical: Number(summary.critical) || 0,
+    warning: Number(summary.warning) || 0,
+    total: Number(summary.total) || 0,
+    items: Array.isArray(alerts.items) ? alerts.items : [],
+  };
+}
+
+function renderOperationalAlerts() {
+  const summary = $('operationalAlertsSummary');
+  const host = $('operationalAlertsGrid');
+  if (!summary || !host) return;
+
+  if (!STATE.lastStatsSnapshot) {
+    summary.textContent = 'Load stats to synthesize query, CDC, and compaction alerts from the current telemetry window.';
+    host.innerHTML = renderGlanceCard(
+      'Status',
+      'No snapshot',
+      'Run Stats to load the current operator alert view.'
+    );
+    return;
+  }
+
+  const alerts = snapshotAlerts();
+  if (!alerts.total) {
+    summary.textContent = 'Current query, CDC, and compaction telemetry is healthy.';
+    host.innerHTML = renderGlanceCard(
+      'Telemetry',
+      alerts.status === 'healthy' ? 'Healthy' : 'No active alerts',
+      'No active query, CDC, or compaction alerts were synthesized from the latest stats.snapshot.'
+    );
+    return;
+  }
+
+  summary.textContent = alerts.critical + ' critical / ' + alerts.warning + ' warning from the current stats.snapshot window.';
+  host.innerHTML = alerts.items.map((item) => {
+    const component = String(item.component || 'runtime');
+    const severity = String(item.severity || 'info').toUpperCase();
+    const title = String(item.title || 'Alert');
+    const details = [
+      String(item.summary || ''),
+      item.action ? ('Next: ' + String(item.action)) : '',
+      item.panel ? ('Panel: ' + statsAlertPanelLabel(item.panel)) : ''
+    ].filter(Boolean).join(' ');
+    return renderGlanceCard(component + ' · ' + severity, title, details);
+  }).join('');
 }
 
 function renderOverviewHero() {
@@ -419,6 +510,7 @@ function renderOverviewHero() {
   const txId = (($('txId')?.value || STATE.txCurrentId || '').trim());
   const replayCount = Array.isArray(STATE.replayImports) ? STATE.replayImports.length : 0;
   const cdcStats = cdcSubscriptionStats();
+  const cdcRuntime = cdcRuntimeStats();
   if (connection) connection.textContent = STATE.connected ? 'Online' : 'Offline';
   if (methods) methods.textContent = methodCount ? String(methodCount) : '--';
   if (research) research.textContent = hardenedCount + '/' + String(RESEARCH_TRACKS.length);
@@ -436,6 +528,7 @@ function renderOverviewHero() {
     sessionSummary.innerHTML = '<strong>Session State</strong>Prepared queries: ' + escapeHtml(String(prepared.length))
       + ' | Active transaction: ' + escapeHtml(txCopy)
       + '<br>CDC subscriptions: ' + escapeHtml(String(cdcStats.total) + ' total (' + cdcStats.tableCount + ' table / ' + cdcStats.queryCount + ' query)')
+      + ' | Runtime CDC: ' + escapeHtml(String(cdcRuntime.activeSubscriptions) + ' active, lag ' + cdcRuntime.totalLag + ' total / ' + cdcRuntime.maxLag + ' max')
       + ' | Replay workspaces: ' + escapeHtml(String(replayCount));
   }
   if (coverageSummary) {
@@ -518,18 +611,26 @@ function renderCdcGlance() {
   const host = $('cdcSummaryBar');
   if (!host) return;
   const stats = cdcSubscriptionStats();
+  const runtime = cdcRuntimeStats();
   const selected = stats.selected ? cdcSubscriptionLabel(stats.selected) : 'No active subscription';
   const latestPrepared = latestPreparedQuery();
   host.innerHTML = [
     renderGlanceCard(
-      'Subscriptions',
-      stats.total ? String(stats.total) + ' active' : 'No feeds yet',
-      stats.total ? (stats.tableCount + ' table feed(s) and ' + stats.queryCount + ' query feed(s) tracked in this browser session.') : 'Start with a table feed or reuse the latest prepared query for invalidation-based CDC.'
+      'Runtime Feeds',
+      runtime.activeSubscriptions ? String(runtime.activeSubscriptions) + ' active' : 'No live feeds',
+      runtime.activeSubscriptions
+        ? (runtime.tableSubscriptions + ' table feed(s), ' + runtime.querySubscriptions + ' query feed(s), total lag ' + runtime.totalLag + ', max lag ' + runtime.maxLag + ', paused ' + runtime.pausedSubscriptions + ', pressure ' + runtime.pressuredSubscriptions + ', throttle ' + runtime.throttleRecommendedSubscriptions + '.')
+        : 'No live CDC subscriptions are currently reported by stats.snapshot.'
+    ),
+    renderGlanceCard(
+      'Browser Session',
+      stats.total ? String(stats.total) + ' tracked' : 'No feeds yet',
+      stats.total ? (stats.tableCount + ' table feed(s) and ' + stats.queryCount + ' query feed(s) created from this browser session.') : 'Start with a table feed or reuse the latest prepared query for invalidation-based CDC.'
     ),
     renderGlanceCard(
       'Selected Feed',
       selected,
-      stats.selected ? ('ACK and poll actions operate on ' + selected + '.') : 'Choose a subscription after creating one to inspect lag and recent events.'
+      stats.selected ? ('ACK, pause, resume, and poll actions operate on ' + selected + '; ' + cdcBackpressureDetail(stats.selected) + '.') : 'Choose a subscription after creating one to inspect lag and recent events.'
     ),
     renderGlanceCard(
       'Prepared Handoff',
@@ -537,15 +638,18 @@ function renderCdcGlance() {
       latestPrepared ? 'The latest prepared query can be promoted into a query-scoped CDC feed with one click.' : 'Prepare a query in Workspace first if you want invalidation tied to query semantics.'
     ),
     renderGlanceCard(
-      'Selection Seed',
-      currentSelectionLabel(),
-      STATE.selectedTable ? 'The current table selection can seed table subscriptions immediately.' : 'Pick a table from the tree to prefill database and table subscription targets.'
+      'Retention Horizon',
+      runtime.retainedEvents ? (String(runtime.retainedEvents) + ' retained') : 'No retained events',
+      runtime.retentionLimit
+        ? ('Offsets ' + runtime.earliestOffset + '...' + runtime.latestOffset + ', warn lag ' + runtime.warnLag + ', throttle lag ' + runtime.throttleLag + ', min remaining ' + runtime.minRemainingUntilResnapshot + ', dropped ' + runtime.droppedEventsTotal + ', resnapshot required for ' + runtime.resnapshotSubscriptions + ' feed(s).')
+        : 'The server has not reported a CDC retention window yet.'
     )
   ].join('');
 }
 
 function refreshDashboardSummaries() {
   renderOverviewHero();
+  renderOperationalAlerts();
   renderWorkspaceGlance();
   renderSchemaGlance();
   renderCdcGlance();
@@ -1054,6 +1158,7 @@ function renderAdvisorReport() {
 
 function updateStats(s) {
   if (!s) return;
+  STATE.lastStatsSnapshot = s;
   // Runtime
   setStat('statUptime', formatUptime(s.uptime_s));
   setStat('statCpu', s.process && Number.isFinite(s.process.cpu_pct) ? s.process.cpu_pct.toFixed(1) + '%' : '--');
@@ -1111,20 +1216,34 @@ function updateStats(s) {
   setStat('statMvccVersions', formatNumber(mvcc.versions));
   setStat('statDeltaChains', formatNumber(mvcc.delta_chains));
   const compaction = s.compaction || {};
+  const compactionTasks = ((compaction.scheduler || {}).tasks) || {};
   setStat('statCompactionRuns', compaction.runs !== undefined ? String(compaction.runs) : '--');
   setStat('statCompactionStatus', compaction.status || (compaction.running ? 'Running' : 'Idle'));
   setStat('statL0Files', compaction.l0_files !== undefined ? String(compaction.l0_files) : '--');
   setStat('statStallRate', compaction.stall_rate !== undefined ? compaction.stall_rate.toFixed(2) + '%' : '--');
+  setStat(
+    'statCompactionReclaimed',
+    Number.isFinite(Number(compactionTasks.bytes_reclaimed))
+      ? formatBytes(Number(compactionTasks.bytes_reclaimed))
+      : '--'
+  );
+  setStat(
+    'statCompactionTask',
+    compactionTasks.current || compactionTasks.last_completed || '--'
+  );
 
   // Cache & Query
   const cache = s.cache || {};
   setStat('statCacheHit', Number.isFinite(cache.hit_pct) ? cache.hit_pct.toFixed(1) + '%' : '--');
   setStat('statCacheSize', formatBytes(cache.size_bytes));
   const query = s.query || {};
+  const latency = query.latency_ms || {};
   setStat('statSlowQueries', query.slow_count !== undefined ? String(query.slow_count) : '--');
   setStat('statAvgLatency', Number.isFinite(query.avg_latency_ms) ? query.avg_latency_ms.toFixed(1) + ' ms' : '--');
+  setStat('statP95Latency', Number.isFinite(latency.p95) ? latency.p95.toFixed(1) + ' ms' : '--');
   setStat('statEtagHits', formatNumber(query.etag_hits));
   setStat('statCoalesced', formatNumber(query.coalesced));
+  refreshDashboardSummaries();
 }
 
 let autoRefreshInterval = null;
@@ -4115,6 +4234,7 @@ function renderCompactionSummary(result) {
   const el = $('compactionSummary');
   if (!el || !result || typeof result !== 'object') return;
   const cfg = result.scheduler || result.config || {};
+  const tasks = cfg.tasks || {};
   const workload = result.workload || {};
   const pressure = result.pressure || {};
   const energy = cfg.energy || {};
@@ -4127,6 +4247,11 @@ function renderCompactionSummary(result) {
     + '<br><strong>L0</strong>: ' + escapeHtml(String(result.l0_files ?? '--')) + ' file(s), ' + escapeHtml(formatBytes(Number(result.l0_bytes) || 0))
     + ' | <strong>Hard pressure</strong>: ' + escapeHtml(String(!!pressure.hard_limit_exceeded))
     + ' | <strong>Active peak window</strong>: ' + escapeHtml(activeWindow)
+    + '<br><strong>Worker</strong>: runs ' + escapeHtml(String(result.runs ?? '--'))
+    + ', current ' + escapeHtml(tasks.current || 'idle')
+    + ', last ' + escapeHtml(tasks.last_completed || 'none')
+    + ', reclaimed ' + escapeHtml(formatBytes(Number(tasks.bytes_reclaimed) || 0))
+    + ', orphan cleanups ' + escapeHtml(String(tasks.orphan_files_removed ?? 0))
     + '<br><strong>Workload</strong>: reads ' + escapeHtml(String(workload.point_reads_per_s ?? '--'))
     + '/s, ranges ' + escapeHtml(String(workload.range_reads_per_s ?? '--'))
     + '/s, writes ' + escapeHtml(String(workload.write_ops_per_s ?? '--')) + '/s'
@@ -4515,21 +4640,24 @@ async function refreshActiveSessions() {
     if (!snap) {
       el('statActiveSessions', '--');
       el('statIdleSessions', '--');
-      el('statLongestQuery', '--');
+      el('statP95Latency', '--');
       if (summary) summary.textContent = 'Live workload is unavailable until stats can be loaded.';
       return;
     }
     const active = snap.sessions?.active ?? snap.connections ?? 0;
     const openTxns = snap.open_txns ?? 0;
     const avg = snap.query?.avg_latency_ms;
+    const latency = snap.query?.latency_ms || {};
+    const p95 = typeof latency.p95 === 'number' ? latency.p95.toFixed(1) + ' ms' : '--';
+    const p99 = typeof latency.p99 === 'number' ? latency.p99.toFixed(1) + ' ms' : '--';
     el('statActiveSessions', String(active));
     el('statIdleSessions', String(openTxns));
-    el('statLongestQuery', typeof avg === 'number' ? avg.toFixed(1) + 'ms' : '--');
-    if (summary) summary.textContent = String(active) + ' live session(s), ' + String(openTxns) + ' open transaction(s), average latency ' + (typeof avg === 'number' ? avg.toFixed(1) + ' ms' : '--') + '.';
+    el('statP95Latency', p95);
+    if (summary) summary.textContent = String(active) + ' live session(s), ' + String(openTxns) + ' open transaction(s), average latency ' + (typeof avg === 'number' ? avg.toFixed(1) + ' ms' : '--') + ', p95 ' + p95 + ', p99 ' + p99 + '.';
   } catch (e) {
     el('statActiveSessions', '--');
     el('statIdleSessions', '--');
-    el('statLongestQuery', '--');
+    el('statP95Latency', '--');
     if (summary) summary.textContent = 'Live workload could not be refreshed.';
   }
 }
@@ -4652,6 +4780,52 @@ async function securityTopQueries() {
   } catch (e) {
     const grid = $('secTopQueryGrid');
     if (grid) grid.innerHTML = '<div class="hint">Query stats not available.</div>';
+  }
+}
+
+function formatLatencyMsForUi(value) {
+  return typeof value === 'number' ? value.toFixed(0) + ' ms' : '--';
+}
+
+function summarizeLatencyHistogram(histogram) {
+  const buckets = Array.isArray(histogram?.buckets) ? histogram.buckets : [];
+  const nonZero = buckets.filter((bucket) => Number(bucket?.count) > 0);
+  if (!nonZero.length) return 'No samples';
+  const summary = nonZero
+    .slice(0, 4)
+    .map((bucket) => '<=' + bucket.le_ms + 'ms:' + bucket.count)
+    .join(', ');
+  const overflowCount = Number(histogram?.overflow_count) || 0;
+  return overflowCount > 0 ? summary + ', overflow:' + overflowCount : summary;
+}
+
+async function refreshTelemetryLatencyHistograms() {
+  const grid = $('telemetryLatencyGrid'); if (!grid) return;
+  const summary = $('telemetryLatencySummary');
+  try {
+    const res = await silentRpc('stats.query_fingerprint_latency', { limit: 10 });
+    const queries = res?.json?.result?.queries || [];
+    if (!queries.length) {
+      if (summary) summary.textContent = 'No per-fingerprint latency histograms recorded in the current telemetry window.';
+      renderTable('telemetryLatencyGrid', ['Method', 'Fingerprint', 'P95', 'P99', 'Buckets'], [['No latency histograms recorded', '\u2014', '\u2014', '\u2014', '\u2014']]);
+      return;
+    }
+
+    const rows = queries.map((query) => [
+      query.method || '\u2014',
+      query.fingerprint || '\u2014',
+      formatLatencyMsForUi(query.p95_ms),
+      formatLatencyMsForUi(query.p99_ms),
+      summarizeLatencyHistogram(query.histogram),
+    ]);
+
+    const hottest = queries[0] || {};
+    const sampleCount = Number(hottest?.histogram?.sample_count) || 0;
+    if (summary) summary.textContent = queries.length + ' fingerprint(s) ranked by tail latency. Hottest tail: ' + (hottest.method || 'query') + ' p95 ' + formatLatencyMsForUi(hottest.p95_ms) + ' from ' + sampleCount + ' sample(s).';
+    renderTable('telemetryLatencyGrid', ['Method', 'Fingerprint', 'P95', 'P99', 'Buckets'], rows);
+  } catch (e) {
+    if (summary) summary.textContent = 'Latency histogram telemetry is unavailable right now.';
+    renderTable('telemetryLatencyGrid', ['Method', 'Fingerprint', 'P95', 'P99', 'Buckets'], [['Error: ' + (e.message || e), '\u2014', '\u2014', '\u2014', '\u2014']]);
   }
 }
 
@@ -5177,6 +5351,30 @@ function cdcLagForSub(sub) {
   return Math.max(0, (Number(sub?.next_offset) || 0) - (Number(sub?.acked_offset) || 0));
 }
 
+function cdcBackpressureState(sub) {
+  const state = (sub?.backpressure?.state || (sub?.paused ? 'paused' : 'healthy')).toString();
+  return state || 'healthy';
+}
+
+function cdcBackpressureDetail(sub) {
+  const bp = sub?.backpressure || {};
+  const state = cdcBackpressureState(sub);
+  const lag = Number(bp.lag ?? cdcLagForSub(sub)) || 0;
+  const remaining = Number(bp.remaining_until_resnapshot) || 0;
+  if (state === 'healthy') return 'healthy, lag ' + lag;
+  if (state === 'paused') return 'paused, lag ' + lag + ', ' + remaining + ' event(s) until resnapshot';
+  return state + ', lag ' + lag + ', ' + remaining + ' event(s) until resnapshot';
+}
+
+function cdcApplyBackpressureResult(sub, result) {
+  if (!sub || !result) return;
+  if (result.backpressure) {
+    sub.backpressure = result.backpressure;
+    sub.paused = !!result.backpressure.paused;
+  }
+  if (Object.prototype.hasOwnProperty.call(result, 'paused')) sub.paused = !!result.paused;
+}
+
 function formatCdcPk(pk) {
   if (!Array.isArray(pk) || !pk.length) return '--';
   return pk.map((part) => formatLit(part)).join(', ');
@@ -5185,17 +5383,25 @@ function formatCdcPk(pk) {
 function renderCdcLagSummary(subs, selected) {
   const el = $('cdcLagSummary');
   if (!el) return;
+  const runtime = cdcRuntimeStats();
   if (!subs.length) {
-    el.innerHTML = 'No CDC subscriptions in this browser session yet.';
+    const runtimeSummary = runtime.activeSubscriptions
+      ? (' Runtime reports ' + runtime.activeSubscriptions + ' active feed(s), total lag ' + runtime.totalLag + ', max lag ' + runtime.maxLag + ', and ' + runtime.droppedEventsTotal + ' dropped event(s) beyond retention.')
+      : '';
+    el.innerHTML = 'No CDC subscriptions in this browser session yet.' + escapeHtml(runtimeSummary);
     return;
   }
   const totalLag = subs.reduce((sum, sub) => sum + cdcLagForSub(sub), 0);
   const maxLag = subs.reduce((value, sub) => Math.max(value, cdcLagForSub(sub)), 0);
+  const pausedCount = subs.filter((sub) => sub.paused).length;
+  const pressuredCount = subs.filter((sub) => cdcBackpressureState(sub) !== 'healthy').length;
   const selectedLabel = selected ? (cdcSubscriptionLabel(selected) + ' (' + selected.sub_id + ')') : 'none';
   el.innerHTML = '<strong>Subscriptions</strong>: ' + escapeHtml(String(subs.length))
     + ' | <strong>Total lag</strong>: ' + escapeHtml(String(totalLag)) + ' event(s)'
     + ' | <strong>Max lag</strong>: ' + escapeHtml(String(maxLag))
-    + ' | <strong>Selected</strong>: ' + escapeHtml(selectedLabel);
+    + ' | <strong>Pressure</strong>: ' + escapeHtml(String(pressuredCount) + ' local / ' + runtime.pressuredSubscriptions + ' runtime, paused ' + pausedCount + ' local / ' + runtime.pausedSubscriptions + ' runtime')
+    + ' | <strong>Runtime</strong>: ' + escapeHtml(String(runtime.activeSubscriptions) + ' active / throttle ' + runtime.throttleRecommendedSubscriptions + ' / dropped ' + runtime.droppedEventsTotal)
+    + ' | <strong>Selected</strong>: ' + escapeHtml(selectedLabel + (selected ? ' · ' + cdcBackpressureDetail(selected) : ''));
 }
 
 function renderCdcSubscriptionTable(subs) {
@@ -5206,10 +5412,12 @@ function renderCdcSubscriptionTable(subs) {
     return;
   }
   const maxLag = Math.max(1, ...subs.map((sub) => cdcLagForSub(sub)));
-  let h = '<table class="data-table"><thead><tr><th>Subscription</th><th>Kind</th><th>Target</th><th>Start</th><th>Acked</th><th>Next</th><th>Lag</th><th>Last Poll</th></tr></thead><tbody>';
+  let h = '<table class="data-table"><thead><tr><th>Subscription</th><th>Kind</th><th>Target</th><th>Start</th><th>Acked</th><th>Next</th><th>Lag</th><th>Status</th><th>Last Poll</th></tr></thead><tbody>';
   subs.forEach((sub) => {
     const lag = cdcLagForSub(sub);
     const barWidth = lag <= 0 ? 0 : Math.max(8, Math.round((lag / maxLag) * 100));
+    const pressureState = cdcBackpressureState(sub);
+    const pressureClass = pressureState === 'healthy' ? 'secondary' : (pressureState === 'paused' ? '' : 'danger');
     const lagBar = lag <= 0
       ? '<span class="hint">caught up</span>'
       : '<div class="lag-bar"><div class="lag-bar-fill" style="width:' + barWidth + '%"></div></div>';
@@ -5221,6 +5429,7 @@ function renderCdcSubscriptionTable(subs) {
       + '<td>' + escapeHtml(String(Number(sub.acked_offset) || 0)) + '</td>'
       + '<td>' + escapeHtml(String(Number(sub.next_offset) || 0)) + '</td>'
       + '<td><div style="min-width:120px">' + lagBar + '<div class="hint" style="margin-top:4px">' + escapeHtml(String(lag)) + ' event(s)</div></div></td>'
+        + '<td><span class="tag ' + pressureClass + '">' + escapeHtml(pressureState) + '</span><div class="hint" style="margin-top:4px">' + escapeHtml(cdcBackpressureDetail(sub)) + '</div></td>'
       + '<td>' + escapeHtml(formatUiTimestamp(Number(sub.last_polled_at_ms) || 0)) + '</td>'
       + '</tr>';
   });
@@ -5309,6 +5518,8 @@ async function cdcSubscribe() {
       offset,
       acked_offset: offset,
       next_offset: offset,
+      paused: false,
+      backpressure: { state: 'healthy', lag: 0, remaining_until_resnapshot: 0, paused: false },
       created_at_ms: Date.now(),
       last_polled_at_ms: 0,
       last_events: [],
@@ -5342,6 +5553,8 @@ async function cdcSubscribeQuery() {
       offset,
       acked_offset: offset,
       next_offset: offset,
+      paused: false,
+      backpressure: { state: 'healthy', lag: 0, remaining_until_resnapshot: 0, paused: false },
       created_at_ms: Date.now(),
       last_polled_at_ms: 0,
       last_events: [],
@@ -5384,9 +5597,43 @@ async function cdcPoll() {
     selected.last_events = Array.isArray(result.events) ? result.events : [];
     selected.last_polled_at_ms = Date.now();
     selected.next_offset = Number(result.next_offset) || fromOffset;
+    cdcApplyBackpressureResult(selected, result);
     setOut({ subscription: { sub_id: selected.sub_id, kind: selected.kind || 'table', target: cdcSubscriptionLabel(selected) }, poll: result }, 'cdcOut');
     renderCdcPanel();
-    showToast('CDC poll returned ' + String(selected.last_events.length) + ' event(s).', selected.last_events.length ? 'success' : 'info');
+    const state = cdcBackpressureState(selected);
+    showToast('CDC poll returned ' + String(selected.last_events.length) + ' event(s)' + (state !== 'healthy' ? ' with ' + state + ' backpressure.' : '.'), selected.last_events.length ? 'success' : 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
+  }
+}
+
+async function cdcPause() {
+  try {
+    const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
+    if (!selected) throw new Error('Select a subscription first');
+    const res = await call('cdc.pause', { sub_id: selected.sub_id }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.pause');
+    selected.acked_offset = Number(result.acked_offset) || selected.acked_offset;
+    cdcApplyBackpressureResult(selected, result);
+    setOut({ subscription: { sub_id: selected.sub_id, kind: selected.kind || 'table', target: cdcSubscriptionLabel(selected) }, pause: result }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC subscription ' + selected.sub_id + ' paused.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
+  }
+}
+
+async function cdcResume() {
+  try {
+    const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
+    if (!selected) throw new Error('Select a subscription first');
+    const res = await call('cdc.resume', { sub_id: selected.sub_id }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.resume');
+    selected.acked_offset = Number(result.acked_offset) || selected.acked_offset;
+    cdcApplyBackpressureResult(selected, result);
+    setOut({ subscription: { sub_id: selected.sub_id, kind: selected.kind || 'table', target: cdcSubscriptionLabel(selected) }, resume: result }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC subscription ' + selected.sub_id + ' resumed.', 'success');
   } catch (e) {
     setOut({ error: String(e) }, 'cdcOut');
   }
@@ -6308,6 +6555,7 @@ function setActivePanel(panel, updateHash) {
     securityRefreshTokens();
     securityTopQueries();
   }
+  if (panel === 'telemetry') refreshTelemetryLatencyHistograms();
   if (updateHash) window.location.hash = panel;
 }
 
@@ -6781,6 +7029,8 @@ wire('btnOblEvaluate', oblEvaluate);
 // CDC
 wire('btnCdcSubscribe', cdcSubscribe);
 wire('btnCdcPoll', cdcPoll);
+wire('btnCdcPause', cdcPause);
+wire('btnCdcResume', cdcResume);
 wire('btnCdcAck', cdcAck);
 wire('btnCdcClose', cdcClose);
 wire('btnCdcUsePrepared', cdcUseLatestPrepared);
@@ -6941,6 +7191,7 @@ wire('btnTelemetryPlanCacheClear', () => call('plan_cache.clear', {}, 'telemetry
 wire('btnTelemetryTopQueries', () => call('stats.top_queries', { limit: 20 }, 'telemetryPlanOut'));
 wire('btnTelemetrySlowQueries', () => call('stats.slow_queries', { limit: 20 }, 'telemetryPlanOut'));
 wire('btnTelemetryCoalescing', () => call('stats.coalescing', {}, 'telemetryPlanOut'));
+wire('btnTelemetryLatencyHistograms', refreshTelemetryLatencyHistograms);
 
 // RPC
 wire('btnRpcSend', rpcSend);

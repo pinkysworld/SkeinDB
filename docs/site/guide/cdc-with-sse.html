@@ -126,7 +126,8 @@
     </div>
     <article class="doc-article">
       <h1 id="cdc-with-sse">CDC with SSE<a class="headerlink" href="#cdc-with-sse" title="Permanent link">¶</a></h1>
-<p>This guide creates a table-level CDC subscription, streams change events over Server-Sent Events, and shows how to poll and acknowledge offsets over SkeinQL.</p>
+<p>This guide creates a table-level CDC subscription, streams change events over Server-Sent Events, and shows how to poll, pause/resume, and acknowledge offsets over SkeinQL.</p>
+<p>The same CDC subscription model also powers prepared-query invalidation through <code>cdc.subscribe_query</code> and <code>query.subscribe</code>. Query dependencies are conservative and table-based: direct base tables, view-expanded base tables, set-operation branches, and CTE definitions all invalidate on writes to the underlying retained-event tables.</p>
 <p>Prerequisite: <a href="first-query.html">Your first query (SkeinQL)</a> completed.</p>
 <h2 id="1-create-a-database-and-source-table">1. Create a database and source table<a class="headerlink" href="#1-create-a-database-and-source-table" title="Permanent link">¶</a></h2>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
@@ -159,7 +160,12 @@ curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </s
 <span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;sub_id=%s\nfrom_offset=%s\n&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$SUB_ID</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FROM_OFFSET</span><span class="s2">&quot;</span>
 </code></pre></div>
 
-<p>The subscription result also includes the SSE URL path.</p>
+<p>The subscription result also includes <code>sse_url</code> and <code>ws_url</code> transport paths.</p>
+<p>To follow one exact primary key instead of the whole table, pass a typed literal tuple in <code>pk</code>, for example <code>{"db":"app","table":"events","pk":[{"t":"u64","v":2}]}</code>.</p>
+<p>To follow an inclusive primary-key range on a single-column primary key, pass <code>pk_range</code>, for example <code>{"db":"app","table":"events","pk_range":{"lower_bound":{"t":"u64","v":2},"upper_bound":{"t":"u64","v":4}}}</code>.</p>
+<p>To watch only selected field changes and, when row images are included, project those images down to the same fields, pass <code>columns</code>, for example <code>{"db":"app","table":"events","ops":["update"],"columns":["data"],"include":{"before":true,"after":true}}</code>.</p>
+<p>CDC events default to <code>format: "objects_json"</code>, where <code>pk</code>, <code>before</code>, and <code>after</code> use typed SkeinQL <code>Lit</code> envelopes. Pass <code>format: "plain_json"</code> if you want those fields delivered as ordinary JSON scalars/objects over polling, SSE, and WebSocket.</p>
+<p>The returned <code>sub_id</code> is durable: if the server restarts, you can continue polling or reconnect SSE/WebSocket with the same subscription until you call <code>cdc.close</code>.</p>
 <h2 id="3-open-the-sse-stream">3. Open the SSE stream<a class="headerlink" href="#3-open-the-sse-stream" title="Permanent link">¶</a></h2>
 <p>In <strong>terminal A</strong>:</p>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-N<span class="w"> </span><span class="s2">&quot;http://127.0.0.1:8080/api/v1/cdc/sse/</span><span class="nv">$SUB_ID</span><span class="s2">&quot;</span>
@@ -199,16 +205,32 @@ curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </s
 <span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
 </code></pre></div>
 
+<p>That acknowledged offset is persisted, so a later <code>cdc.poll</code> with the same <code>sub_id</code> resumes from the last ACKed position even after restart.</p>
 <h2 id="6-resume-after-reconnect">6. Resume after reconnect<a class="headerlink" href="#6-resume-after-reconnect" title="Permanent link">¶</a></h2>
 <p>SSE reconnect uses event ids as offsets. To resume from a prior event:</p>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-N<span class="w"> </span>-H<span class="w"> </span><span class="s1">&#39;Last-Event-ID: 1&#39;</span><span class="w"> </span><span class="s2">&quot;http://127.0.0.1:8080/api/v1/cdc/sse/</span><span class="nv">$SUB_ID</span><span class="s2">&quot;</span>
 </code></pre></div>
 
 <p>If the reconnect cursor falls behind the retained event horizon, SkeinDB returns <code>resnapshot_required = true</code> for <code>cdc.poll</code> and emits an SSE <code>resnapshot</code> control event instead of replaying a partial stream.</p>
-<h2 id="7-close-the-subscription">7. Close the subscription<a class="headerlink" href="#7-close-the-subscription" title="Permanent link">¶</a></h2>
+<h2 id="7-pause-inspect-backpressure-and-resume">7. Pause, inspect backpressure, and resume<a class="headerlink" href="#7-pause-inspect-backpressure-and-resume" title="Permanent link">¶</a></h2>
+<p>Pause a subscription when an operator wants to stop delivering data events without closing the durable cursor:</p>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:8,\&quot;method\&quot;:\&quot;cdc.close\&quot;,\&quot;params\&quot;:{\&quot;sub_id\&quot;:\&quot;</span><span class="nv">$SUB_ID</span><span class="s2">\&quot;}}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:8,\&quot;method\&quot;:\&quot;cdc.pause\&quot;,\&quot;params\&quot;:{\&quot;sub_id\&quot;:\&quot;</span><span class="nv">$SUB_ID</span><span class="s2">\&quot;}}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>While paused, <code>cdc.poll</code> returns no data events, but its <code>backpressure</code> object reports <code>state = "paused"</code>, current lag, and <code>remaining_until_resnapshot</code>. SSE clients also receive an <code>event: backpressure</code> control event when the stream observes the paused state. Resume with:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:9,\&quot;method\&quot;:\&quot;cdc.resume\&quot;,\&quot;params\&quot;:{\&quot;sub_id\&quot;:\&quot;</span><span class="nv">$SUB_ID</span><span class="s2">\&quot;}}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="8-close-the-subscription">8. Close the subscription<a class="headerlink" href="#8-close-the-subscription" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:10,\&quot;method\&quot;:\&quot;cdc.close\&quot;,\&quot;params\&quot;:{\&quot;sub_id\&quot;:\&quot;</span><span class="nv">$SUB_ID</span><span class="s2">\&quot;}}&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
 </code></pre></div>
 
@@ -241,7 +263,8 @@ curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </s
 <li><a href="#4-insert-data-and-watch-the-stream">4. Insert data and watch the stream</a></li>
 <li><a href="#5-poll-and-acknowledge-over-rpc">5. Poll and acknowledge over RPC</a></li>
 <li><a href="#6-resume-after-reconnect">6. Resume after reconnect</a></li>
-<li><a href="#7-close-the-subscription">7. Close the subscription</a></li>
+<li><a href="#7-pause-inspect-backpressure-and-resume">7. Pause, inspect backpressure, and resume</a></li>
+<li><a href="#8-close-the-subscription">8. Close the subscription</a></li>
 <li><a href="#next">Next</a></li>
 </ul>
 </div>

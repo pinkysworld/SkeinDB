@@ -1,7 +1,7 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
 Status: Draft v1.0 (implementable; v0.3.17 runtime sync)
-Last updated: 2026-05-11
+Last updated: 2026-05-27
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:
@@ -31,7 +31,8 @@ Normative endpoint:
 
 Optional endpoints:
 - `GET /api/v1/q/{query_id}` — cacheable prepared-query execution (ETag-aware)
-- `GET /api/v1/cdc/{sub_id}` — `text/event-stream` (SSE) changefeed
+- `GET /api/v1/cdc/sse/{sub_id}` — `text/event-stream` (SSE) changefeed
+- `GET /api/v1/cdc/ws/{sub_id}` — WebSocket changefeed using JSON text frames
 
 ### 1.2 Request envelope
 
@@ -1125,26 +1126,42 @@ Result (shape is implementation-defined; typically includes a result set plus a 
 ### 10.8 cdc.*
 
 #### cdc.subscribe_table
-Params: `{ "db":"mydb", "table":"users" }`
+Params: `{ "db":"mydb", "table":"users", "pk_range":{"lower_bound":{"t":"u64","v":7},"upper_bound":{"t":"u64","v":9}}, "ops":["update","delete"], "columns":["status"], "include":{"after":true}, "format":"objects_json" }`
 
 Result:
 
 ```json
-{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_..."}
+{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_...","ws_url":"/api/v1/cdc/ws/sub_..."}
 ```
+
+The returned `sub_id` remains valid across server restarts until `cdc.close` removes the subscription.
+
+`ops` is optional and currently accepts any subset of `insert`, `update`, and `delete`. When omitted, all three source mutation kinds are delivered.
+`pk` is optional and, when present, must be an exact primary-key tuple encoded as SkeinQL typed literals. For table subscriptions, the tuple width must match the table primary key.
+`pk_range` is optional and, when present, applies an inclusive primary-key range using typed literal `lower_bound` and/or `upper_bound`. At least one bound must be present. For table subscriptions, the table must have a single-column primary key; tables without a primary key, composite primary keys, empty range objects, or `lower_bound > upper_bound` are rejected.
+`columns` is optional and, when present, only emits events whose retained `before` / `after` row images differ on at least one selected column. If row images are included, they are projected down to those columns. For table subscriptions, every requested column must exist in the table schema.
+`format` is optional and defaults to `objects_json`. Supported values are `objects_json`, which encodes `pk`, `before`, and `after` values as typed SkeinQL `Lit` envelopes, and `plain_json`, which emits those same fields as ordinary JSON scalars/objects. The selected format is persisted with the subscription and applies to `cdc.poll`, SSE, and WebSocket delivery.
 
 #### cdc.subscribe_query
 Params:
 
 ```json
-{"query_id":"q_...","args":[]}
+{"query_id":"q_...","args":[],"pk_range":{"lower_bound":{"t":"u64","v":7},"upper_bound":{"t":"u64","v":9}},"ops":["delete"],"columns":["status"],"include":{"before":true},"format":"objects_json"}
 ```
 
 Result:
 
 ```json
-{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_..."}
+{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_...","ws_url":"/api/v1/cdc/ws/sub_..."}
 ```
+
+The returned `sub_id` remains valid across server restarts until `cdc.close` removes the subscription.
+
+For query subscriptions, `ops` filters the triggering table mutations before an `op: "invalidate"` event is emitted.
+For query subscriptions, `pk` filters the triggering table mutations by exact primary-key tuple before an `op: "invalidate"` event is emitted.
+For query subscriptions, `pk_range` filters the triggering table mutations by inclusive primary-key bounds before an `op: "invalidate"` event is emitted.
+For query subscriptions, `columns` filters the triggering table mutations to cases where at least one selected column value changes between the retained `before` / `after` row images; when row images are included, they are projected down to those columns before the invalidation is emitted.
+Prepared queries over views invalidate on writes to the underlying base tables, prepared queries with set-operation bodies (for example `UNION` / `UNION ALL`) invalidate on writes to tables referenced by any branch, prepared queries using CTEs walk CTE definitions for base-table dependencies while ignoring CTE names as physical tables, and `query.subscribe` uses that same dependency set for prepared-query SSE change notifications.
 
 #### cdc.poll
 Params:
@@ -1161,8 +1178,15 @@ Result:
   "next_offset":124,
   "earliest_offset":120,
   "latest_offset":124,
-  "resnapshot_required":false
+  "resnapshot_required":false,
+  "backpressure":{"state":"healthy","lag":1,"remaining_until_resnapshot":4095,"paused":false}
 }
+```
+
+For a subscription created with `format: "plain_json"`, the same event's `pk` and row images are emitted without typed `Lit` wrappers, for example:
+
+```json
+{"seq":124,"db":"mydb","table":"users","op":"update","pk":[1],"after":{"id":1,"email":"ada@example.test"},"commit_ts_ms":1710000000000,"lsn":124}
 ```
 
 When a consumer falls behind the retained horizon, the result becomes:
@@ -1175,9 +1199,28 @@ When a consumer falls behind the retained horizon, the result becomes:
   "latest_offset":245,
   "resnapshot_required":true,
   "resnapshot_from_offset":199,
-  "resnapshot_reason":"wal_horizon_exceeded"
+  "resnapshot_reason":"wal_horizon_exceeded",
+  "backpressure":{"state":"resnapshot_required","lag":46,"remaining_until_resnapshot":0,"paused":false}
 }
 ```
+
+`backpressure.state` is one of `healthy`, `pressure`, `throttle`, `paused`, or `resnapshot_required`.
+
+#### cdc.pause / cdc.resume
+
+Params:
+
+```json
+{"sub_id":"sub_..."}
+```
+
+Result:
+
+```json
+{"sub_id":"sub_...","paused":true,"acked_offset":124,"backpressure":{"state":"paused","lag":0,"remaining_until_resnapshot":4096,"paused":true}}
+```
+
+`cdc.pause` persists the paused flag and suppresses data event delivery for the subscription. `cdc.resume` clears the flag. Neither method advances the acknowledged offset, and retained-horizon loss still returns or emits `resnapshot_required` before normal delivery can resume.
 
 #### CDC SSE transport
 
@@ -1188,7 +1231,24 @@ Reconnect options:
 - `Last-Event-ID: <seq>`
 - `GET /api/v1/cdc/sse/{sub_id}?from_offset=<seq>`
 
-If the reconnect cursor falls behind the retained horizon, the stream emits `event: resnapshot` with the same recovery metadata returned by `cdc.poll` and then closes.
+If the subscription enters `pressure`, `throttle`, `paused`, or `resnapshot_required`, the stream emits `event: backpressure` with the same `backpressure` fields returned by `cdc.poll`. If the reconnect cursor falls behind the retained horizon, the stream emits `event: resnapshot` with the same recovery metadata returned by `cdc.poll` and then closes.
+
+#### CDC WebSocket transport
+
+`GET /api/v1/cdc/ws/{sub_id}` upgrades to a WebSocket stream carrying JSON text frames with this envelope:
+
+```json
+{"id":124,"event":"insert","data":{"seq":124,"db":"mydb","table":"users","op":"insert","pk":[{"t":"u64","v":1}],"commit_ts_ms":1710000000000,"lsn":124}}
+```
+
+Reconnect options:
+
+- `Last-Event-ID: <seq>` on the upgrade request
+- `GET /api/v1/cdc/ws/{sub_id}?from_offset=<seq>`
+
+If the subscription enters `pressure`, `throttle`, `paused`, or `resnapshot_required`, the server sends a `{"event":"backpressure",...}` control frame with the same `backpressure` fields returned by `cdc.poll`. If the reconnect cursor falls behind the retained horizon, the server sends a final `{"event":"resnapshot",...}` control frame with the same recovery metadata returned by `cdc.poll` and then closes the socket.
+
+`cdc.ack` persists the acknowledged offset for the subscription, and `cdc.pause` / `cdc.resume` persist the operator control flag, so `cdc.poll`, SSE reconnects, and WebSocket reconnects restore the same cursor and paused state after restart as well as within a live process.
 
 ### 10.9 dp.* (experimental)
 
@@ -2588,7 +2648,7 @@ Result:
 Safety rules: only the latest active `advisor.apply_index` action for a suggestion is considered; a newer `dismiss` or `retire` removes it from candidates; recent dependency signals return `reason:"recently_used"`; actual retirements record action `retire` in `advisor.history`.
 
 #### advisor.evaluate (experimental)
-Replay phased dependency samples through a scratch advisor state and report how quickly the top suggestion converges after a workload shift.
+Replay phased dependency samples through a scratch advisor state, report how quickly the top suggestion converges after a workload shift, and optionally benchmark benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order against a hypothetical suggested index.
 
 Params:
 
@@ -2639,6 +2699,30 @@ Result:
       "label": "city_lookup",
       "observations": 3,
       "top_after": {"columns": ["city"]},
+      "latency_benchmark": {
+        "benchmarkable_samples": 1,
+        "benchmark_runs": 8,
+        "observed_rows_scanned": 400,
+        "before_rows_scanned": 1024,
+        "after_rows_scanned": 32,
+        "before": {
+          "min_ns": 18200,
+          "p50_ns": 19600,
+          "p95_ns": 22100,
+          "p99_ns": 22900,
+          "max_ns": 22900,
+          "mean_ns": 19875.0
+        },
+        "after": {
+          "min_ns": 2900,
+          "p50_ns": 3200,
+          "p95_ns": 4100,
+          "p99_ns": 4300,
+          "max_ns": 4300,
+          "mean_ns": 3362.5
+        },
+        "speedup": 5.91
+      },
       "top_changes": 1,
       "distinct_top_suggestions": 1
     },
@@ -2655,7 +2739,7 @@ Result:
 }
 ```
 
-Each phase consists of one or more dependency samples. Samples may populate `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state.
+Each phase consists of one or more dependency samples. Samples may populate `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state. `latency_benchmark` is optional and currently appears only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order whose dependency columns cover the phase-final suggestion key; non-grouped range+order layouts without a same-leading key are still excluded.
 
 #### advisor.dismiss (experimental)
 Dismiss an index suggestion (suppressed from future synthesize output). Drops any advisor-built in-memory index.

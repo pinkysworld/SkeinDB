@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-05-11
+Last updated: 2026-05-25
 
 Status: Partial advanced baseline
 
@@ -34,9 +34,9 @@ Notes:
 - trust auth when `SKEINDB_TOKEN` is unset
 - SCRAM-SHA-256 auth path when `SKEINDB_TOKEN` is set
 - SSL negotiation rejection (`'N'`)
-- PG session settings for common `SET` / `SET ... TO` / `RESET` / `RESET ALL`, with `SHOW` and `current_setting(...)` reading session overrides
+- PG session settings for common `SET` / `SET ... TO` / `RESET` / `RESET ALL`, with `SHOW`, `current_setting(name)`, `current_setting(name, missing_ok)`, `current_schema` (with optional parentheses), and `current_schemas(bool)` reading the effective `search_path`
 - simple query protocol delegated to the shared SQL execution engine
-- special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
+- special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_catalog`, `current_schema` (with optional parentheses), `current_schemas(bool)`, `current_user`, `current_role`, `session_user`, `user`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)` including the `missing_ok` form
 - empty-query handling
 - transaction-state tracking via `ReadyForQuery` (`I` / `T` / `E`)
 - failed-transaction-block handling (`25P02`) with `COMMIT`-as-rollback behavior after aborted transactions
@@ -47,11 +47,12 @@ Notes:
 - PG compatibility corpus at `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
 - PG-specific operators: `||` (string concatenation), `~` / `~*` (regex match), `->` / `->>` (JSON access)
 - PG-specific scalar functions: `gen_random_uuid()`, `date_trunc()`, `to_char()`, `pg_typeof()`, `string_to_array()`, `array_length()`, `array_upper()`, `array_lower()`, `clock_timestamp()`, `statement_timestamp()`, `transaction_timestamp()`
+- Common shared-engine string functions over the PG path: `lower()`, `upper()`, `length()`, `char_length()`, `trim()`, `ltrim()`, `rtrim()`, `left()`, `right()`, `substring()`, `replace()`
 - PG-specific aggregate functions: `string_agg()`, `array_agg()`
 - PG SQL dialect rewriting: `::` type casts, `$$dollar quoting$$`, `"double-quoted"` identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST n ROWS ONLY`, `ARRAY[…]` constructor, and `ON CONFLICT` rewrite support for the current shared-engine DML subset
-- `INSERT` / `UPDATE` / `DELETE ... RETURNING` extraction with supported follow-up reads, and explicit `0A000` errors for `COPY FROM STDIN` / `COPY TO STDOUT`
+- `INSERT` / `UPDATE` / `DELETE ... RETURNING` extraction with supported follow-up reads, plus default/text/csv `COPY table [ (col, ...) ] TO STDOUT`, `COPY table [ (col, ...) ] FROM STDIN`, `COPY (SELECT ...) TO STDOUT`, and binary `COPY ... TO STDOUT` over both simple and extended query flows, with explicit `WITH (FORMAT text)`, `WITH (FORMAT csv)`, and `WITH (FORMAT binary)` plus CSV `HEADER` and single-byte `DELIMITER` on supported forms; `COPY FROM STDIN WITH (FORMAT binary)` and most other COPY options still return `0A000`
 - PG DDL compatibility: `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` → auto-increment integer columns, `CREATE SCHEMA` → `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY` (accepted/ignored), `CREATE INDEX IF NOT EXISTS`, `COMMENT ON` (silently accepted)
-- virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, `pg_stat_activity`, and `pg_stat_database`
+- virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (basic builtin metadata for bootstrap functions plus selected PG scalar/aggregate functions including timestamp, UUID, array, formatting, type, aggregate, and common string helpers, with aggregate `prokind` rows, the current `substring` arities, the current `current_setting` arities, and `current_schemas(bool)`), `pg_settings`, `pg_stat_activity`, and `pg_stat_database`
 - shared `information_schema.columns` introspection through `sql.exec`, including common metadata fields (`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and `EXTRA`) used by cross-dialect ORMs
 
 ## Module map
@@ -61,11 +62,11 @@ Notes:
 | `pg_wire.rs` | Implemented | PG v3 message framing, startup parsing, backend message encode/write helpers, common PG type OIDs, unit tests |
 | `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, SSL rejection, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch |
 | `pg_auth.rs` | Inline implementation | SCRAM-SHA-256 lives in `pg_wire::scram` plus `server.rs` connection handling rather than a separate module |
-| `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, and `current_setting(...)` use that session map |
+| `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, the current one- and two-argument `current_setting(...)` forms, and the `current_schema` (with optional parentheses) / `current_schemas(bool)` helpers use that session map, while startup-role bootstrap helpers preserve `current_user` / `current_role` / `session_user` / `user` from the connection username and map `current_catalog` to the current database |
 | `pg_parse.rs` | Inline implementation | PG SQL dialect rewriting layer (`pg_rewrite_sql` + helpers in `server.rs`): `::` type casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, `ARRAY[...]`, `ON CONFLICT`, and supported `RETURNING` extraction |
 | `pg_types.rs` | Inline implementation | Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in `pg_wire.rs` plus server-side inference helpers |
-| `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, `pg_stat_activity`, and `pg_stat_database` |
-| `pg_functions.rs` | Partial | PG-specific scalar/aggregate functions now inline in `engine.rs` and `server.rs`: `||` concat, `~`/`~*` regex, `->` / `->>` JSON access, `gen_random_uuid`, `date_trunc`, `to_char`, `pg_typeof`, `string_to_array`, `array_length`, `array_upper`, `array_lower`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_agg`, `array_agg` |
+| `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (basic metadata for `version`, `current_database`, `current_schema`, `current_schemas`, `current_setting` with both current arities, `date_trunc`, `pg_typeof`, `to_char`, `gen_random_uuid`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_to_array`, `split_part`, `array_length`, `array_upper`, `array_lower`, `string_agg`, `array_agg`, `lower`, `upper`, `length`, `char_length`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substring` with both 2-arg and 3-arg rows, and `replace`, including aggregate `prokind` rows), `pg_settings`, `pg_stat_activity`, and `pg_stat_database` |
+| `pg_functions.rs` | Partial | PG-specific scalar/aggregate functions now inline in `engine.rs` and `server.rs`: `||` concat, `~`/`~*` regex, `->` / `->>` JSON access, `gen_random_uuid`, `date_trunc`, `to_char`, `pg_typeof`, `string_to_array`, `split_part`, `array_length`, `array_upper`, `array_lower`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_agg`, `array_agg` |
 
 ## Authentication
 
@@ -95,6 +96,10 @@ For the current shared-engine subset, `RowDescription` now advertises common inf
 
 `SELECT version()` plus the common startup/bootstrap probes above are handled explicitly so PG clients can complete early compatibility checks before falling through to the shared engine.
 
+`COPY ... TO STDOUT` is now implemented in default/text/csv and binary formats for plain table exports and parenthesized `SELECT` queries. CSV exports additionally support `HEADER`, which emits a first `CopyData` frame with the selected column names before row data, and text/csv exports accept a single-byte `DELIMITER` override for row encoding. Binary exports switch `CopyOutResponse` and column format codes to `1`, emit the PostgreSQL binary stream header, one binary-encoded row payload per `CopyData`, and the standard trailer before `CopyDone`.
+
+Default/text/csv `COPY table [ (col, ...) ] TO STDOUT`, `COPY table [ (col, ...) ] FROM STDIN`, `COPY (SELECT ...) TO STDOUT`, and binary `COPY ... TO STDOUT` are implemented over both simple-query and extended-query flows, with optional table-column lists on table targets and explicit `WITH (FORMAT text)`, `WITH (FORMAT csv)`, and `WITH (FORMAT binary)` accepted on supported forms. `COPY FROM STDIN WITH (FORMAT csv, HEADER)` skips the first CSV row before row validation and insert assembly, and custom delimiters are threaded through both export and import parsing. The backend emits `CopyInResponse`, buffers incoming `CopyData` chunks, and commits them as one multi-row insert on `CopyDone`; extended-query completion still waits for `Sync` before `ReadyForQuery`. `COPY FROM STDIN WITH (FORMAT binary)` and most other COPY option coverage remain unsupported.
+
 ### Extended query protocol
 
 The listener now supports the core extended-query lifecycle:
@@ -109,7 +114,7 @@ Current limits:
 
 - parameter formats are text-only
 - binary result encoding is limited to the current common scalar OID baseline
-- partial portal suspension (`Execute` with incremental row draining) is not implemented yet
+- `Execute` with `max_rows > 0` now suspends and resumes prepared `SELECT` result sets via `PortalSuspended`; broader incremental row draining remains limited
 
 ### Transactions
 
@@ -129,10 +134,32 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - startup handshake reaches `ReadyForQuery`
 - simple query `SELECT 1`
 - simple query `SELECT version()`
-- startup/bootstrap query bundle covering `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
+- simple-query `COPY (SELECT ...) TO STDOUT` round-trip with `CopyOutResponse` / `CopyData` / `CopyDone`
+- simple-query `COPY table FROM STDIN` round-trip with `CopyInResponse` and follow-up row verification
+- simple-query `COPY table (col, ...) TO STDOUT` round-trip with column projection
+- simple-query `COPY table (col, ...) FROM STDIN` round-trip with sparse-column inserts
+- simple-query `COPY ... TO STDOUT WITH (FORMAT text)` round-trip
+- simple-query `COPY ... FROM STDIN WITH (FORMAT text)` round-trip
+- simple-query `COPY ... TO STDOUT WITH (FORMAT csv)` round-trip
+- simple-query `COPY ... FROM STDIN WITH (FORMAT csv)` round-trip
+- simple-query `COPY ... TO STDOUT WITH (FORMAT csv, HEADER)` round-trip
+- simple-query `COPY ... TO STDOUT WITH (FORMAT csv, DELIMITER ';')` round-trip
+- simple-query `COPY ... TO STDOUT WITH (FORMAT binary)` round-trip with binary `CopyOutResponse` and decoded row payloads
+- simple-query `COPY ... FROM STDIN WITH (FORMAT binary)` explicit `0A000` rejection
+- extended-query `COPY table (col, ...) TO STDOUT WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
+- extended-query `COPY (SELECT ...) TO STDOUT WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
+- extended-query `COPY table FROM STDIN` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
+- extended-query `COPY table (col, ...) FROM STDIN WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
+- extended-query `COPY ... TO STDOUT WITH (FORMAT csv)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
+- extended-query `COPY ... TO STDOUT WITH (FORMAT binary)` round-trip with `Parse` / `Bind` / `Execute` / binary `CopyOutResponse`
+- extended-query `COPY ... FROM STDIN WITH (FORMAT csv)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
+- extended-query `COPY ... FROM STDIN WITH (FORMAT csv, HEADER)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
+- extended-query `COPY ... FROM STDIN WITH (FORMAT csv, DELIMITER ';')` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
+- startup/bootstrap query bundle covering `current_database()`, `current_catalog`, `current_schema` (with optional parentheses), `current_schemas(bool)`, `current_user`, `current_role`, `session_user`, `user`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - simple-query `pg_catalog` round-trips for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_settings`, `pg_type`, `pg_stat_activity`, `pg_stat_database`, `pg_class`, `pg_attribute`, `pg_index`, and `pg_constraint`
 - simple-query `RowDescription` OID checks for numeric, boolean, temporal, JSON, UUID, and text result columns
 - extended query `Parse` / `Bind` / statement+portal `Describe` / `Execute` / `Close` / `Sync` / `Flush` round-trips
+- extended-query portal suspension/resume for prepared `SELECT` statements when `Execute` uses `max_rows > 0`
 - extended-query `RowDescription` OID checks for described/executed result columns
 - sync-based recovery after extended-query execution errors
 - PG corpus execution from `tests/compat/pg_corpus.sql`
@@ -143,12 +170,12 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - `Terminate` closes the connection cleanly
 - SSL negotiation is rejected correctly
 
-`pg_wire.rs` also carries 20 unit tests for message framing and encode/decode behavior.
+`pg_wire.rs` also carries 24 unit tests for message framing and encode/decode behavior.
 
 ## Claimed version and startup behavior
 
 - `SELECT version()` returns a PostgreSQL-flavored SkeinDB string
-- common startup/bootstrap probes return PostgreSQL-shaped values for `current_database()`, `current_schema()`, `SHOW ...`, and `current_setting(...)`
+- common startup/bootstrap probes return PostgreSQL-shaped values for `current_database()`, `current_catalog`, `current_schema` (with optional parentheses), `current_schemas(bool)`, `current_user`, `current_role`, `session_user`, `user`, `SHOW ...`, and `current_setting(...)`
 - the listener emits startup `ParameterStatus` messages during connection setup
 - the default port is `5432`
 - `--pg 0` disables the listener
@@ -156,9 +183,9 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 ## Not implemented yet
 
 - broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset
-- COPY protocol
+- binary `COPY ... FROM STDIN`, other COPY formats, and most COPY options beyond the current `FORMAT text` / `FORMAT csv` / `FORMAT binary`, CSV `HEADER`, and single-byte `DELIMITER` support
 - broader type/array/domain encoding beyond the current scalar and array OID baseline
-- partial portal suspension for incremental `Execute` row draining
+- broader portal suspension beyond prepared `SELECT` result sets
 - production-grade driver compatibility for Django, Rails, SQLAlchemy, `pgAdmin`, `DBeaver`, `psycopg`, and `node-postgres`
 
 ## Architecture
@@ -176,6 +203,6 @@ HTTP  (8080) ──┘
 Phase 25 in `docs/PROJECT_BACKLOG.md` tracks the remaining PostgreSQL work:
 
 - T400-T418 are complete in the core roadmap checklist.
-- Remaining PG work is no longer represented by unchecked Phase 25 boxes; track it as follow-up compatibility hardening: broader dialect coverage, COPY protocol, portal suspension, larger catalog/driver matrices, and framework-specific smoke suites.
+- Remaining PG work is no longer represented by unchecked Phase 25 boxes; track it as follow-up compatibility hardening: broader dialect coverage, additional COPY options/formats, broader portal suspension, larger catalog/driver matrices, and framework-specific smoke suites.
 
 Use `docs/TRUE_STATUS_MATRIX.md` when you want the runtime-backed truth snapshot rather than the aspirational roadmap.

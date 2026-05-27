@@ -1,15 +1,22 @@
 use std::{
+    fs::{self, File},
     net::TcpListener,
+    path::Path,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use anyhow::{anyhow, Context};
+use futures_util::StreamExt;
 use serde_json::json;
 use skeindb_skeinql::types::{
-    BaseTableRef, Expr, OrderBy, Query, QueryBody, SelectBody, SelectItem, TableRef,
+    BaseTableRef, Cte, Expr, OrderBy, Query, QueryBody, SelectBody, SelectItem, SetOp, SetOpKind,
+    TableRef,
 };
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -19,6 +26,38 @@ use tokio::{
 };
 
 static CLUSTER_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static CLUSTER_TEST_SERVER_BIN: OnceLock<PathBuf> = OnceLock::new();
+
+const DEFAULT_HEALTH_WAIT_TIMEOUT_SECS: u64 = 180;
+const HEALTH_WAIT_TIMEOUT_ENV: &str = "SKEINDB_CLUSTER_HEALTH_TIMEOUT_SECS";
+
+fn parse_health_wait_timeout(value: Option<&str>) -> Duration {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_HEALTH_WAIT_TIMEOUT_SECS))
+}
+
+fn health_wait_timeout() -> Duration {
+    let value = std::env::var(HEALTH_WAIT_TIMEOUT_ENV).ok();
+    parse_health_wait_timeout(value.as_deref())
+}
+
+#[test]
+fn parse_health_wait_timeout_uses_default_for_missing_invalid_and_zero_values() {
+    let expected = Duration::from_secs(DEFAULT_HEALTH_WAIT_TIMEOUT_SECS);
+    assert_eq!(parse_health_wait_timeout(None), expected);
+    assert_eq!(parse_health_wait_timeout(Some("")), expected);
+    assert_eq!(parse_health_wait_timeout(Some("abc")), expected);
+    assert_eq!(parse_health_wait_timeout(Some("0")), expected);
+}
+
+#[test]
+fn parse_health_wait_timeout_accepts_positive_override_values() {
+    assert_eq!(parse_health_wait_timeout(Some("15")), Duration::from_secs(15));
+    assert_eq!(parse_health_wait_timeout(Some(" 240 ")), Duration::from_secs(240));
+}
 
 fn select_query(db: &str, table: &str, projection: &[&str]) -> Query {
     Query {
@@ -840,6 +879,584 @@ async fn cdc_ack_and_close_roundtrip() -> anyhow::Result<()> {
         .unwrap_or_default();
     assert!(methods.iter().any(|method| method == "cdc.ack"));
     assert!(methods.iter().any(|method| method == "cdc.close"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_subscription_plain_json_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_plain_json")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "events",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "data", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({
+                "db": "app",
+                "table": "events",
+                "format": "plain_json",
+                "include": {"after": true}
+            }),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|v| v.get("sub_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|v| v.get("offset"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "events"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "one"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["pk"][0].as_u64(), Some(1));
+    assert_eq!(events[0]["after"]["id"].as_u64(), Some(1));
+    assert_eq!(events[0]["after"]["data"].as_str(), Some("one"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_subscription_filters_requested_ops() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_subscription_ops")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let invalid = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"users","ops":["merge"]}),
+        )
+        .await?;
+    assert!(!invalid.ok);
+    assert_eq!(
+        invalid.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_request")
+    );
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"users",
+                "ops":["update"],
+                "include":{"after":true}
+            }),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}},
+                "set": {"name": {"t": "str", "v": "Grace"}}
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.delete",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}}
+            }),
+        )
+        .await?;
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("events"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["op"].as_str(), Some("update"));
+    assert!(events[0]["before"].is_null());
+    assert_eq!(events[0]["after"]["name"]["v"].as_str(), Some("Grace"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_subscription_filters_requested_primary_key() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_subscription_pk")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let invalid = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"users","pk":[{"t":"u64","v":1},{"t":"u64","v":2}]}),
+        )
+        .await?;
+    assert!(!invalid.ok);
+    assert_eq!(
+        invalid.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_request")
+    );
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"users",
+                "pk":[{"t":"u64","v":2}],
+                "include":{"after":true}
+            }),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [
+                    {"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}},
+                    {"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}
+                ]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}},
+                "set": {"name": {"t": "str", "v": "Ada Lovelace"}}
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":2}}},
+                "set": {"name": {"t": "str", "v": "Grace Hopper"}}
+            }),
+        )
+        .await?;
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("events"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["op"].as_str(), Some("insert"));
+    assert_eq!(events[0]["pk"][0]["v"].as_u64(), Some(2));
+    assert_eq!(events[1]["op"].as_str(), Some("update"));
+    assert_eq!(events[1]["pk"][0]["v"].as_u64(), Some(2));
+    assert_eq!(
+        events[1]["after"]["name"]["v"].as_str(),
+        Some("Grace Hopper")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_subscription_filters_requested_primary_key_range() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_subscription_pk_range")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let invalid = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"users","pk_range":{}}),
+        )
+        .await?;
+    assert!(!invalid.ok);
+    assert_eq!(
+        invalid.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_request")
+    );
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"users",
+                "pk_range":{
+                    "lower_bound":{"t":"u64","v":2},
+                    "upper_bound":{"t":"u64","v":3}
+                },
+                "include":{"after":true}
+            }),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [
+                    {"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}},
+                    {"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}},
+                    {"id": {"t": "u64", "v": 3}, "name": {"t": "str", "v": "Linus"}},
+                    {"id": {"t": "u64", "v": 4}, "name": {"t": "str", "v": "Ken"}}
+                ]
+            }),
+        )
+        .await?;
+    for (id, name) in [
+        (1_u64, "Ada Lovelace"),
+        (2_u64, "Grace Hopper"),
+        (3_u64, "Linus Torvalds"),
+        (4_u64, "Ken Thompson"),
+    ] {
+        client
+            .rpc(
+                "data.update",
+                json!({
+                    "table": {"db": "app", "table": "users"},
+                    "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":id}}},
+                    "set": {"name": {"t": "str", "v": name}}
+                }),
+            )
+            .await?;
+    }
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("events"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["op"].as_str(), Some("insert"));
+    assert_eq!(events[0]["pk"][0]["v"].as_u64(), Some(2));
+    assert_eq!(events[1]["op"].as_str(), Some("insert"));
+    assert_eq!(events[1]["pk"][0]["v"].as_u64(), Some(3));
+    assert_eq!(events[2]["op"].as_str(), Some("update"));
+    assert_eq!(events[2]["pk"][0]["v"].as_u64(), Some(2));
+    assert_eq!(
+        events[2]["after"]["name"]["v"].as_str(),
+        Some("Grace Hopper")
+    );
+    assert_eq!(events[3]["op"].as_str(), Some("update"));
+    assert_eq!(events[3]["pk"][0]["v"].as_u64(), Some(3));
+    assert_eq!(
+        events[3]["after"]["name"]["v"].as_str(),
+        Some("Linus Torvalds")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_subscription_filters_requested_columns() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_subscription_columns")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false},
+                    {"name": "email", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let invalid = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"users","columns":["missing"]}),
+        )
+        .await?;
+    assert!(!invalid.ok);
+    assert_eq!(
+        invalid.error.as_ref().map(|error| error.code.as_str()),
+        Some("invalid_request")
+    );
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"users",
+                "columns":["name"],
+                "ops":["update"],
+                "include":{"before":true,"after":true}
+            }),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada"},
+                    "email": {"t": "str", "v": "ada@example.com"}
+                }]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}},
+                "set": {"email": {"t": "str", "v": "countess@example.com"}}
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "where": {"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}},
+                "set": {"name": {"t": "str", "v": "Ada Lovelace"}}
+            }),
+        )
+        .await?;
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("events"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["op"].as_str(), Some("update"));
+    assert_eq!(events[0]["before"]["name"]["v"].as_str(), Some("Ada"));
+    assert_eq!(
+        events[0]["after"]["name"]["v"].as_str(),
+        Some("Ada Lovelace")
+    );
+    assert!(events[0]["before"].get("email").is_none());
+    assert!(events[0]["after"].get("email").is_none());
 
     Ok(())
 }
@@ -4961,6 +5578,681 @@ async fn r16_index_advisor_evaluate_reports_shift_convergence() -> anyhow::Resul
 }
 
 #[tokio::test]
+async fn r16_index_advisor_evaluate_reports_single_range_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_range_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_range_test (id INT PRIMARY KEY, city VARCHAR(50), email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..512_u64)
+        .map(|idx| {
+            format!(
+                "({}, 'city_{:02}', 'user{:04}@example.com')",
+                idx + 1,
+                idx % 8,
+                idx
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_range_test (id, city, email) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_range_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "city_email_range",
+                        "samples": [
+                            {
+                                "equality_columns": ["city"],
+                                "range_columns": ["email"],
+                                "projection_columns": ["id"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["city", "email"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+            .as_u64()
+            .unwrap_or(0)
+            > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_order_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_order_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_order_test (id INT PRIMARY KEY, created_at BIGINT, email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..512_u64)
+        .map(|idx| format!("({}, {}, 'user{:04}@example.com')", idx + 1, 512 - idx, idx))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_order_test (id, created_at, email) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_order_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "created_at_order",
+                        "samples": [
+                            {
+                                "order_by_columns": ["created_at"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["created_at"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+        Some(512)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["after_rows_scanned"].as_u64(),
+        Some(512)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_range_order_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_range_order_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_range_order_test (id INT PRIMARY KEY, created_at BIGINT, email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..1024_u64)
+        .map(|idx| {
+            format!(
+                "({}, {}, 'user{:04}@example.com')",
+                idx + 1,
+                1024 - idx,
+                idx
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_range_order_test (id, created_at, email) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_range_order_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "created_at_range_order",
+                        "samples": [
+                            {
+                                "range_columns": ["created_at"],
+                                "order_by_columns": ["created_at"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 1024,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["created_at"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+        Some(1024)
+    );
+    assert!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+            .as_u64()
+            .unwrap_or(0)
+            > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_multi_range_order_latency_benchmark(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_multi_range_order_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_multi_range_order_test (id INT PRIMARY KEY, created_at BIGINT, sequence BIGINT, email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let mut tuples = vec!["(1, 8, 12, 'user0001@example.com')".to_string()];
+    let mut next_id = 2_u64;
+    for created_at in 0..16_u64 {
+        for sequence in 0..16_u64 {
+            if created_at == 8 && sequence == 12 {
+                continue;
+            }
+            tuples.push(format!(
+                "({}, {}, {}, 'user{:04}@example.com')",
+                next_id, created_at, sequence, next_id
+            ));
+            next_id = next_id.saturating_add(1);
+        }
+    }
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_multi_range_order_test (id, created_at, sequence, email) VALUES {}",
+                tuples.join(", ")
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_multi_range_order_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "created_at_sequence_multi_range_order",
+                        "samples": [
+                            {
+                                "range_columns": ["created_at", "sequence"],
+                                "order_by_columns": ["created_at", "sequence"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 256,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["created_at", "sequence"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+        Some(256)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["after_rows_scanned"].as_u64(),
+        Some(32)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_group_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_group_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_group_test (id INT PRIMARY KEY, tenant_id BIGINT, city VARCHAR(50), score BIGINT)"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..512_u64)
+        .map(|idx| {
+            format!(
+                "({}, {}, 'city_{:02}', {})",
+                idx + 1,
+                idx % 8,
+                idx % 32,
+                idx % 100
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_group_test (id, tenant_id, city, score) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_group_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "tenant_city_group",
+                        "samples": [
+                            {
+                                "equality_columns": ["tenant_id"],
+                                "group_by_columns": ["city"],
+                                "projection_columns": ["score"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["tenant_id", "city"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+            .as_u64()
+            .unwrap_or(0)
+            > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_multi_group_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_multi_group_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_multi_group_test (id INT PRIMARY KEY, tenant_id BIGINT, region VARCHAR(50), city VARCHAR(50), score BIGINT)"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..256_u64)
+        .map(|idx| {
+            format!(
+                "({}, {}, 'region_{:02}', 'city_{:02}', {})",
+                idx + 1,
+                idx % 4,
+                idx % 8,
+                idx % 16,
+                idx % 100
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_multi_group_test (id, tenant_id, region, city, score) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_multi_group_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "tenant_region_city_group",
+                        "samples": [
+                            {
+                                "equality_columns": ["tenant_id"],
+                                "group_by_columns": ["region", "city"],
+                                "projection_columns": ["score"],
+                                "rows_scanned": 256,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["tenant_id", "region", "city"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"]
+            .as_u64()
+            .unwrap_or(0)
+            > result["phases"][0]["latency_benchmark"]["after_rows_scanned"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_range_group_order_latency_benchmark(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_range_group_order_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_range_group_order_test (id INT PRIMARY KEY, tenant_id BIGINT, created_at BIGINT, region VARCHAR(50), city VARCHAR(50), score BIGINT)"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let mut tuples = vec!["(1, 2, 4, 'region_00', 'city_00', 1)".to_string()];
+    let mut next_id = 2_u64;
+    for tenant_id in 0..4_u64 {
+        for created_at in 0..8_u64 {
+            for region in 0..4_u64 {
+                for city in 0..4_u64 {
+                    if tenant_id == 2 && created_at == 4 && region == 0 && city == 0 {
+                        continue;
+                    }
+                    tuples.push(format!(
+                        "({}, {}, {}, 'region_{:02}', 'city_{:02}', {})",
+                        next_id,
+                        tenant_id,
+                        created_at,
+                        region,
+                        city,
+                        next_id % 100
+                    ));
+                    next_id = next_id.saturating_add(1);
+                }
+            }
+        }
+    }
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_range_group_order_test (id, tenant_id, created_at, region, city, score) VALUES {}",
+                tuples.join(", ")
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_range_group_order_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "tenant_created_at_group_order",
+                        "samples": [
+                            {
+                                "equality_columns": ["tenant_id"],
+                                "range_columns": ["created_at"],
+                                "order_by_columns": ["city"],
+                                "group_by_columns": ["region", "city"],
+                                "projection_columns": ["score"],
+                                "rows_scanned": 512,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["tenant_id", "created_at", "region", "city"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["before_rows_scanned"].as_u64(),
+        Some(512)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["after_rows_scanned"].as_u64(),
+        Some(64)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_evaluate_reports_join_key_latency_benchmark() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_join_key_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_join_key_test (id INT PRIMARY KEY, tenant_id BIGINT, email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let values = (0..256_u64)
+        .map(|idx| {
+            format!(
+                "({}, {}, 'user{:04}@example.com')",
+                idx + 1,
+                idx % 4,
+                idx + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": format!(
+                "INSERT INTO r16_eval_join_key_test (id, tenant_id, email) VALUES {values}"
+            )
+        }))
+        .await?;
+    assert!(insert.ok, "{insert:?}");
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_join_key_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "tenant_join_key",
+                        "samples": [
+                            {
+                                "join_key_columns": ["tenant_id"],
+                                "projection_columns": ["email"],
+                                "rows_scanned": 256,
+                                "repeats": 4
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(
+        result["phases"][0]["top_after"]["columns"],
+        json!(["tenant_id"])
+    );
+    assert!(result["phases"][0]["latency_benchmark"].is_object());
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["benchmarkable_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["phases"][0]["latency_benchmark"]["after_rows_scanned"].as_u64(),
+        Some(64)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
     // R02: Delta-Chained Values — verify format selection and snapshot management
     let _guard = cluster_test_guard().await;
@@ -6677,6 +7969,325 @@ async fn cdc_query_subscription_invalidates_prepared_query() -> anyhow::Result<(
 }
 
 #[tokio::test]
+async fn query_subscribe_over_view_reports_base_table_keys_and_emits_sse_on_base_table_changes(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("query_subscribe_view")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "view.create",
+        json!({
+            "view": {"db": "app", "table": "event_view"},
+            "query": select_query("app", "events", &["id", "data"])
+        }),
+    )
+    .await?;
+
+    let prepare = rpc
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": select_query("app", "event_view", &["id", "data"])
+            }),
+        )
+        .await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let subscribe = rpc
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    assert!(subscribe.ok);
+    let result = subscribe
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing query.subscribe result"))?;
+    let table_keys = result
+        .get("table_keys")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.events")));
+    assert!(!table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.event_view")));
+
+    let sse_url = result
+        .get("sse_url")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query.subscribe sse_url"))?;
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let event = read_sse_event(&mut stream).await?;
+    let payload: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(payload["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(payload["table"].as_str(), Some("app.events"));
+    assert_eq!(payload["changed"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_subscribe_over_union_reports_branch_table_keys_and_emits_sse_on_branch_changes(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("query_subscribe_union")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    for table in ["events", "archived_events"] {
+        rpc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": table,
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "data", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    }
+
+    let left = select_query("app", "events", &["id", "data"]);
+    let right = select_query("app", "archived_events", &["id", "data"]);
+    let union_query = Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Setop {
+            setop: SetOp {
+                kind: SetOpKind::Union,
+                all: true,
+                left: left.body,
+                right: right.body,
+            },
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    };
+
+    let prepare = rpc
+        .rpc("query.prepare", json!({"query": union_query}))
+        .await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let subscribe = rpc
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    assert!(subscribe.ok);
+    let result = subscribe
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing query.subscribe result"))?;
+    let table_keys = result
+        .get("table_keys")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.events")));
+    assert!(table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.archived_events")));
+
+    let sse_url = result
+        .get("sse_url")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query.subscribe sse_url"))?;
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "archived_events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let event = read_sse_event(&mut stream).await?;
+    let payload: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(payload["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(payload["table"].as_str(), Some("app.archived_events"));
+    assert_eq!(payload["changed"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_subscribe_over_cte_reports_base_table_keys_and_emits_sse_on_base_changes(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("query_subscribe_cte")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let cte_query = select_query("app", "events", &["id", "data"]);
+    let query = Query {
+        with: vec![Cte {
+            name: "event_rows".to_string(),
+            query: cte_query,
+        }],
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection: vec![
+                    SelectItem {
+                        expr: Expr::Col {
+                            col: "id".to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    },
+                    SelectItem {
+                        expr: Expr::Col {
+                            col: "data".to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    },
+                ],
+                from: Some(vec![TableRef::Base(BaseTableRef {
+                    db: "app".to_string(),
+                    table: "event_rows".to_string(),
+                    r#as: None,
+                })]),
+                r#where: None,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    };
+
+    let prepare = rpc.rpc("query.prepare", json!({"query": query})).await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let subscribe = rpc
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    assert!(subscribe.ok);
+    let result = subscribe
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing query.subscribe result"))?;
+    let table_keys = result
+        .get("table_keys")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.events")));
+    assert!(!table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.event_rows")));
+
+    let sse_url = result
+        .get("sse_url")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query.subscribe sse_url"))?;
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let event = read_sse_event(&mut stream).await?;
+    let payload: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(payload["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(payload["table"].as_str(), Some("app.events"));
+    assert_eq!(payload["changed"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cdc_poll_requires_resnapshot_after_retention_horizon() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_env(
@@ -6950,6 +8561,209 @@ async fn cdc_table_sse_stream_emits_resnapshot_event_after_horizon_loss() -> any
 }
 
 #[tokio::test]
+async fn cdc_table_sse_stream_emits_backpressure_event_when_paused() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_sse_backpressure")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let subscribe = rpc
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc sub_id"))?
+        .to_string();
+    let sse_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sse_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc sse_url"))?
+        .to_string();
+
+    let paused = rpc.rpc("cdc.pause", json!({"sub_id": sub_id})).await?;
+    assert!(paused.ok);
+
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+    let event = read_sse_event(&mut stream).await?;
+    assert_eq!(event.event.as_deref(), Some("backpressure"));
+    let payload: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(payload["state"].as_str(), Some("paused"));
+    assert_eq!(payload["paused"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_ws_stream_emits_events() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_ws")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let subscribe = rpc
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let ws_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("ws_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc ws_url"))?
+        .to_string();
+    let ws_full_url = format!(
+        "{}{}",
+        server.base_url().replacen("http://", "ws://", 1),
+        ws_url
+    );
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(&ws_full_url).await?;
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .context("timed out waiting for CDC websocket event")?
+        .ok_or_else(|| anyhow!("CDC websocket closed before delivering event"))??;
+    let text = match frame {
+        tokio_tungstenite::tungstenite::Message::Text(text) => text,
+        other => anyhow::bail!("expected websocket text frame, got {other:?}"),
+    };
+    let payload: serde_json::Value = serde_json::from_str(&text)?;
+    assert_eq!(payload["event"].as_str(), Some("insert"));
+    assert_eq!(payload["data"]["db"].as_str(), Some("app"));
+    assert_eq!(payload["data"]["table"].as_str(), Some("events"));
+    assert_eq!(payload["data"]["pk"][0]["v"].as_u64(), Some(1));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_ws_stream_emits_backpressure_event_when_paused() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_ws_backpressure")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let subscribe = rpc
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc sub_id"))?
+        .to_string();
+    let ws_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("ws_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc ws_url"))?
+        .to_string();
+
+    let paused = rpc.rpc("cdc.pause", json!({"sub_id": sub_id})).await?;
+    assert!(paused.ok);
+
+    let ws_full_url = format!(
+        "{}{}",
+        server.base_url().replacen("http://", "ws://", 1),
+        ws_url
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(&ws_full_url).await?;
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .context("timed out waiting for CDC websocket backpressure event")?
+        .ok_or_else(|| anyhow!("CDC websocket closed before delivering backpressure event"))??;
+    let text = match frame {
+        tokio_tungstenite::tungstenite::Message::Text(text) => text,
+        other => anyhow::bail!("expected websocket text frame, got {other:?}"),
+    };
+    let payload: serde_json::Value = serde_json::from_str(&text)?;
+    assert_eq!(payload["event"].as_str(), Some("backpressure"));
+    assert_eq!(payload["data"]["state"].as_str(), Some("paused"));
+    assert_eq!(payload["data"]["paused"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cdc_query_sse_stream_emits_invalidation_events() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("cdc_query_sse")?;
@@ -7203,11 +9017,19 @@ impl HttpHarness {
         let dir = temp_dir(label);
         let http_port = free_tcp_port();
         let cluster_port = free_tcp_port();
-        let child =
-            spawn_server_with_pg_env(&dir, http_port, cluster_port, mysql_port, pg_port, envs)?;
-        let _guard = ChildGuard::new(child);
+        let log_path = dir.join("server.log");
+        let child = spawn_server_with_pg_env(
+            &dir,
+            &log_path,
+            http_port,
+            cluster_port,
+            mysql_port,
+            pg_port,
+            envs,
+        )?;
+        let mut _guard = ChildGuard::new(child, log_path);
 
-        wait_for_health(http_port)?;
+        wait_for_health(http_port, &mut _guard)?;
 
         Ok(Self {
             _guard,
@@ -7324,13 +9146,18 @@ async fn wait_for_advisor_history_entry(
     ))
 }
 
-fn wait_for_health(port: u16) -> anyhow::Result<()> {
+fn wait_for_health(port: u16, guard: &mut ChildGuard) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/health", port);
-    // CI and heavily loaded dev machines can take longer to bring up the embedded
-    // HTTP server process; keep this generous to avoid flaky startup failures.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // CI, Rosetta, and CloudDocs-backed workspaces can all delay HTTP readiness.
+    // Keep the default generous and let targeted runs override it when needed.
+    let timeout = health_wait_timeout();
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let out = std::process::Command::new("curl")
+            .arg("--connect-timeout")
+            .arg("1")
+            .arg("--max-time")
+            .arg("1")
             .arg("-sSf")
             .arg(&url)
             .stdout(Stdio::null())
@@ -7339,9 +9166,54 @@ fn wait_for_health(port: u16) -> anyhow::Result<()> {
         if out.map(|s| s.success()).unwrap_or(false) {
             return Ok(());
         }
+        if let Some(status) = guard
+            .child
+            .try_wait()
+            .context("poll spawned skeindb server")?
+        {
+            let log_excerpt = guard.log_excerpt();
+            if log_excerpt.is_empty() {
+                return Err(anyhow!(
+                    "server exited before becoming healthy on {} with status {}",
+                    url,
+                    status
+                ));
+            }
+            return Err(anyhow!(
+                "server exited before becoming healthy on {} with status {}\n{}",
+                url,
+                status,
+                log_excerpt
+            ));
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(anyhow!("server did not become healthy on {}", url))
+
+    let process_state = match guard
+        .child
+        .try_wait()
+        .context("poll spawned skeindb server after health timeout")?
+    {
+        Some(status) => format!("server exited with status {}", status),
+        None => format!("server pid {} is still running", guard.child.id()),
+    };
+    let log_excerpt = guard.log_excerpt();
+    if log_excerpt.is_empty() {
+        Err(anyhow!(
+            "server did not become healthy on {} within {:?}; {}",
+            url,
+            timeout,
+            process_state
+        ))
+    } else {
+        Err(anyhow!(
+            "server did not become healthy on {} within {:?}; {}\n{}",
+            url,
+            timeout,
+            process_state,
+            log_excerpt
+        ))
+    }
 }
 
 fn wait_for_tcp(port: u16) -> anyhow::Result<()> {
@@ -8157,7 +10029,8 @@ fn spawn_server(
     cluster_port: u16,
     mysql_port: u16,
 ) -> anyhow::Result<Child> {
-    spawn_server_with_pg_env(dir, http_port, cluster_port, mysql_port, 0, &[])
+    let log_path = dir.join("server.log");
+    spawn_server_with_pg_env(dir, &log_path, http_port, cluster_port, mysql_port, 0, &[])
 }
 
 #[allow(dead_code)]
@@ -8168,19 +10041,33 @@ fn spawn_server_with_pg(
     mysql_port: u16,
     pg_port: u16,
 ) -> anyhow::Result<Child> {
-    spawn_server_with_pg_env(dir, http_port, cluster_port, mysql_port, pg_port, &[])
+    let log_path = dir.join("server.log");
+    spawn_server_with_pg_env(
+        dir,
+        &log_path,
+        http_port,
+        cluster_port,
+        mysql_port,
+        pg_port,
+        &[],
+    )
 }
 
 fn spawn_server_with_pg_env(
     dir: &PathBuf,
+    log_path: &PathBuf,
     http_port: u16,
     cluster_port: u16,
     mysql_port: u16,
     pg_port: u16,
     envs: &[(&str, &str)],
 ) -> anyhow::Result<Child> {
-    let bin = env!("CARGO_BIN_EXE_skeindb");
-    let mut command = Command::new(bin);
+    let bin = local_server_bin()?;
+    let stdout = File::create(log_path).context("create server log file")?;
+    let stderr = stdout
+        .try_clone()
+        .context("clone server log handle for stderr")?;
+    let mut command = Command::new(&bin);
     command
         .arg("serve")
         .arg("--data")
@@ -8195,12 +10082,51 @@ fn spawn_server_with_pg_env(
         .arg(pg_port.to_string())
         .arg("--cluster-port")
         .arg(cluster_port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
     for (key, value) in envs.iter().copied() {
         command.env(key, value);
     }
     command.spawn().context("spawn skeindb server")
+}
+
+fn local_server_bin() -> anyhow::Result<PathBuf> {
+    if let Some(path) = CLUSTER_TEST_SERVER_BIN.get() {
+        return Ok(path.clone());
+    }
+
+    let src = PathBuf::from(env!("CARGO_BIN_EXE_skeindb"));
+    let dst = std::env::temp_dir().join(format!(
+        "skeindb_cluster_test_bin_{}",
+        std::process::id()
+    ));
+
+    copy_server_bin(&src, &dst)?;
+    let _ = CLUSTER_TEST_SERVER_BIN.set(dst.clone());
+    Ok(dst)
+}
+
+fn copy_server_bin(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    fs::copy(src, dst).with_context(|| {
+        format!(
+            "copy skeindb test binary from {} to {}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(dst)
+            .with_context(|| format!("stat copied skeindb binary {}", dst.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(dst, perms).with_context(|| {
+            format!("set executable permissions on {}", dst.display())
+        })?;
+    }
+
+    Ok(())
 }
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -8221,11 +10147,30 @@ fn temp_dir(label: &str) -> PathBuf {
 
 struct ChildGuard {
     child: Child,
+    log_path: PathBuf,
 }
 
 impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
+    fn new(child: Child, log_path: PathBuf) -> Self {
+        Self { child, log_path }
+    }
+
+    fn log_excerpt(&self) -> String {
+        let Ok(contents) = std::fs::read_to_string(&self.log_path) else {
+            return String::new();
+        };
+        let mut lines: Vec<&str> = contents.lines().collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        if lines.len() > 40 {
+            lines = lines.split_off(lines.len() - 40);
+        }
+        format!(
+            "last server log lines from {}:\n{}",
+            self.log_path.display(),
+            lines.join("\n")
+        )
     }
 }
 
@@ -8332,6 +10277,13 @@ async fn pg_simple_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<Ve
         }
     }
     Ok(messages)
+}
+
+fn pg_query_payload(sql: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(sql.as_bytes());
+    payload.push(0);
+    payload
 }
 
 async fn pg_send_frontend_message(
@@ -8578,6 +10530,17 @@ fn pg_first_text_cell(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&row[6..6 + data_len]).into_owned())
 }
 
+fn pg_all_text_cells(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<String>> {
+    let mut values = Vec::new();
+    for (_, row) in messages.iter().filter(|(tag, _)| *tag == b'D') {
+        let col_count = i16::from_be_bytes([row[0], row[1]]);
+        anyhow::ensure!(col_count == 1, "expected single-column DataRow");
+        let data_len = i32::from_be_bytes([row[2], row[3], row[4], row[5]]) as usize;
+        values.push(String::from_utf8_lossy(&row[6..6 + data_len]).into_owned());
+    }
+    Ok(values)
+}
+
 fn pg_first_data_row_cells(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<Option<String>>> {
     let row = messages
         .iter()
@@ -8607,6 +10570,38 @@ fn pg_first_data_row_cells(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<Opt
     Ok(values)
 }
 
+fn pg_all_data_row_cells(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    messages
+        .iter()
+        .filter(|(tag, _)| *tag == b'D')
+        .map(|(_, row)| {
+            let col_count = i16::from_be_bytes([row[0], row[1]]) as usize;
+            let mut offset = 2usize;
+            let mut values = Vec::with_capacity(col_count);
+            for _ in 0..col_count {
+                let len = i32::from_be_bytes([
+                    row[offset],
+                    row[offset + 1],
+                    row[offset + 2],
+                    row[offset + 3],
+                ]);
+                offset += 4;
+                if len < 0 {
+                    values.push(None);
+                    continue;
+                }
+                let len = len as usize;
+                let end = offset + len;
+                values.push(Some(
+                    String::from_utf8_lossy(&row[offset..end]).into_owned(),
+                ));
+                offset = end;
+            }
+            Ok(values)
+        })
+        .collect()
+}
+
 fn pg_ready_status(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<u8> {
     messages
         .iter()
@@ -8627,6 +10622,105 @@ fn pg_command_complete_tag(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String>
         .position(|byte| *byte == 0)
         .unwrap_or(payload.len());
     Ok(String::from_utf8_lossy(&payload[..end]).into_owned())
+}
+
+fn pg_copy_data_lines(messages: &[(u8, Vec<u8>)]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|(tag, _)| *tag == b'd')
+        .map(|(_, payload)| String::from_utf8_lossy(payload).into_owned())
+        .collect()
+}
+
+fn pg_copy_out_response_formats(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<(u8, Vec<i16>)> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'H')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing CopyOutResponse"))?;
+    anyhow::ensure!(payload.len() >= 3, "truncated CopyOutResponse payload");
+    let overall_format = payload[0];
+    let column_count = i16::from_be_bytes([payload[1], payload[2]]) as usize;
+    let mut offset = 3usize;
+    let mut column_formats = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let bytes = payload
+            .get(offset..offset + 2)
+            .ok_or_else(|| anyhow!("truncated CopyOutResponse format code"))?;
+        column_formats.push(i16::from_be_bytes([bytes[0], bytes[1]]));
+        offset += 2;
+    }
+    Ok((overall_format, column_formats))
+}
+
+fn pg_copy_data_bytes(messages: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    messages
+        .iter()
+        .filter(|(tag, _)| *tag == b'd')
+        .flat_map(|(_, payload)| payload.iter().copied())
+        .collect()
+}
+
+fn pg_parse_binary_copy_rows(
+    messages: &[(u8, Vec<u8>)],
+) -> anyhow::Result<Vec<Vec<Option<Vec<u8>>>>> {
+    let data = pg_copy_data_bytes(messages);
+    anyhow::ensure!(data.len() >= 19, "truncated binary COPY stream");
+    anyhow::ensure!(
+        &data[..11] == b"PGCOPY\n\xFF\r\n\0",
+        "binary COPY stream missing signature"
+    );
+
+    let flags = u32::from_be_bytes([data[11], data[12], data[13], data[14]]);
+    let header_ext_len = u32::from_be_bytes([data[15], data[16], data[17], data[18]]) as usize;
+    anyhow::ensure!(flags == 0, "unexpected binary COPY flags {flags}");
+    anyhow::ensure!(
+        data.len() >= 19 + header_ext_len,
+        "truncated binary COPY header extension"
+    );
+
+    let mut offset = 19 + header_ext_len;
+    let mut rows = Vec::new();
+    loop {
+        let field_count_bytes = data
+            .get(offset..offset + 2)
+            .ok_or_else(|| anyhow!("truncated binary COPY field count"))?;
+        let field_count = i16::from_be_bytes([field_count_bytes[0], field_count_bytes[1]]);
+        offset += 2;
+        if field_count == -1 {
+            break;
+        }
+        anyhow::ensure!(
+            field_count >= 0,
+            "invalid binary COPY field count {field_count}"
+        );
+
+        let mut row = Vec::with_capacity(field_count as usize);
+        for _ in 0..field_count as usize {
+            let len_bytes = data
+                .get(offset..offset + 4)
+                .ok_or_else(|| anyhow!("truncated binary COPY field length"))?;
+            let len = i32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+            offset += 4;
+            if len < 0 {
+                row.push(None);
+                continue;
+            }
+            let len = len as usize;
+            let field = data
+                .get(offset..offset + len)
+                .ok_or_else(|| anyhow!("truncated binary COPY field payload"))?;
+            row.push(Some(field.to_vec()));
+            offset += len;
+        }
+        rows.push(row);
+    }
+
+    anyhow::ensure!(
+        offset == data.len(),
+        "unexpected trailing bytes in binary COPY stream"
+    );
+    Ok(rows)
 }
 
 fn pg_error_field(payload: &[u8], wanted: u8) -> Option<String> {
@@ -8701,6 +10795,49 @@ async fn pg_simple_query_select_literal() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn pg_simple_query_split_part_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_split_part")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT split_part('abc,def,ghi,jkl', ',', -2) AS piece",
+    )
+    .await?;
+
+    assert_eq!(pg_row_description_names(&msgs)?, vec!["piece".to_string()]);
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25]);
+    assert_eq!(pg_first_text_cell(&msgs)?, "ghi");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_starts_with_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_starts_with")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT starts_with('alphabet', 'alph') AS matches_prefix",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec!["matches_prefix".to_string()]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![16]);
+    assert_eq!(pg_first_text_cell(&msgs)?, "t");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_simple_query_row_description_uses_inferred_oids() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_row_description_oids")?;
@@ -8727,6 +10864,664 @@ async fn pg_simple_query_row_description_uses_inferred_oids() -> anyhow::Result<
     );
     assert_eq!(pg_row_description_type_oids(&msgs)?, vec![20, 701, 25]);
     assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_users",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_users"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada"},
+                    "active": {"t": "bool", "v": true}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active FROM app.pg_copy_users ORDER BY id) TO STDOUT",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["1\tAda\tt\n", "2\t\\N\tf\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_in_users (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_in_users FROM STDIN"),
+            ),
+            (b'd', b"1\tAda\tt\n2\t\\N\tf\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_copy_in_users ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada".to_string()),
+                Some("t".to_string())
+            ],
+            vec![Some("2".to_string()), None, Some("f".to_string())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_format")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_csv_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false},
+                {"name": "note", "type": {"kind": "str"}, "nullable": true}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada, Lovelace"},
+                    "active": {"t": "bool", "v": true},
+                    "note": {"t": "str", "v": "quote \"hi\""}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false},
+                    "note": {"t": "str", "v": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active, note FROM app.pg_copy_csv_out ORDER BY id) TO STDOUT WITH (FORMAT csv)",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec![
+            "1,\"Ada, Lovelace\",t,\"quote \"\"hi\"\"\"\n",
+            "2,,f,\"\"\n"
+        ]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_header_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_header")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_csv_header_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_header_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada, Lovelace"},
+                    "active": {"t": "bool", "v": true}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active FROM app.pg_copy_csv_header_out ORDER BY id) TO STDOUT WITH (FORMAT csv, HEADER)",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["id,name,active\n", "1,\"Ada, Lovelace\",t\n", "2,,f\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_delimiter_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_delimiter")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_csv_delim_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false},
+                {"name": "note", "type": {"kind": "str"}, "nullable": true}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_delim_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada, Lovelace"},
+                    "active": {"t": "bool", "v": true},
+                    "note": {"t": "str", "v": "quote \"hi\""}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false},
+                    "note": {"t": "str", "v": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active, note FROM app.pg_copy_csv_delim_out ORDER BY id) TO STDOUT WITH (FORMAT csv, DELIMITER ';')",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["1;Ada, Lovelace;t;\"quote \"\"hi\"\"\"\n", "2;;f;\"\"\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_csv_format")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_in (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_csv_in FROM STDIN WITH (FORMAT csv)"),
+            ),
+            (
+                b'd',
+                b"1,\"Ada, Lovelace\",t,\"quote \"\"hi\"\"\"\n2,,f,\"\"\n".to_vec(),
+            ),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_copy_csv_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("t".to_string()),
+                Some("quote \"hi\"".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_text_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_text_format")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_text_opts_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_text_opts_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada"}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY app.pg_copy_text_opts_out TO STDOUT WITH (FORMAT text)",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(pg_copy_data_lines(&msgs), vec!["1\tAda\n", "2\t\\N\n"]);
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_binary_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_binary_format")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_binary_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false},
+                {"name": "payload", "type": {"kind": "bytes"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_binary_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada"},
+                    "active": {"t": "bool", "v": true},
+                    "payload": {"t": "bytes", "b64": "AAECAw=="}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false},
+                    "payload": {"t": "bytes", "b64": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active, payload FROM app.pg_copy_binary_out ORDER BY id) TO STDOUT WITH (FORMAT binary)",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'd', b'd', b'c', b'C', b'Z']
+    );
+    let (overall_format, column_formats) = pg_copy_out_response_formats(&msgs)?;
+    assert_eq!(overall_format, 1);
+    assert_eq!(column_formats, vec![1, 1, 1, 1]);
+    let rows = pg_parse_binary_copy_rows(&msgs)?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], Some(1i64.to_be_bytes().to_vec()));
+    assert_eq!(rows[0][1], Some(b"Ada".to_vec()));
+    assert_eq!(rows[0][2], Some(vec![1]));
+    assert_eq!(rows[0][3], Some(vec![0, 1, 2, 3]));
+    assert_eq!(rows[1][0], Some(2i64.to_be_bytes().to_vec()));
+    assert_eq!(rows[1][1], None);
+    assert_eq!(rows[1][2], Some(vec![0]));
+    assert_eq!(rows[1][3], Some(Vec::new()));
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_text_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_text_format")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_text_opts_in (id BIGINT NOT NULL, name VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_text_opts_in FROM STDIN WITH (FORMAT text)"),
+            ),
+            (b'd', b"1\tAda\n2\t\\N\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name FROM app.pg_copy_text_opts_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![Some("1".to_string()), Some("Ada".to_string())],
+            vec![Some("2".to_string()), None],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_column_list_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_column_list")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_users_cols",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "active", "type": {"kind": "bool"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_users_cols"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada"},
+                    "active": {"t": "bool", "v": true}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY app.pg_copy_users_cols (name, active) TO STDOUT",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(pg_copy_data_lines(&msgs), vec!["Ada\tt\n", "\\N\tf\n"]);
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_column_list_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_column_list")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_in_users_cols (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_in_users_cols (id, active) FROM STDIN"),
+            ),
+            (b'd', b"1\tt\n2\tf\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_copy_in_users_cols ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![Some("1".to_string()), None, Some("t".to_string())],
+            vec![Some("2".to_string()), None, Some("f".to_string())],
+        ]
+    );
 
     Ok(())
 }
@@ -8863,13 +11658,25 @@ async fn pg_startup_bootstrap_queries() -> anyhow::Result<()> {
 
     let cases = [
         ("SELECT current_database()", "testdb"),
+        ("SELECT current_catalog", "testdb"),
+        ("SELECT current_user", "skein"),
+        ("SELECT current_role", "skein"),
+        ("SELECT current_schema", "public"),
         ("SELECT current_schema()", "public"),
+        ("SELECT session_user", "skein"),
+        ("SELECT user", "skein"),
+        ("SELECT current_schemas(false)", "{public}"),
+        ("SELECT current_schemas(true)", "{pg_catalog,public}"),
         ("SHOW server_version", "16.0 (SkeinDB compatibility)"),
         ("SHOW server_version_num", "160000"),
         ("SHOW standard_conforming_strings", "on"),
         ("SHOW max_identifier_length", "63"),
         ("SHOW transaction isolation level", "read committed"),
         ("SELECT current_setting('server_version_num')", "160000"),
+        (
+            "SELECT current_setting('server_version_num', true)",
+            "160000",
+        ),
         ("SELECT current_setting('client_encoding')", "UTF8"),
         ("SELECT current_setting('TimeZone')", "UTC"),
     ];
@@ -8879,6 +11686,10 @@ async fn pg_startup_bootstrap_queries() -> anyhow::Result<()> {
         let actual = pg_first_text_cell(&msgs)?;
         assert_eq!(actual, expected, "query: {sql}");
     }
+
+    let msgs =
+        pg_simple_query(&mut stream, "SELECT current_setting('missing_probe', true)").await?;
+    assert_eq!(pg_first_data_row_cells(&msgs)?, vec![None]);
 
     Ok(())
 }
@@ -8922,6 +11733,196 @@ async fn pg_simple_query_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result
     assert_eq!(
         pg_first_data_row_cells(&msgs)?,
         vec![Some("public".to_string())]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT proname, prokind, pronargs, prorettype FROM pg_catalog.pg_proc WHERE proname IN ('array_agg', 'array_length', 'array_lower', 'array_upper', 'char_length', 'clock_timestamp', 'current_schemas', 'current_setting', 'date_trunc', 'gen_random_uuid', 'left', 'length', 'lower', 'ltrim', 'pg_typeof', 'replace', 'right', 'rtrim', 'statement_timestamp', 'string_agg', 'string_to_array', 'substring', 'to_char', 'transaction_timestamp', 'trim', 'upper') ORDER BY proname, pronargs",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "proname".to_string(),
+            "prokind".to_string(),
+            "pronargs".to_string(),
+            "prorettype".to_string(),
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25, 25, 23, 26]);
+    assert_eq!(
+        pg_all_data_row_cells(&msgs)?,
+        vec![
+            vec![
+                Some("array_agg".to_string()),
+                Some("a".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("array_length".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("20".to_string()),
+            ],
+            vec![
+                Some("array_lower".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("20".to_string()),
+            ],
+            vec![
+                Some("array_upper".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("20".to_string()),
+            ],
+            vec![
+                Some("char_length".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("20".to_string()),
+            ],
+            vec![
+                Some("clock_timestamp".to_string()),
+                Some("f".to_string()),
+                Some("0".to_string()),
+                Some("1114".to_string()),
+            ],
+            vec![
+                Some("current_schemas".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("1009".to_string()),
+            ],
+            vec![
+                Some("current_setting".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("current_setting".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("date_trunc".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("1114".to_string()),
+            ],
+            vec![
+                Some("gen_random_uuid".to_string()),
+                Some("f".to_string()),
+                Some("0".to_string()),
+                Some("2950".to_string()),
+            ],
+            vec![
+                Some("left".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("length".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("20".to_string()),
+            ],
+            vec![
+                Some("lower".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("ltrim".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("pg_typeof".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("replace".to_string()),
+                Some("f".to_string()),
+                Some("3".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("right".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("rtrim".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("statement_timestamp".to_string()),
+                Some("f".to_string()),
+                Some("0".to_string()),
+                Some("1114".to_string()),
+            ],
+            vec![
+                Some("string_agg".to_string()),
+                Some("a".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("string_to_array".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("1009".to_string()),
+            ],
+            vec![
+                Some("substring".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("substring".to_string()),
+                Some("f".to_string()),
+                Some("3".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("to_char".to_string()),
+                Some("f".to_string()),
+                Some("2".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("transaction_timestamp".to_string()),
+                Some("f".to_string()),
+                Some("0".to_string()),
+                Some("1114".to_string()),
+            ],
+            vec![
+                Some("trim".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+            vec![
+                Some("upper".to_string()),
+                Some("f".to_string()),
+                Some("1".to_string()),
+                Some("25".to_string()),
+            ],
+        ]
     );
     assert_eq!(pg_ready_status(&msgs)?, b'I');
 
@@ -9155,6 +12156,768 @@ async fn pg_extended_query_parse_bind_describe_execute_roundtrip() -> anyhow::Re
     assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
     assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
     assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_execute_suspends_and_resumes_portal() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_portal_suspend")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_suspend_users (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_suspend_users (id, name) VALUES (1, 'Ada')",
+        "INSERT INTO app.pg_ext_suspend_users (id, name) VALUES (2, 'Grace')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let first_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "sel_suspend_users",
+                    "SELECT name FROM app.pg_ext_suspend_users ORDER BY id",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("suspend_portal", "sel_suspend_users", &[]),
+            ),
+            (b'E', pg_execute_payload("suspend_portal", 1)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let first_tags = pg_message_tags(&first_msgs);
+    assert!(
+        first_tags.contains(&b'1'),
+        "missing ParseComplete: {first_tags:?}"
+    );
+    assert!(
+        first_tags.contains(&b'2'),
+        "missing BindComplete: {first_tags:?}"
+    );
+    assert!(
+        first_tags.contains(&b'T'),
+        "missing RowDescription: {first_tags:?}"
+    );
+    assert!(
+        first_tags.contains(&b's'),
+        "missing PortalSuspended: {first_tags:?}"
+    );
+    assert!(
+        !first_tags.contains(&b'C'),
+        "unexpected CommandComplete: {first_tags:?}"
+    );
+    assert_eq!(pg_all_text_cells(&first_msgs)?, vec!["Ada"]);
+    assert_eq!(pg_ready_status(&first_msgs)?, b'I');
+
+    let second_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (b'E', pg_execute_payload("suspend_portal", 1)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let second_tags = pg_message_tags(&second_msgs);
+    assert!(
+        second_tags.contains(&b'T'),
+        "missing RowDescription: {second_tags:?}"
+    );
+    assert!(
+        !second_tags.contains(&b's'),
+        "unexpected PortalSuspended: {second_tags:?}"
+    );
+    assert_eq!(pg_all_text_cells(&second_msgs)?, vec!["Grace"]);
+    assert_eq!(pg_command_complete_tag(&second_msgs)?, "SELECT 2");
+    assert_eq!(pg_ready_status(&second_msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_in_users (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in",
+                    "COPY app.pg_ext_copy_in_users FROM STDIN",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_portal", "copy_users_in", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_portal", 0)),
+            (b'd', b"1\tAda\tt\n2\t\\N\tf\n".to_vec()),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_ext_copy_in_users ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada".to_string()),
+                Some("t".to_string())
+            ],
+            vec![Some("2".to_string()), None, Some("f".to_string())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_to_stdout_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_to_stdout")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_out_users (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_copy_out_users (id, name, active) VALUES (1, 'Ada', true)",
+        "INSERT INTO app.pg_ext_copy_out_users (id, name, active) VALUES (2, NULL, false)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_out",
+                    "COPY app.pg_ext_copy_out_users (name, active) TO STDOUT WITH (FORMAT text)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_out_portal", "copy_users_out", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_out_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'H'),
+        "missing CopyOutResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_copy_data_lines(&copy_msgs), vec!["Ada\tt\n", "\\N\tf\n"]);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_to_stdout_with_csv_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_to_stdout_csv")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_out_csv (id BIGINT NOT NULL, name VARCHAR(255), note VARCHAR(255), PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_copy_out_csv (id, name, note) VALUES (1, 'Ada, Lovelace', 'quote \"hi\"')",
+        "INSERT INTO app.pg_ext_copy_out_csv (id, name, note) VALUES (2, NULL, '')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_out_csv",
+                    "COPY app.pg_ext_copy_out_csv (name, note) TO STDOUT WITH (FORMAT csv)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_out_csv_portal", "copy_users_out_csv", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_out_csv_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'H'),
+        "missing CopyOutResponse: {copy_tags:?}"
+    );
+    assert_eq!(
+        pg_copy_data_lines(&copy_msgs),
+        vec!["\"Ada, Lovelace\",\"quote \"\"hi\"\"\"\n", ",\"\"\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_to_stdout_with_binary_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_to_stdout_binary")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_out_binary (id BIGINT NOT NULL, active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_copy_out_binary (id, active) VALUES (1, true)",
+        "INSERT INTO app.pg_ext_copy_out_binary (id, active) VALUES (2, false)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_out_binary",
+                    "COPY app.pg_ext_copy_out_binary (id, active) TO STDOUT WITH (FORMAT binary)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_out_binary_portal", "copy_users_out_binary", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_out_binary_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'H'),
+        "missing CopyOutResponse: {copy_tags:?}"
+    );
+    let (overall_format, column_formats) = pg_copy_out_response_formats(&copy_msgs)?;
+    assert_eq!(overall_format, 1);
+    assert_eq!(column_formats, vec![1, 1]);
+    let rows = pg_parse_binary_copy_rows(&copy_msgs)?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0],
+        vec![Some(1i64.to_be_bytes().to_vec()), Some(vec![1])]
+    );
+    assert_eq!(
+        rows[1],
+        vec![Some(2i64.to_be_bytes().to_vec()), Some(vec![0])]
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_binary_format_is_unsupported() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_binary_unsupported")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_binary_in (id BIGINT NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY app.pg_copy_binary_in FROM STDIN WITH (FORMAT binary)",
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&msgs), vec![b'E', b'Z']);
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "0A000");
+    assert!(
+        message.contains("FORMAT binary"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_csv")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_in_csv (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_csv",
+                    "COPY app.pg_ext_copy_in_csv FROM STDIN WITH (FORMAT csv)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_in_csv_portal", "copy_users_in_csv", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_in_csv_portal", 0)),
+            (
+                b'd',
+                b"1,\"Ada, Lovelace\",t,\"quote \"\"hi\"\"\"\n2,,f,\"\"\n".to_vec(),
+            ),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_ext_copy_in_csv ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("t".to_string()),
+                Some("quote \"hi\"".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_with_csv_header_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_csv_header")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_in_csv_header (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_csv_header",
+                    "COPY app.pg_ext_copy_in_csv_header FROM STDIN WITH (FORMAT csv, HEADER)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_in_csv_header_portal",
+                    "copy_users_in_csv_header",
+                    &[],
+                ),
+            ),
+            (
+                b'E',
+                pg_execute_payload("copy_users_in_csv_header_portal", 0),
+            ),
+            (
+                b'd',
+                b"id,name,active\n1,\"Ada, Lovelace\",t\n2,,f\n".to_vec(),
+            ),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_ext_copy_in_csv_header ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("t".to_string())
+            ],
+            vec![Some("2".to_string()), None, Some("f".to_string())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_with_csv_delimiter_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_csv_delimiter")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_in_csv_delimiter (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_csv_delimiter",
+                    "COPY app.pg_ext_copy_in_csv_delimiter FROM STDIN WITH (FORMAT csv, DELIMITER ';')",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_in_csv_delimiter_portal",
+                    "copy_users_in_csv_delimiter",
+                    &[],
+                ),
+            ),
+            (
+                b'E',
+                pg_execute_payload("copy_users_in_csv_delimiter_portal", 0),
+            ),
+            (
+                b'd',
+                b"1;Ada, Lovelace;t;\"quote \"\"hi\"\"\"\n2;;f;\"\"\n".to_vec(),
+            ),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_ext_copy_in_csv_delimiter ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("t".to_string()),
+                Some("quote \"hi\"".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_query_to_stdout_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_ext_copy_query_out")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_query_users (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_copy_query_users (id, name, active) VALUES (1, 'Ada', true)",
+        "INSERT INTO app.pg_ext_copy_query_users (id, name, active) VALUES (2, NULL, false)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_query_out",
+                    "COPY (SELECT name, active FROM app.pg_ext_copy_query_users ORDER BY id) TO STDOUT WITH (FORMAT text)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_query_out_portal", "copy_query_out", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_query_out_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'H'),
+        "missing CopyOutResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_copy_data_lines(&copy_msgs), vec!["Ada\tt\n", "\\N\tf\n"]);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_column_list_with_text_format_roundtrip(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_ext_copy_in_cols_fmt")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_in_cols (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_cols_fmt",
+                    "COPY app.pg_ext_copy_in_cols (id, active) FROM STDIN WITH (FORMAT text)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_in_cols_fmt_portal",
+                    "copy_users_in_cols_fmt",
+                    &[],
+                ),
+            ),
+            (b'E', pg_execute_payload("copy_users_in_cols_fmt_portal", 0)),
+            (b'd', b"1\tt\n2\tf\n".to_vec()),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_ext_copy_in_cols ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![Some("1".to_string()), None, Some("t".to_string())],
+            vec![Some("2".to_string()), None, Some("f".to_string())],
+        ]
+    );
 
     Ok(())
 }

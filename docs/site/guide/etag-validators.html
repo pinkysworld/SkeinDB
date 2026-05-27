@@ -127,14 +127,14 @@
     <article class="doc-article">
       <h1 id="cache-coherent-queries-with-http-validators-etags">Cache-coherent Queries with HTTP Validators (ETags)<a class="headerlink" href="#cache-coherent-queries-with-http-validators-etags" title="Permanent link">¶</a></h1>
 <p>Status: Partial implementation
-Last updated: 2026-03-27</p>
+Last updated: 2026-05-27</p>
 <p>Current runtime baseline:
 - <code>data.get</code> returns row ETags and <code>data.update</code> honors <code>expected_etag</code> / <code>If-Match</code>-style optimistic writes.
 - <code>query.select</code> and <code>query.execute_prepared</code> can return query ETags and honor <code>if_none_match</code>.
 - <code>vector.search</code> returns source-table dependency metadata, V2 causality tokens, and vector-search ETags by default; it honors <code>cache.if_none_match</code> with a <code>not_modified=true</code> result and invalidates when <code>data.insert</code>, <code>data.update</code>, <code>data.delete</code>, or <code>vector.insert</code> changes the source table version.
 - <code>query.prepare</code> plus <code>GET /api/v1/q/{query_id}</code> is live and returns HTTP ETag headers with <code>304 Not Modified</code> on matches.
 - <code>query.patch</code> reuses the same query-level ETag surface for delta refreshes.
-- <code>query.subscribe</code> exposes an SSE endpoint for prepared-query invalidation, and <code>cdc.subscribe_query</code> exposes the same dependency-driven invalidation model over both polling and <code>GET /api/v1/cdc/sse/{sub_id}</code> with query ETags.</p>
+- <code>query.subscribe</code> exposes an SSE endpoint for prepared-query invalidation, and <code>cdc.subscribe_query</code> exposes the same dependency-driven invalidation model over polling, <code>GET /api/v1/cdc/sse/{sub_id}</code>, and <code>GET /api/v1/cdc/ws/{sub_id}</code> with query ETags. Prepared-query dependencies expand views, set-operation branches, and CTE definitions to the real base tables used for invalidation.</p>
 <p>Goal:
 Make SkeinDB a web-native database by supporting cache-coherent reads using HTTP validators.</p>
 <p>If a client supplies If-None-Match: <etag> and the data has not changed, SkeinDB should return HTTP 304 Not Modified.</p>

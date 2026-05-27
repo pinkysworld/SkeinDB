@@ -47,6 +47,6 @@ This site is organised into six sections:
 
 ## Status
 
-The **[True Status Matrix](true-status-matrix.html)** is the single source of truth for what is hardened, what is prototype, and what is planned. 18 of the 20 research tracks are currently marked hardened with evidence and test links.
+The **[True Status Matrix](true-status-matrix.html)** is the short authority for current compatibility claims, partial core phases, and research maturity. Use it to see what is shipped, what remains partial, and what should not be overclaimed.
 
 Looking to edit something? Each page has an "Edit this page on GitHub" link at the bottom.

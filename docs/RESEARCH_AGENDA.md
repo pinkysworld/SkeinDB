@@ -31,28 +31,28 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
-## Implementation status snapshot (2026-05-17)
+## Implementation status snapshot (2026-05-27)
 
-All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
+All 20 agenda tracks now have executable coverage in SkeinDB. R01-R17 and R20 are hardened; R18 and R19 remain prototype implemented. The matrix below points to the primary implementation entry points.
 
 | ID | Status | Primary implementation surface |
 |---|---|---|
 | R01 | Hardened | Learned index hybrid read path, refresh policy, benchmark quantiles, distribution-shift tests (`docs/LEARNED_INDEXES.md`, `crates/skeindb-core/tests/valuestore.rs`) |
-| R02 | Implemented (prototype) | Hybrid row+column snapshot surfaces plus live-row-count build-vs-benefit pricing, bounded hot-projection tracking, dependency-driven refresh/invalidation, and online controller-driven replacement decisions (`docs/COLUMN_SNAPSHOTS.md`, engine snapshot paths) |
+| R02 | Hardened | Hybrid row+column snapshot surfaces plus live-row-count build-vs-benefit pricing, bounded hot-projection tracking, dependency-driven refresh/invalidation, and online controller-driven replacement decisions (`docs/COLUMN_SNAPSHOTS.md`, engine snapshot paths) |
 | R03 | Hardened | Delta-chained values, periodic snapshots, skip patches, compaction restructuring, topology reports, and delta benchmarks (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
-| R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
+| R04 | Hardened | Differential privacy RPC family (`dp.*`) plus budget, audit, and evaluation coverage |
 | R05 | Hardened | Oblivious policy/explain/evaluate (`oblivious.*`), padded scans, dummy lookups, trace leakage/overhead reports, and SkeinAdmin controls |
 | R06 | Hardened | Forensic WAL query/verify/export (`forensic.*`), SkeinForensic JSON filters, boundary/checkpoint/Merkle inclusion proofs, export bundles, incident-timeline test coverage, and SkeinAdmin Forensics wiring |
 | R07 | Hardened | Merge policies, values-only Wasm execution/cancellation, `merge.evaluate`, offline queue docs, and SkeinAdmin Merge & CRDT controls (`docs/MERGE_FUNCTIONS.md`, `merge.*`) |
 | R08 | Hardened | Incremental view APIs (`view.create/drop/refresh/evaluate/status/explain_deps`), dependency metadata, auto full-refresh fallback, oracle/benchmark tests, and admin/catalog wiring |
 | R09 | Hardened | SkeinQL-over-QUIC framing, Quinn listener, prepared-query streams, 0-RTT write rejection, rebind/multi-stream tests, and `skeindb transport-bench` comparative p99 benchmarking against HTTP/2 and MySQL/TCP |
-| R10 | Implemented (prototype) | Vector ingest/search/index status (`vector.*`) + ANN tests |
-| R11 | Implemented (prototype) | Autoparameterization classifier catalog, label schema, analysis, classification, feedback, and metrics (`ai.autoparam.*`) |
+| R10 | Hardened | Vector ingest/search/index status, ANN benchmark coverage, cache invalidation, and RAG sample flow (`vector.*`) |
+| R11 | Hardened | Autoparameterization classifier catalog, label schema, analysis, classification, feedback, and metrics (`ai.autoparam.*`) |
 | R12 | Hardened | Natural language translate/explain/execute flow with approval-gated verification and NL eval harness (`ai.nl.*`, `skeindb nl-eval`) |
-| R13 | Implemented (prototype) | ETag validators + min-causality controls (`query.select` + `If-None-Match`) |
-| R14 | Implemented (prototype) | Replay bundle/time-travel export surfaces plus bounded-staleness edge bundle routing windows (`docs/TIME_TRAVEL_REPLAY.md`) |
+| R13 | Hardened | ETag validators, min-causality controls, replication causality propagation, and cache interaction coverage |
+| R14 | Hardened | Replay bundle/time-travel export surfaces plus bounded-staleness edge bundle routing windows (`docs/TIME_TRAVEL_REPLAY.md`) |
 | R15 | Hardened | Conflict-aware schema evolution (`schema.propose_change`, `schema.merge_status`, `schema.simulate_rollout`, `schema.apply_merge`, MVCC row schema-version tags, concurrent add column/index merge planning, deterministic merge roll-forward/rollback resolution, divergence/resolution migration-assistant guidance, rolling-deploy simulation harness, and SkeinAdmin Schema Evolution controls) |
-| R16 | Hardened | Index advisor synthesis/apply/retire/evaluate/history (`advisor.*`) with dependency metadata, composite/covering generation, overhead-aware scoring, workload-shift convergence reporting, and stale-dependency retirement safety |
+| R16 | Hardened | Index advisor synthesis/apply/retire/evaluate/history (`advisor.*`) with dependency metadata, composite/covering generation, overhead-aware scoring, workload-shift convergence reporting, equality/single-range/order/group latency benchmarking, and stale-dependency retirement safety |
 | R17 | Hardened | Compatibility intent inference, rewrite preview, and JSON/Markdown report export (`migration.*`) |
 | R18 | Implemented (prototype) | Reproducible replay/report tooling with deterministic replay cache-hint reconstruction and normalized variance checks (`docs/TIME_TRAVEL_REPLAY.md`) |
 | R19 | Implemented (prototype) | Wasm-native plan compile/run + batch ABI with generated fixed-width filter/project artifacts, Wasmtime execution, standalone JavaScript edge packages for generated artifacts, SIMD eligibility/perf reporting, and host fallback for unsupported plans (`wasm.plan.*`) |

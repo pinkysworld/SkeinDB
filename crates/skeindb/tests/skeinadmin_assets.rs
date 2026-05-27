@@ -150,8 +150,11 @@ fn skeinadmin_cdc_panel_exposes_subscription_controls() {
         "CDC Subscriptions",
         "btnCdcSubscribe",
         "btnCdcPoll",
+        "btnCdcPause",
+        "btnCdcResume",
         "btnCdcAck",
         "btnCdcClose",
+        "backpressure state",
         "cdcLagSummary",
         "cdcEventGrid",
     ] {
@@ -164,11 +167,17 @@ fn skeinadmin_cdc_panel_exposes_subscription_controls() {
     for marker in [
         "async function cdcSubscribe()",
         "async function cdcPoll()",
+        "async function cdcPause()",
+        "async function cdcResume()",
         "async function cdcAck()",
         "async function cdcClose()",
+        "function cdcBackpressureState(sub)",
+        "function cdcRuntimeStats()",
         "function renderCdcPanel()",
         "wire('btnCdcSubscribe', cdcSubscribe);",
         "wire('btnCdcPoll', cdcPoll);",
+        "wire('btnCdcPause', cdcPause);",
+        "wire('btnCdcResume', cdcResume);",
         "wire('btnCdcAck', cdcAck);",
         "wire('btnCdcClose', cdcClose);",
     ] {
@@ -231,6 +240,42 @@ fn skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls() {
         assert!(
             js.contains(marker),
             "skeinadmin replay js should contain {marker}"
+        );
+    }
+}
+
+#[test]
+fn skeinadmin_overview_surfaces_operational_alerts() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "Operational Alerts",
+        "operationalAlertsSummary",
+        "operationalAlertsGrid",
+        "Run Stats to load the current operator alert view.",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin overview html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function statsAlertPanelLabel(panel)",
+        "function snapshotAlerts()",
+        "function renderOperationalAlerts()",
+        "operationalAlertsSummary",
+        "operationalAlertsGrid",
+        "renderOperationalAlerts();",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin overview js should contain {marker}"
         );
     }
 }
@@ -489,6 +534,8 @@ fn skeinadmin_dashboard_exposes_command_center_and_summary_bands() {
         "Operator Command Center",
         "Workspace Mission Control",
         "CDC Control Surface",
+        "Runtime Feeds",
+        "P95 Latency",
         "btnQuickCreateDb",
         "btnQuickCreateTable",
         "btnQuickInsertRow",
@@ -574,6 +621,8 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         "btnCompactionSavePolicy",
         "btnCompactionPause",
         "btnCompactionResume",
+        "statCompactionReclaimed",
+        "statCompactionTask",
         "Edge Bundles (R14)",
         "btnEdgeRequest",
         "btnEdgeApply",
@@ -600,6 +649,8 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         "maintenance.compaction.set_policy",
         "external_signals",
         "estimated_joules_per_s",
+        "bytes_reclaimed",
+        "last_completed",
         "maintenance.compaction.pause",
         "maintenance.compaction.resume",
         "async function edgeRequestBundle()",
@@ -622,6 +673,42 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         assert!(
             js.contains(marker),
             "skeinadmin research js should contain {marker}"
+        );
+    }
+}
+
+#[test]
+fn skeinadmin_telemetry_panel_exposes_latency_histograms() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "Latency Histograms by Fingerprint",
+        "telemetryLatencySummary",
+        "btnTelemetryLatencyHistograms",
+        "telemetryLatencyGrid",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin telemetry html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "stats.query_fingerprint_latency",
+        "function formatLatencyMsForUi(value)",
+        "function summarizeLatencyHistogram(histogram)",
+        "async function refreshTelemetryLatencyHistograms()",
+        "if (panel === 'telemetry') refreshTelemetryLatencyHistograms();",
+        "wire('btnTelemetryLatencyHistograms', refreshTelemetryLatencyHistograms);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin telemetry js should contain {marker}"
         );
     }
 }

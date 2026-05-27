@@ -1,7 +1,7 @@
 # Self-tuning Index Advisor (Telemetry-driven)
 
 Status: Partial implementation
-Last updated: 2026-05-17
+Last updated: 2026-05-24
 
 Current runtime baseline:
 - Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
@@ -12,9 +12,10 @@ Current runtime baseline:
 - Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
 - `advisor.retire_unused` can dry-run or retire advisor-built secondary indexes when the latest dependency signal is absent or older than a caller-provided idle threshold; recent dependency signals block retirement.
 - `advisor.evaluate` replays phased dependency samples against a scratch advisor state and reports top-suggestion convergence after workload shifts without mutating live advisor telemetry.
+- For benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order, `advisor.evaluate` also returns measured before/after latency stats and row-scan comparisons by comparing live full scans against a hypothetical advisor-built secondary index.
 - `advisor.apply_index` now queues background in-memory secondary-index builds, returns `queued` or `exists`, and `advisor.history` records lifecycle state (`queued`, `building`, `completed`, `failed`, `cancelled`) with progress percentages plus optional result/rollback metadata.
 - SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
-- Measured before/after latency deltas for advisor-applied indexes remain open work.
+- Non-grouped range+order layouts without a same-leading key still rely on observed-before / expected-after scan reports; measured latency now covers benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order.
 
 Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.
@@ -125,7 +126,7 @@ Workflow:
 6) Optional retirement scans can dry-run first, then drop only advisor-built indexes whose latest dependency signal is stale or absent
 
 Note:
-- The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
+- SkeinAdmin's per-suggestion "before/after" report remains workload-derived and expected-after; `advisor.evaluate` adds measured latency benchmarks only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order.
 - Progress reporting is lifecycle-level (`queued` -> `building` -> terminal state), not per-row physical build accounting.
 
 An optional "auto-apply" mode can exist for development environments.
@@ -259,6 +260,30 @@ Result summary:
       "label": "city_lookup",
       "observations": 3,
       "top_after": {"columns": ["city"]},
+      "latency_benchmark": {
+        "benchmarkable_samples": 1,
+        "benchmark_runs": 8,
+        "observed_rows_scanned": 400,
+        "before_rows_scanned": 1024,
+        "after_rows_scanned": 32,
+        "before": {
+          "min_ns": 18200,
+          "p50_ns": 19600,
+          "p95_ns": 22100,
+          "p99_ns": 22900,
+          "max_ns": 22900,
+          "mean_ns": 19875.0
+        },
+        "after": {
+          "min_ns": 2900,
+          "p50_ns": 3200,
+          "p95_ns": 4100,
+          "p99_ns": 4300,
+          "max_ns": 4300,
+          "mean_ns": 3362.5
+        },
+        "speedup": 5.91
+      },
       "top_changes": 1,
       "distinct_top_suggestions": 1
     },
@@ -275,7 +300,7 @@ Result summary:
 }
 ```
 
-Each sample can supply `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero `rows_scanned` or zero `repeats`.
+Each sample can supply `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero `rows_scanned` or zero `repeats`. `latency_benchmark` is optional and currently appears only for benchmarkable equality, join-key filters, multi-range filters, narrow order-by, grouped phases including mixed range/order/group layouts, and non-grouped same-leading range+order whose dependency columns cover the winning suggestion key; non-grouped range+order layouts without a same-leading key are still excluded.
 
 ---
 
@@ -303,7 +328,7 @@ Note: `advisor_estimated_saved_ms_total` is a placeholder in the prototype.
 - [x] IA03: Benefit estimation level 0
 - [x] IA04: SkeinQL endpoints + SkeinAdmin UI page
 - [x] IA05: Safe advisor-built index retirement with dry-run and stale-dependency checks
-- [ ] IA06: Measured before/after reporting for advisor-applied indexes
+- [x] IA06: Measured before/after reporting for benchmarkable advisor recommendations (equality + single-range + narrow order-by + narrow group-by today)
 
 ---
 
