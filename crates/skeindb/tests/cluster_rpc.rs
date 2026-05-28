@@ -55,8 +55,14 @@ fn parse_health_wait_timeout_uses_default_for_missing_invalid_and_zero_values() 
 
 #[test]
 fn parse_health_wait_timeout_accepts_positive_override_values() {
-    assert_eq!(parse_health_wait_timeout(Some("15")), Duration::from_secs(15));
-    assert_eq!(parse_health_wait_timeout(Some(" 240 ")), Duration::from_secs(240));
+    assert_eq!(
+        parse_health_wait_timeout(Some("15")),
+        Duration::from_secs(15)
+    );
+    assert_eq!(
+        parse_health_wait_timeout(Some(" 240 ")),
+        Duration::from_secs(240)
+    );
 }
 
 fn select_query(db: &str, table: &str, projection: &[&str]) -> Query {
@@ -10096,10 +10102,7 @@ fn local_server_bin() -> anyhow::Result<PathBuf> {
     }
 
     let src = PathBuf::from(env!("CARGO_BIN_EXE_skeindb"));
-    let dst = std::env::temp_dir().join(format!(
-        "skeindb_cluster_test_bin_{}",
-        std::process::id()
-    ));
+    let dst = std::env::temp_dir().join(format!("skeindb_cluster_test_bin_{}", std::process::id()));
 
     copy_server_bin(&src, &dst)?;
     let _ = CLUSTER_TEST_SERVER_BIN.set(dst.clone());
@@ -10121,9 +10124,8 @@ fn copy_server_bin(src: &Path, dst: &Path) -> anyhow::Result<()> {
             .with_context(|| format!("stat copied skeindb binary {}", dst.display()))?
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(dst, perms).with_context(|| {
-            format!("set executable permissions on {}", dst.display())
-        })?;
+        fs::set_permissions(dst, perms)
+            .with_context(|| format!("set executable permissions on {}", dst.display()))?;
     }
 
     Ok(())
@@ -11052,6 +11054,80 @@ async fn pg_simple_query_copy_to_stdout_with_csv_format_roundtrip() -> anyhow::R
 }
 
 #[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_keyword_format_alias_roundtrip(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_csv_keyword_alias")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_keyword_alias_out (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_copy_csv_keyword_alias_out (id, name, active) VALUES (1, 'Ada, Lovelace', true)",
+        "INSERT INTO app.pg_copy_csv_keyword_alias_out (id, name, active) VALUES (2, NULL, false)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active FROM app.pg_copy_csv_keyword_alias_out ORDER BY id) TO STDOUT WITH (CSV, HEADER)",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["id,name,active\n", "1,\"Ada, Lovelace\",t\n", "2,,f\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_legacy_with_csv_header_roundtrip() -> anyhow::Result<()>
+{
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_legacy_with_csv_header")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_legacy_with_out (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_copy_csv_legacy_with_out (id, name, active) VALUES (1, 'Ada, Lovelace', true)",
+        "INSERT INTO app.pg_copy_csv_legacy_with_out (id, name, active) VALUES (2, NULL, false)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active FROM app.pg_copy_csv_legacy_with_out ORDER BY id) TO STDOUT WITH CSV HEADER",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["id,name,active\n", "1,\"Ada, Lovelace\",t\n", "2,,f\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_simple_query_copy_to_stdout_with_csv_header_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_header")?;
@@ -11181,6 +11257,69 @@ async fn pg_simple_query_copy_to_stdout_with_csv_delimiter_roundtrip() -> anyhow
 }
 
 #[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_quote_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_quote")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_csv_quote_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "note", "type": {"kind": "str"}, "nullable": true}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_quote_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada, Lovelace"},
+                    "note": {"t": "str", "v": "pipe | quote"}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "note": {"t": "str", "v": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, note FROM app.pg_copy_csv_quote_out ORDER BY id) TO STDOUT WITH (FORMAT csv, QUOTE '|')",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["1,|Ada, Lovelace|,|pipe || quote|\n", "2,,||\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_simple_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_csv_format")?;
@@ -11227,6 +11366,231 @@ async fn pg_simple_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::
                 Some("Ada, Lovelace".to_string()),
                 Some("t".to_string()),
                 Some("quote \"hi\"".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_csv_quote_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_csv_quote")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_quote_in (id BIGINT NOT NULL, name VARCHAR(255), note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload(
+                    "COPY app.pg_copy_csv_quote_in FROM STDIN WITH (FORMAT csv, QUOTE '|')",
+                ),
+            ),
+            (b'd', b"1,|Ada, Lovelace|,|pipe || quote|\n2,,||\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, note FROM app.pg_copy_csv_quote_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("pipe | quote".to_string())
+            ],
+            vec![Some("2".to_string()), None, Some(String::new())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_csv_keyword_format_alias_roundtrip(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_csv_keyword_alias")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_keyword_alias_in (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_csv_keyword_alias_in FROM STDIN WITH (CSV)"),
+            ),
+            (
+                b'd',
+                b"1,\"Ada, Lovelace\",t,\"quote \"\"hi\"\"\"\n2,,f,\"\"\n".to_vec(),
+            ),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_copy_csv_keyword_alias_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("t".to_string()),
+                Some("quote \"hi\"".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_csv_with_custom_null_string_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_csv_custom_null")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    for table in ["pg_copy_csv_null_out", "pg_copy_csv_null_in"] {
+        rpc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": table,
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                    {"name": "active", "type": {"kind": "bool"}, "nullable": false},
+                    {"name": "note", "type": {"kind": "str"}, "nullable": true}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    }
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_null_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "NULL"},
+                    "active": {"t": "bool", "v": true},
+                    "note": {"t": "str", "v": "prefix NULL suffix"}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "active": {"t": "bool", "v": false},
+                    "note": {"t": "str", "v": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let copy_out_msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, active, note FROM app.pg_copy_csv_null_out ORDER BY id) TO STDOUT WITH (FORMAT csv, NULL 'NULL')",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&copy_out_msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    let copy_lines = pg_copy_data_lines(&copy_out_msgs);
+    assert_eq!(
+        copy_lines,
+        vec!["1,\"NULL\",t,\"prefix NULL suffix\"\n", "2,NULL,f,\"\"\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&copy_out_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_out_msgs)?, b'I');
+
+    let copy_in_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload(
+                    "COPY app.pg_copy_csv_null_in FROM STDIN WITH (FORMAT csv, NULL 'NULL')",
+                ),
+            ),
+            (b'd', copy_lines.concat().into_bytes()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_in_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_in_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_in_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_copy_csv_null_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("NULL".to_string()),
+                Some("t".to_string()),
+                Some("prefix NULL suffix".to_string())
             ],
             vec![
                 Some("2".to_string()),
@@ -11734,6 +12098,59 @@ async fn pg_simple_query_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result
         pg_first_data_row_cells(&msgs)?,
         vec![Some("public".to_string())]
     );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT oid, amname, amtype FROM pg_catalog.pg_am WHERE amname IN ('heap', 'btree') ORDER BY oid",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "oid".to_string(),
+            "amname".to_string(),
+            "amtype".to_string()
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![26, 25, 25]);
+    assert_eq!(
+        pg_all_data_row_cells(&msgs)?,
+        vec![
+            vec![
+                Some("2".to_string()),
+                Some("heap".to_string()),
+                Some("t".to_string())
+            ],
+            vec![
+                Some("403".to_string()),
+                Some("btree".to_string()),
+                Some("i".to_string())
+            ],
+        ]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT classoid, objoid, objsubid, description FROM pg_catalog.pg_description WHERE objsubid = 0",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "classoid".to_string(),
+            "objoid".to_string(),
+            "objsubid".to_string(),
+            "description".to_string(),
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![26, 26, 23, 25]);
+    assert_eq!(
+        pg_all_data_row_cells(&msgs)?,
+        Vec::<Vec<Option<String>>>::new()
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 0");
     assert_eq!(pg_ready_status(&msgs)?, b'I');
 
     let msgs = pg_simple_query(
@@ -12437,6 +12854,138 @@ async fn pg_extended_query_copy_to_stdout_with_csv_format_roundtrip() -> anyhow:
 }
 
 #[tokio::test]
+async fn pg_extended_query_copy_csv_with_custom_null_string_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_csv_custom_null")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_csv_null_out (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+        "CREATE TABLE app.pg_ext_copy_csv_null_in (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, note VARCHAR(255), PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_copy_csv_null_out (id, name, active, note) VALUES (1, 'NULL', true, 'prefix NULL suffix')",
+        "INSERT INTO app.pg_ext_copy_csv_null_out (id, name, active, note) VALUES (2, NULL, false, '')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_out_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_out_csv_null",
+                    "COPY (SELECT id, name, active, note FROM app.pg_ext_copy_csv_null_out ORDER BY id) TO STDOUT WITH (FORMAT csv, NULL 'NULL')",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_out_csv_null_portal",
+                    "copy_users_out_csv_null",
+                    &[],
+                ),
+            ),
+            (b'E', pg_execute_payload("copy_users_out_csv_null_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_out_tags = pg_message_tags(&copy_out_msgs);
+    assert!(
+        copy_out_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_out_tags:?}"
+    );
+    assert!(
+        copy_out_tags.contains(&b'2'),
+        "missing BindComplete: {copy_out_tags:?}"
+    );
+    assert!(
+        copy_out_tags.contains(&b'H'),
+        "missing CopyOutResponse: {copy_out_tags:?}"
+    );
+    let copy_lines = pg_copy_data_lines(&copy_out_msgs);
+    assert_eq!(
+        copy_lines,
+        vec!["1,\"NULL\",t,\"prefix NULL suffix\"\n", "2,NULL,f,\"\"\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&copy_out_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_out_msgs)?, b'I');
+
+    let copy_in_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_csv_null",
+                    "COPY app.pg_ext_copy_csv_null_in FROM STDIN WITH (FORMAT csv, NULL 'NULL')",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_in_csv_null_portal",
+                    "copy_users_in_csv_null",
+                    &[],
+                ),
+            ),
+            (b'E', pg_execute_payload("copy_users_in_csv_null_portal", 0)),
+            (b'd', copy_lines.concat().into_bytes()),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_in_tags = pg_message_tags(&copy_in_msgs);
+    assert!(
+        copy_in_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_in_tags:?}"
+    );
+    assert!(
+        copy_in_tags.contains(&b'2'),
+        "missing BindComplete: {copy_in_tags:?}"
+    );
+    assert!(
+        copy_in_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_in_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_in_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_in_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active, note FROM app.pg_ext_copy_csv_null_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("NULL".to_string()),
+                Some("t".to_string()),
+                Some("prefix NULL suffix".to_string())
+            ],
+            vec![
+                Some("2".to_string()),
+                None,
+                Some("f".to_string()),
+                Some(String::new())
+            ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_extended_query_copy_to_stdout_with_binary_format_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_extended_query_copy_to_stdout_binary")?;
@@ -12698,6 +13247,135 @@ async fn pg_extended_query_copy_from_stdin_with_csv_header_roundtrip() -> anyhow
             vec![Some("2".to_string()), None, Some("f".to_string())],
         ]
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_csv_header_match_rejects_mismatch(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_csv_header_match")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_header_match (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload(
+                    "COPY app.pg_copy_csv_header_match FROM STDIN WITH (FORMAT csv, HEADER MATCH)",
+                ),
+            ),
+            (b'd', b"id,full_name,active\n1,Ada,t\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'E', b'Z']);
+    let (code, message) = pg_error_response(&copy_msgs)?;
+    assert_eq!(code, "08P01");
+    assert!(
+        message.contains("header row does not match target columns"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_copy_csv_header_match ORDER BY id",
+    )
+    .await?;
+    assert!(pg_all_data_row_cells(&verify_msgs)?.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_copy_from_stdin_with_csv_header_match_rejects_mismatch(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_csv_header_match")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_csv_header_match (id BIGINT NOT NULL, name VARCHAR(255), active BOOLEAN NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_csv_header_match",
+                    "COPY app.pg_ext_copy_csv_header_match FROM STDIN WITH (FORMAT csv, HEADER MATCH)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload(
+                    "copy_users_in_csv_header_match_portal",
+                    "copy_users_in_csv_header_match",
+                    &[],
+                ),
+            ),
+            (
+                b'E',
+                pg_execute_payload("copy_users_in_csv_header_match_portal", 0),
+            ),
+            (b'd', b"id,full_name,active\n1,Ada,t\n".to_vec()),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'E'),
+        "missing ErrorResponse: {copy_tags:?}"
+    );
+    let (code, message) = pg_error_response(&copy_msgs)?;
+    assert_eq!(code, "08P01");
+    assert!(
+        message.contains("header row does not match target columns"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, active FROM app.pg_ext_copy_csv_header_match ORDER BY id",
+    )
+    .await?;
+    assert!(pg_all_data_row_cells(&verify_msgs)?.is_empty());
 
     Ok(())
 }

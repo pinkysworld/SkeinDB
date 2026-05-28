@@ -11932,6 +11932,7 @@ struct PgPortalResultSet {
 #[derive(Debug, Clone)]
 struct PgCopyInState {
     insert_target_sql: String,
+    column_names: Vec<String>,
     column_kinds: Vec<String>,
     options: PgCopyOptions,
     buffer: Vec<u8>,
@@ -11989,29 +11990,69 @@ enum PgCopyFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgCopyHeaderOption {
+    None,
+    Present,
+    Match,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PgCopyOptions {
     format: PgCopyFormat,
-    header: bool,
+    header: PgCopyHeaderOption,
     delimiter: Option<u8>,
+    quote: Option<u8>,
+    null_string: Option<String>,
 }
 
 impl Default for PgCopyOptions {
     fn default() -> Self {
         Self {
             format: PgCopyFormat::Text,
-            header: false,
+            header: PgCopyHeaderOption::None,
             delimiter: None,
+            quote: None,
+            null_string: None,
         }
     }
 }
 
 impl PgCopyOptions {
-    fn delimiter(self) -> u8 {
+    fn delimiter(&self) -> u8 {
         self.delimiter.unwrap_or(match self.format {
             PgCopyFormat::Text => b'\t',
             PgCopyFormat::Csv => b',',
             PgCopyFormat::Binary => unreachable!("binary COPY does not use a delimiter"),
         })
+    }
+
+    fn null_string(&self) -> &str {
+        self.null_string.as_deref().unwrap_or(match self.format {
+            PgCopyFormat::Text => "\\N",
+            PgCopyFormat::Csv => "",
+            PgCopyFormat::Binary => unreachable!("binary COPY does not use a null marker"),
+        })
+    }
+
+    fn quote(&self) -> u8 {
+        self.quote.unwrap_or(match self.format {
+            PgCopyFormat::Csv => b'"',
+            PgCopyFormat::Text | PgCopyFormat::Binary => {
+                unreachable!("only CSV COPY uses a quote character")
+            }
+        })
+    }
+
+    fn has_header(&self) -> bool {
+        !matches!(self.header, PgCopyHeaderOption::None)
+    }
+
+    fn emits_header_row(&self) -> bool {
+        matches!(self.header, PgCopyHeaderOption::Present)
+    }
+
+    fn requires_header_match(&self) -> bool {
+        matches!(self.header, PgCopyHeaderOption::Match)
     }
 }
 
@@ -12057,41 +12098,56 @@ fn pg_copy_text_encode_row(
     row: &[Option<String>],
     columns: &[pg_wire::PgColumn],
     delimiter: u8,
+    null_string: &str,
 ) -> Vec<u8> {
     let mut line = Vec::new();
+    let null_bytes = null_string.as_bytes();
     for (idx, value) in row.iter().enumerate() {
         if idx > 0 {
             line.push(delimiter);
         }
         match pg_text_value_for_column(value.as_deref(), columns.get(idx)) {
-            Some(bytes) => line.extend_from_slice(&pg_copy_escape_text_field(&bytes, delimiter)),
-            None => line.extend_from_slice(b"\\N"),
+            Some(bytes) => {
+                let escaped = pg_copy_escape_text_field(&bytes, delimiter);
+                if !null_bytes.is_empty() && escaped == null_bytes {
+                    line.push(b'\\');
+                }
+                line.extend_from_slice(&escaped);
+            }
+            None => line.extend_from_slice(null_bytes),
         }
     }
     line.push(b'\n');
     line
 }
 
-fn pg_copy_csv_encode_field(bytes: &[u8], delimiter: u8) -> Vec<u8> {
+fn pg_copy_csv_encode_field(bytes: &[u8], delimiter: u8, quote: u8, null_string: &str) -> Vec<u8> {
+    let null_bytes = null_string.as_bytes();
+    let conflicts_with_null_marker = !null_bytes.is_empty()
+        && bytes
+            .windows(null_bytes.len())
+            .any(|window| window == null_bytes);
     let needs_quotes = bytes.is_empty()
         || bytes.contains(&delimiter)
-        || bytes.contains(&b'"')
+        || bytes.contains(&quote)
         || bytes.contains(&b'\n')
-        || bytes.contains(&b'\r');
+        || bytes.contains(&b'\r')
+        || conflicts_with_null_marker;
     if !needs_quotes {
         return bytes.to_vec();
     }
 
     let mut escaped = Vec::with_capacity(bytes.len() + 2);
-    escaped.push(b'"');
+    escaped.push(quote);
     for byte in bytes {
-        if *byte == b'"' {
-            escaped.extend_from_slice(b"\"\"");
+        if *byte == quote {
+            escaped.push(quote);
+            escaped.push(quote);
         } else {
             escaped.push(*byte);
         }
     }
-    escaped.push(b'"');
+    escaped.push(quote);
     escaped
 }
 
@@ -12099,29 +12155,41 @@ fn pg_copy_csv_encode_row(
     row: &[Option<String>],
     columns: &[pg_wire::PgColumn],
     delimiter: u8,
+    quote: u8,
+    null_string: &str,
 ) -> Vec<u8> {
     let mut line = Vec::new();
+    let null_bytes = null_string.as_bytes();
     for (idx, value) in row.iter().enumerate() {
         if idx > 0 {
             line.push(delimiter);
         }
         if let Some(bytes) = pg_text_value_for_column(value.as_deref(), columns.get(idx)) {
-            line.extend_from_slice(&pg_copy_csv_encode_field(&bytes, delimiter));
+            line.extend_from_slice(&pg_copy_csv_encode_field(
+                &bytes,
+                delimiter,
+                quote,
+                null_string,
+            ));
+        } else {
+            line.extend_from_slice(null_bytes);
         }
     }
     line.push(b'\n');
     line
 }
 
-fn pg_copy_header_row(columns: &[pg_wire::PgColumn], options: PgCopyOptions) -> Vec<u8> {
+fn pg_copy_header_row(columns: &[pg_wire::PgColumn], options: &PgCopyOptions) -> Vec<u8> {
     let row: Vec<Option<String>> = columns
         .iter()
         .map(|column| Some(column.name.clone()))
         .collect();
     let delimiter = options.delimiter();
+    let quote = options.quote();
+    let null_string = options.null_string();
     match options.format {
-        PgCopyFormat::Text => pg_copy_text_encode_row(&row, columns, delimiter),
-        PgCopyFormat::Csv => pg_copy_csv_encode_row(&row, columns, delimiter),
+        PgCopyFormat::Text => pg_copy_text_encode_row(&row, columns, delimiter, null_string),
+        PgCopyFormat::Csv => pg_copy_csv_encode_row(&row, columns, delimiter, quote, null_string),
         PgCopyFormat::Binary => unreachable!("binary COPY does not emit a header row"),
     }
 }
@@ -12439,6 +12507,9 @@ fn pg_parse_copy_to_stdout(sql: &str) -> Option<PgCopyToStdoutSource> {
         }
         let trailing = after["to stdout".len()..].trim();
         let options = pg_parse_copy_trailing_options(trailing)?;
+        if matches!(options.header, PgCopyHeaderOption::Match) {
+            return None;
+        }
         return Some(PgCopyToStdoutSource::Query {
             query: body.trim().to_string(),
             options,
@@ -12453,6 +12524,9 @@ fn pg_parse_copy_to_stdout(sql: &str) -> Option<PgCopyToStdoutSource> {
         return None;
     }
     let options = pg_parse_copy_trailing_options(trailing)?;
+    if matches!(options.header, PgCopyHeaderOption::Match) {
+        return None;
+    }
     let target = pg_parse_copy_table_target(target)?;
     Some(PgCopyToStdoutSource::Table {
         table: target.table,
@@ -12494,35 +12568,37 @@ fn pg_parse_copy_trailing_options(trailing: &str) -> Option<PgCopyOptions> {
         return None;
     }
     let rest = trimmed[4..].trim_start();
-    if !(rest.starts_with('(') && rest.ends_with(')')) {
-        return None;
-    }
-
-    let options = &rest[1..rest.len() - 1];
-    let parts = split_csv_top_level(options);
+    let parts = if rest.starts_with('(') && rest.ends_with(')') {
+        let options = &rest[1..rest.len() - 1];
+        split_csv_top_level(options)
+    } else {
+        pg_parse_copy_legacy_option_parts(rest)?
+    };
 
     let mut parsed = PgCopyOptions::default();
     let mut saw_format = false;
     let mut saw_header = false;
     let mut saw_delimiter = false;
+    let mut saw_quote = false;
+    let mut saw_null = false;
     for option in parts {
         let option_lower = option.to_ascii_lowercase();
         match option_lower.as_str() {
-            "format text" | "format 'text'" | "format=text" => {
+            "text" | "format text" | "format 'text'" | "format=text" => {
                 if saw_format {
                     return None;
                 }
                 parsed.format = PgCopyFormat::Text;
                 saw_format = true;
             }
-            "format csv" | "format 'csv'" | "format=csv" => {
+            "csv" | "format csv" | "format 'csv'" | "format=csv" => {
                 if saw_format {
                     return None;
                 }
                 parsed.format = PgCopyFormat::Csv;
                 saw_format = true;
             }
-            "format binary" | "format 'binary'" | "format=binary" => {
+            "binary" | "format binary" | "format 'binary'" | "format=binary" => {
                 if saw_format {
                     return None;
                 }
@@ -12533,36 +12609,66 @@ fn pg_parse_copy_trailing_options(trailing: &str) -> Option<PgCopyOptions> {
                 if saw_header {
                     return None;
                 }
-                parsed.header = true;
+                parsed.header = PgCopyHeaderOption::Present;
                 saw_header = true;
             }
             "header false" | "header 'false'" | "header=false" => {
                 if saw_header {
                     return None;
                 }
-                parsed.header = false;
+                parsed.header = PgCopyHeaderOption::None;
+                saw_header = true;
+            }
+            "header match" | "header 'match'" | "header=match" => {
+                if saw_header {
+                    return None;
+                }
+                parsed.header = PgCopyHeaderOption::Match;
                 saw_header = true;
             }
             _ => {
-                let delimiter = pg_parse_copy_delimiter_option(&option)?;
-                if saw_delimiter {
-                    return None;
+                if let Some(delimiter) = pg_parse_copy_delimiter_option(&option) {
+                    if saw_delimiter {
+                        return None;
+                    }
+                    parsed.delimiter = Some(delimiter);
+                    saw_delimiter = true;
+                    continue;
                 }
-                parsed.delimiter = Some(delimiter);
-                saw_delimiter = true;
+                if let Some(quote) = pg_parse_copy_quote_option(&option) {
+                    if saw_quote {
+                        return None;
+                    }
+                    parsed.quote = Some(quote);
+                    saw_quote = true;
+                    continue;
+                }
+                if let Some(null_string) = pg_parse_copy_null_option(&option) {
+                    if saw_null {
+                        return None;
+                    }
+                    parsed.null_string = Some(null_string);
+                    saw_null = true;
+                    continue;
+                }
+                return None;
             }
         }
     }
 
-    if parsed.header && parsed.format != PgCopyFormat::Csv {
+    if parsed.has_header() && parsed.format != PgCopyFormat::Csv {
         return None;
     }
 
     if parsed.format == PgCopyFormat::Binary {
-        if parsed.delimiter.is_some() {
+        if parsed.delimiter.is_some() || parsed.quote.is_some() || parsed.null_string.is_some() {
             return None;
         }
         return Some(parsed);
+    }
+
+    if parsed.quote.is_some() && parsed.format != PgCopyFormat::Csv {
+        return None;
     }
 
     let delimiter = parsed.delimiter();
@@ -12572,11 +12678,110 @@ fn pg_parse_copy_trailing_options(trailing: &str) -> Option<PgCopyOptions> {
     if parsed.format == PgCopyFormat::Text && delimiter == b'\\' {
         return None;
     }
-    if parsed.format == PgCopyFormat::Csv && delimiter == b'"' {
+    let quote = if parsed.format == PgCopyFormat::Csv {
+        parsed.quote()
+    } else {
+        b'"'
+    };
+    if parsed.format == PgCopyFormat::Csv && delimiter == quote {
+        return None;
+    }
+
+    let null_bytes = parsed.null_string().as_bytes();
+    if null_bytes.contains(&b'\0') || null_bytes.contains(&b'\n') || null_bytes.contains(&b'\r') {
+        return None;
+    }
+    if null_bytes.contains(&delimiter) {
+        return None;
+    }
+    if parsed.format == PgCopyFormat::Csv && null_bytes.contains(&quote) {
         return None;
     }
 
     Some(parsed)
+}
+
+fn pg_parse_copy_legacy_option_parts(rest: &str) -> Option<Vec<String>> {
+    let tokens = pg_tokenize_copy_legacy_options(rest);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx].trim();
+        let token_lower = token.to_ascii_lowercase();
+        match token_lower.as_str() {
+            "csv" | "text" | "binary" => {
+                parts.push(token_lower);
+                idx += 1;
+            }
+            "header" => {
+                if let Some(next) = tokens.get(idx + 1) {
+                    let next_lower = next.trim().to_ascii_lowercase();
+                    if matches!(next_lower.as_str(), "true" | "false" | "match") {
+                        parts.push(format!("header {next_lower}"));
+                        idx += 2;
+                        continue;
+                    }
+                }
+                parts.push("header".to_string());
+                idx += 1;
+            }
+            "delimiter" | "quote" | "null" => {
+                let value = tokens.get(idx + 1)?.trim();
+                if value.is_empty() {
+                    return None;
+                }
+                parts.push(format!("{} {}", token_lower, value));
+                idx += 2;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(parts)
+}
+
+fn pg_tokenize_copy_legacy_options(rest: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = rest.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if let Some(active_quote) = quote {
+            current.push(ch);
+            if ch == active_quote {
+                if chars.peek() == Some(&active_quote) {
+                    current.push(chars.next().expect("peeked quote should exist"));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            c if c.is_ascii_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
 }
 
 fn pg_parse_copy_option_string(value: &str) -> Option<String> {
@@ -12611,6 +12816,49 @@ fn pg_parse_copy_delimiter_option(option: &str) -> Option<u8> {
         return None;
     }
     Some(bytes[0])
+}
+
+fn pg_parse_copy_quote_option(option: &str) -> Option<u8> {
+    let trimmed = option.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("quote") {
+        return None;
+    }
+
+    let rest = trimmed["quote".len()..].trim_start();
+    let value = if let Some(value) = rest.strip_prefix('=') {
+        value.trim_start()
+    } else if rest.is_empty() {
+        return None;
+    } else {
+        rest
+    };
+
+    let parsed = pg_parse_copy_option_string(value).unwrap_or_else(|| value.to_string());
+    let bytes = parsed.as_bytes();
+    if bytes.len() != 1 {
+        return None;
+    }
+    Some(bytes[0])
+}
+
+fn pg_parse_copy_null_option(option: &str) -> Option<String> {
+    let trimmed = option.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("null") {
+        return None;
+    }
+
+    let rest = trimmed["null".len()..].trim_start();
+    let value = if let Some(value) = rest.strip_prefix('=') {
+        value.trim_start()
+    } else if rest.is_empty() {
+        return None;
+    } else {
+        rest
+    };
+
+    Some(pg_parse_copy_option_string(value).unwrap_or_else(|| value.to_string()))
 }
 
 fn pg_parse_copy_table_target(target: &str) -> Option<PgCopyTableTarget> {
@@ -12668,8 +12916,8 @@ fn pg_split_copy_table_ref(
     default_db.map(|db| (db.to_string(), trimmed.to_string()))
 }
 
-fn pg_copy_decode_text_field(raw: &[u8]) -> Result<Option<String>, String> {
-    if raw == b"\\N" {
+fn pg_copy_decode_text_field(raw: &[u8], null_string: &[u8]) -> Result<Option<String>, String> {
+    if raw == null_string {
         return Ok(None);
     }
 
@@ -12703,7 +12951,9 @@ fn pg_copy_decode_text_field(raw: &[u8]) -> Result<Option<String>, String> {
 fn pg_copy_parse_text_rows(
     buffer: &[u8],
     delimiter: u8,
+    null_string: &str,
 ) -> Result<Vec<Vec<Option<String>>>, String> {
+    let null_bytes = null_string.as_bytes();
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = Vec::new();
@@ -12721,11 +12971,11 @@ fn pg_copy_parse_text_rows(
                 escaped = true;
             }
             other if *other == delimiter => {
-                row.push(pg_copy_decode_text_field(&field)?);
+                row.push(pg_copy_decode_text_field(&field, null_bytes)?);
                 field.clear();
             }
             b'\n' => {
-                row.push(pg_copy_decode_text_field(&field)?);
+                row.push(pg_copy_decode_text_field(&field, null_bytes)?);
                 field.clear();
                 rows.push(std::mem::take(&mut row));
             }
@@ -12737,15 +12987,19 @@ fn pg_copy_parse_text_rows(
         return Err("COPY data ended with a trailing escape".to_string());
     }
     if !field.is_empty() || !row.is_empty() {
-        row.push(pg_copy_decode_text_field(&field)?);
+        row.push(pg_copy_decode_text_field(&field, null_bytes)?);
         rows.push(row);
     }
 
     Ok(rows)
 }
 
-fn pg_copy_decode_csv_field(raw: &[u8], quoted: bool) -> Result<Option<String>, String> {
-    if !quoted && raw.is_empty() {
+fn pg_copy_decode_csv_field(
+    raw: &[u8],
+    quoted: bool,
+    null_string: &[u8],
+) -> Result<Option<String>, String> {
+    if !quoted && raw == null_string {
         return Ok(None);
     }
     String::from_utf8(raw.to_vec())
@@ -12756,7 +13010,10 @@ fn pg_copy_decode_csv_field(raw: &[u8], quoted: bool) -> Result<Option<String>, 
 fn pg_copy_parse_csv_rows(
     buffer: &[u8],
     delimiter: u8,
+    quote: u8,
+    null_string: &str,
 ) -> Result<Vec<Vec<Option<String>>>, String> {
+    let null_bytes = null_string.as_bytes();
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = Vec::new();
@@ -12768,9 +13025,9 @@ fn pg_copy_parse_csv_rows(
     while idx < buffer.len() {
         let byte = buffer[idx];
         if quoted {
-            if byte == b'"' {
-                if buffer.get(idx + 1) == Some(&b'"') {
-                    field.push(b'"');
+            if byte == quote {
+                if buffer.get(idx + 1) == Some(&quote) {
+                    field.push(quote);
                     idx += 2;
                 } else {
                     quoted = false;
@@ -12787,14 +13044,22 @@ fn pg_copy_parse_csv_rows(
         if after_quote {
             match byte {
                 other if other == delimiter => {
-                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    row.push(pg_copy_decode_csv_field(
+                        &field,
+                        field_was_quoted,
+                        null_bytes,
+                    )?);
                     field.clear();
                     field_was_quoted = false;
                     after_quote = false;
                     idx += 1;
                 }
                 b'\n' => {
-                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    row.push(pg_copy_decode_csv_field(
+                        &field,
+                        field_was_quoted,
+                        null_bytes,
+                    )?);
                     field.clear();
                     field_was_quoted = false;
                     after_quote = false;
@@ -12802,7 +13067,11 @@ fn pg_copy_parse_csv_rows(
                     idx += 1;
                 }
                 b'\r' => {
-                    row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                    row.push(pg_copy_decode_csv_field(
+                        &field,
+                        field_was_quoted,
+                        null_bytes,
+                    )?);
                     field.clear();
                     field_was_quoted = false;
                     after_quote = false;
@@ -12817,7 +13086,7 @@ fn pg_copy_parse_csv_rows(
             continue;
         }
 
-        if field.is_empty() && byte == b'"' {
+        if field.is_empty() && byte == quote {
             quoted = true;
             field_was_quoted = true;
             idx += 1;
@@ -12826,20 +13095,32 @@ fn pg_copy_parse_csv_rows(
 
         match byte {
             other if other == delimiter => {
-                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                row.push(pg_copy_decode_csv_field(
+                    &field,
+                    field_was_quoted,
+                    null_bytes,
+                )?);
                 field.clear();
                 field_was_quoted = false;
                 idx += 1;
             }
             b'\n' => {
-                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                row.push(pg_copy_decode_csv_field(
+                    &field,
+                    field_was_quoted,
+                    null_bytes,
+                )?);
                 field.clear();
                 field_was_quoted = false;
                 rows.push(std::mem::take(&mut row));
                 idx += 1;
             }
             b'\r' => {
-                row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+                row.push(pg_copy_decode_csv_field(
+                    &field,
+                    field_was_quoted,
+                    null_bytes,
+                )?);
                 field.clear();
                 field_was_quoted = false;
                 rows.push(std::mem::take(&mut row));
@@ -12848,7 +13129,9 @@ fn pg_copy_parse_csv_rows(
                     idx += 1;
                 }
             }
-            b'"' => return Err("unexpected quote in unquoted CSV field".to_string()),
+            other if other == quote => {
+                return Err("unexpected quote in unquoted CSV field".to_string())
+            }
             other => {
                 field.push(other);
                 idx += 1;
@@ -12861,7 +13144,11 @@ fn pg_copy_parse_csv_rows(
     }
 
     if after_quote || !field.is_empty() || !row.is_empty() || field_was_quoted {
-        row.push(pg_copy_decode_csv_field(&field, field_was_quoted)?);
+        row.push(pg_copy_decode_csv_field(
+            &field,
+            field_was_quoted,
+            null_bytes,
+        )?);
         rows.push(row);
     }
 
@@ -13020,8 +13307,9 @@ async fn pg_start_copy_from_stdin(
     let insert_target_sql = format!("{db}.{table} ({})", insert_columns.join(", "));
     Ok(Some(PgCopyInState {
         insert_target_sql,
+        column_names: insert_columns,
         column_kinds,
-        options: target.options,
+        options: target.options.clone(),
         buffer: Vec::new(),
         await_sync,
     }))
@@ -13035,9 +13323,11 @@ async fn pg_finish_copy_from_stdin(
     copy_in: PgCopyInState,
 ) -> anyhow::Result<bool> {
     let delimiter = copy_in.options.delimiter();
+    let quote = copy_in.options.quote();
+    let null_string = copy_in.options.null_string();
     let parse_result = match copy_in.options.format {
-        PgCopyFormat::Text => pg_copy_parse_text_rows(&copy_in.buffer, delimiter),
-        PgCopyFormat::Csv => pg_copy_parse_csv_rows(&copy_in.buffer, delimiter),
+        PgCopyFormat::Text => pg_copy_parse_text_rows(&copy_in.buffer, delimiter, null_string),
+        PgCopyFormat::Csv => pg_copy_parse_csv_rows(&copy_in.buffer, delimiter, quote, null_string),
         PgCopyFormat::Binary => {
             unreachable!("binary COPY FROM STDIN is rejected before buffering")
         }
@@ -13051,14 +13341,34 @@ async fn pg_finish_copy_from_stdin(
         }
     };
 
-    let rows = if copy_in.options.header && copy_in.options.format == PgCopyFormat::Csv {
+    let rows = if copy_in.options.has_header() && copy_in.options.format == PgCopyFormat::Csv {
         if let Some((header, remaining)) = rows.split_first() {
-            if header.len() != copy_in.column_kinds.len() {
+            if header.len() != copy_in.column_names.len() {
                 pg_wire::write_error_response(
                     stream,
                     "ERROR",
                     "08P01",
                     "COPY header row has the wrong column count",
+                )
+                .await?;
+                *tx_status = pg_tx_status_for_session(session, session.tx_active);
+                return Ok(true);
+            }
+            if copy_in.options.requires_header_match()
+                && !header
+                    .iter()
+                    .zip(copy_in.column_names.iter())
+                    .all(|(actual, expected)| {
+                        actual
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+                    })
+            {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    "08P01",
+                    "COPY header row does not match target columns",
                 )
                 .await?;
                 *tx_status = pg_tx_status_for_session(session, session.tx_active);
@@ -13209,14 +13519,23 @@ async fn pg_write_copy_to_stdout(
                 let column_formats = vec![0i16; pg_columns.len()];
                 pg_wire::write_copy_out_response(stream, 0, &column_formats).await?;
                 let delimiter = options.delimiter();
-                if options.header && options.format == PgCopyFormat::Csv {
-                    let header = pg_copy_header_row(&pg_columns, options);
+                let null_string = options.null_string();
+                if options.emits_header_row() && options.format == PgCopyFormat::Csv {
+                    let header = pg_copy_header_row(&pg_columns, &options);
                     pg_wire::write_copy_data(stream, &header).await?;
                 }
                 for row in &rows {
                     let line = match options.format {
-                        PgCopyFormat::Text => pg_copy_text_encode_row(row, &pg_columns, delimiter),
-                        PgCopyFormat::Csv => pg_copy_csv_encode_row(row, &pg_columns, delimiter),
+                        PgCopyFormat::Text => {
+                            pg_copy_text_encode_row(row, &pg_columns, delimiter, null_string)
+                        }
+                        PgCopyFormat::Csv => pg_copy_csv_encode_row(
+                            row,
+                            &pg_columns,
+                            delimiter,
+                            options.quote(),
+                            null_string,
+                        ),
                         PgCopyFormat::Binary => unreachable!(),
                     };
                     pg_wire::write_copy_data(stream, &line).await?;
@@ -13275,13 +13594,13 @@ fn pg_prepare_columns_to_pg(
 
 fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
     let (type_oid, type_size) = match name.to_ascii_lowercase().as_str() {
-        "oid" | "datdba" | "dattablespace" | "typnamespace" | "typowner" | "typrelid"
-        | "typelem" | "typarray" | "typbasetype" | "typndims" | "nspowner" | "datid"
-        | "usesysid" | "grosysid" | "spcowner" | "relnamespace" | "relowner" | "relam"
-        | "reltablespace" | "reloftype" | "attrelid" | "atttypid" | "attcollation"
-        | "indexrelid" | "indrelid" | "connamespace" | "conrelid" | "contypid" | "conindid"
-        | "conparentid" | "confrelid" | "pronamespace" | "proowner" | "prolang" | "provariadic"
-        | "prosupport" | "prorettype" => (26, 4),
+        "oid" | "objoid" | "classoid" | "datdba" | "dattablespace" | "amhandler"
+        | "typnamespace" | "typowner" | "typrelid" | "typelem" | "typarray" | "typbasetype"
+        | "typndims" | "nspowner" | "datid" | "usesysid" | "grosysid" | "spcowner"
+        | "relnamespace" | "relowner" | "relam" | "reltablespace" | "reloftype" | "attrelid"
+        | "atttypid" | "attcollation" | "indexrelid" | "indrelid" | "connamespace" | "conrelid"
+        | "contypid" | "conindid" | "conparentid" | "confrelid" | "pronamespace" | "proowner"
+        | "prolang" | "provariadic" | "prosupport" | "prorettype" => (26, 4),
         "datistemplate"
         | "datallowconn"
         | "pending_restart"
@@ -13333,8 +13652,8 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "connoinherit" => (pg_wire::oid::BOOL, 1),
         "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
         "rolconnlimit" | "numbackends" | "avg_width" | "relnatts" | "relchecks" | "attlen"
-        | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "indnatts" | "indnkeyatts"
-        | "coninhcount" | "pronargs" | "pronargdefaults" => (pg_wire::oid::INT4, 4),
+        | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "objsubid" | "indnatts"
+        | "indnkeyatts" | "coninhcount" | "pronargs" | "pronargdefaults" => (pg_wire::oid::INT4, 4),
         "null_frac" | "n_distinct" | "correlation" | "procost" | "prorows" => {
             (pg_wire::oid::FLOAT4, 4)
         }
@@ -28034,6 +28353,33 @@ fn pg_catalog_select_result(
             rows.push(row);
         }
         vec!["oid", "spcname", "spcowner", "spcacl", "spcoptions"]
+    } else if table.table.eq_ignore_ascii_case("pg_am") {
+        for (oid, amname, amtype) in [(2_u64, "heap", "t"), (403_u64, "btree", "i")] {
+            let mut row = BTreeMap::new();
+            row.insert("oid".to_string(), Lit::U64 { v: oid });
+            row.insert(
+                "amname".to_string(),
+                Lit::Str {
+                    v: amname.to_string(),
+                },
+            );
+            row.insert(
+                "amhandler".to_string(),
+                Lit::U64 {
+                    v: pg_catalog_hash_oid(&["pg_am_handler", amname]),
+                },
+            );
+            row.insert(
+                "amtype".to_string(),
+                Lit::Str {
+                    v: amtype.to_string(),
+                },
+            );
+            rows.push(row);
+        }
+        vec!["oid", "amname", "amhandler", "amtype"]
+    } else if table.table.eq_ignore_ascii_case("pg_description") {
+        vec!["objoid", "classoid", "objsubid", "description"]
     } else if table.table.eq_ignore_ascii_case("pg_tables") {
         for db in eng.list_databases() {
             let table_names = match eng.list_tables(&db) {
@@ -33360,6 +33706,52 @@ mod tests {
         assert_eq!(tablespace_rows.len(), 1);
         assert_eq!(tablespace_rows[0][0]["v"].as_str(), Some("pg_default"));
         assert_eq!(tablespace_rows[0][1]["v"].as_u64(), Some(10));
+
+        let access_methods = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT oid, amname, amtype FROM pg_catalog.pg_am WHERE amname IN ('heap', 'btree') ORDER BY oid"
+            }),
+        )
+        .await;
+        assert!(access_methods.ok);
+        let access_method_rows = access_methods
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(access_method_rows.len(), 2);
+        assert_eq!(access_method_rows[0][0]["v"].as_u64(), Some(2));
+        assert_eq!(access_method_rows[0][1]["v"].as_str(), Some("heap"));
+        assert_eq!(access_method_rows[0][2]["v"].as_str(), Some("t"));
+        assert_eq!(access_method_rows[1][0]["v"].as_u64(), Some(403));
+        assert_eq!(access_method_rows[1][1]["v"].as_str(), Some("btree"));
+        assert_eq!(access_method_rows[1][2]["v"].as_str(), Some("i"));
+
+        let descriptions = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT classoid, objoid, objsubid, description FROM pg_catalog.pg_description WHERE objsubid = 0"
+            }),
+        )
+        .await;
+        assert!(descriptions.ok);
+        let description_rows = descriptions
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(description_rows.is_empty());
 
         let pg_tables = call_sql_exec_http(
             &state,
@@ -46131,17 +46523,35 @@ mod tests {
             None,
         ];
 
-        let encoded = pg_copy_text_encode_row(&row, &columns, b'\t');
+        let encoded = pg_copy_text_encode_row(&row, &columns, b'\t', "\\N");
         assert_eq!(
             String::from_utf8(encoded).as_deref(),
             Ok("Ada\\tLovelace\tt\t\\N\n")
         );
 
-        let encoded = pg_copy_text_encode_row(&row, &columns, b'|');
+        let encoded = pg_copy_text_encode_row(&row, &columns, b'|', "\\N");
         assert_eq!(
             String::from_utf8(encoded).as_deref(),
             Ok("Ada\\tLovelace|t|\\N\n")
         );
+    }
+
+    #[test]
+    fn pg_copy_text_encode_and_parse_rows_handle_custom_null_marker() {
+        let columns = vec![
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("note", pg_wire::oid::TEXT, -1),
+        ];
+        let row = vec![Some("NULL".to_string()), None];
+
+        let encoded = pg_copy_text_encode_row(&row, &columns, b'\t', "NULL");
+        assert_eq!(
+            String::from_utf8(encoded.clone()).as_deref(),
+            Ok("\\NULL\tNULL\n")
+        );
+
+        let decoded = pg_copy_parse_text_rows(&encoded, b'\t', "NULL").expect("parse text rows");
+        assert_eq!(decoded, vec![row]);
     }
 
     #[test]
@@ -46161,22 +46571,61 @@ mod tests {
             Some(String::new()),
         ];
 
-        let encoded = pg_copy_csv_encode_row(&row, &columns, b',');
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b',', b'"', "");
         assert_eq!(
             String::from_utf8(encoded.clone()).as_deref(),
             Ok("\"Ada, Lovelace\",\"line1\nline2\",t,,\"\"\n")
         );
 
-        let decoded = pg_copy_parse_csv_rows(&encoded, b',').expect("parse csv rows");
+        let decoded = pg_copy_parse_csv_rows(&encoded, b',', b'"', "").expect("parse csv rows");
         assert_eq!(decoded, vec![row.clone()]);
 
-        let encoded = pg_copy_csv_encode_row(&row, &columns, b';');
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b';', b'"', "");
         assert_eq!(
             String::from_utf8(encoded.clone()).as_deref(),
             Ok("Ada, Lovelace;\"line1\nline2\";t;;\"\"\n")
         );
 
-        let decoded = pg_copy_parse_csv_rows(&encoded, b';').expect("parse csv rows");
+        let decoded = pg_copy_parse_csv_rows(&encoded, b';', b'"', "").expect("parse csv rows");
+        assert_eq!(decoded, vec![row]);
+    }
+
+    #[test]
+    fn pg_copy_csv_encode_and_parse_rows_handle_custom_null_marker() {
+        let columns = vec![
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("note", pg_wire::oid::TEXT, -1),
+        ];
+        let row = vec![Some("NULL".to_string()), None];
+
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b',', b'"', "NULL");
+        assert_eq!(
+            String::from_utf8(encoded.clone()).as_deref(),
+            Ok("\"NULL\",NULL\n")
+        );
+
+        let decoded = pg_copy_parse_csv_rows(&encoded, b',', b'"', "NULL").expect("parse csv rows");
+        assert_eq!(decoded, vec![row]);
+    }
+
+    #[test]
+    fn pg_copy_csv_encode_and_parse_rows_handle_custom_quote_marker() {
+        let columns = vec![
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("note", pg_wire::oid::TEXT, -1),
+        ];
+        let row = vec![
+            Some("Ada, Lovelace".to_string()),
+            Some("pipe | quote".to_string()),
+        ];
+
+        let encoded = pg_copy_csv_encode_row(&row, &columns, b',', b'|', "");
+        assert_eq!(
+            String::from_utf8(encoded.clone()).as_deref(),
+            Ok("|Ada, Lovelace|,|pipe || quote|\n")
+        );
+
+        let decoded = pg_copy_parse_csv_rows(&encoded, b',', b'|', "").expect("parse csv rows");
         assert_eq!(decoded, vec![row]);
     }
 
@@ -46229,8 +46678,52 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH CSV"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (CSV)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH CSV HEADER"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::Present,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
                 },
             })
         );
@@ -46241,9 +46734,47 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: Some(b';'),
+                    quote: None,
+                    null_string: None,
                 },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, QUOTE '|')"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: Some(b'|'),
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH BINARY"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (TEXT)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
             })
         );
         assert_eq!(
@@ -46253,8 +46784,10 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: true,
+                    header: PgCopyHeaderOption::Present,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
                 },
             })
         );
@@ -46265,8 +46798,28 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: true,
+                    header: PgCopyHeaderOption::Present,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, HEADER MATCH)"),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, NULL 'NULL')"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: Some("NULL".to_string()),
                 },
             })
         );
@@ -46277,8 +46830,24 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Binary,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (BINARY)"),
+            Some(PgCopyToStdoutSource::Table {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
                 },
             })
         );
@@ -46293,6 +46862,20 @@ mod tests {
         );
         assert_eq!(
             pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT binary, DELIMITER ';')"),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT csv, NULL ',')"),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout(
+                "COPY app.users TO STDOUT WITH (FORMAT csv, QUOTE ';', DELIMITER ';')"
+            ),
+            None
+        );
+        assert_eq!(
+            pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT text, QUOTE '|')"),
             None
         );
     }
@@ -46330,8 +46913,52 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH CSV;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (CSV);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH CSV HEADER MATCH;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::Match,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
                 },
             })
         );
@@ -46342,9 +46969,41 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: Some(b';'),
+                    quote: None,
+                    null_string: None,
                 },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv, QUOTE '|');"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: Some(b'|'),
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH TEXT;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (TEXT);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions::default(),
             })
         );
         assert_eq!(
@@ -46354,8 +47013,38 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Csv,
-                    header: true,
+                    header: PgCopyHeaderOption::Present,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv, HEADER MATCH);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::Match,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (FORMAT csv, NULL 'NULL');"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Csv,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: Some("NULL".to_string()),
                 },
             })
         );
@@ -46366,14 +47055,44 @@ mod tests {
                 columns: Vec::new(),
                 options: PgCopyOptions {
                     format: PgCopyFormat::Binary,
-                    header: false,
+                    header: PgCopyHeaderOption::None,
                     delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH BINARY;"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
+                },
+            })
+        );
+        assert_eq!(
+            pg_parse_copy_from_stdin("COPY app.users FROM STDIN WITH (BINARY);"),
+            Some(PgCopyTableTarget {
+                table: "app.users".to_string(),
+                columns: Vec::new(),
+                options: PgCopyOptions {
+                    format: PgCopyFormat::Binary,
+                    header: PgCopyHeaderOption::None,
+                    delimiter: None,
+                    quote: None,
+                    null_string: None,
                 },
             })
         );
         assert_eq!(pg_parse_copy_from_stdin("COPY app.users TO STDOUT"), None);
 
-        let rows = pg_copy_parse_text_rows(b"1\tAda\tt\n2\t\\N\tf\n", b'\t').unwrap();
+        let rows = pg_copy_parse_text_rows(b"1\tAda\tt\n2\t\\N\tf\n", b'\t', "\\N").unwrap();
         assert_eq!(
             rows,
             vec![
@@ -46386,7 +47105,7 @@ mod tests {
             ]
         );
 
-        let rows = pg_copy_parse_text_rows(b"1|Ada\\|Lovelace|t\n", b'|').unwrap();
+        let rows = pg_copy_parse_text_rows(b"1|Ada\\|Lovelace|t\n", b'|', "\\N").unwrap();
         assert_eq!(
             rows,
             vec![vec![
@@ -46396,7 +47115,8 @@ mod tests {
             ]]
         );
 
-        let csv_rows = pg_copy_parse_csv_rows(b"1,\"Ada, Lovelace\",t\n2,,\"\"\n", b',').unwrap();
+        let csv_rows =
+            pg_copy_parse_csv_rows(b"1,\"Ada, Lovelace\",t\n2,,\"\"\n", b',', b'"', "").unwrap();
         assert_eq!(
             csv_rows,
             vec![
@@ -46409,7 +47129,8 @@ mod tests {
             ]
         );
 
-        let csv_rows = pg_copy_parse_csv_rows(b"1;Ada, Lovelace;t\n2;;\"\"\n", b';').unwrap();
+        let csv_rows =
+            pg_copy_parse_csv_rows(b"1;Ada, Lovelace;t\n2;;\"\"\n", b';', b'"', "").unwrap();
         assert_eq!(
             csv_rows,
             vec![
@@ -46422,7 +47143,8 @@ mod tests {
             ]
         );
 
-        let header_rows = pg_copy_parse_csv_rows(b"id,name,active\n1,Ada,t\n", b',').unwrap();
+        let header_rows =
+            pg_copy_parse_csv_rows(b"id,name,active\n1,Ada,t\n", b',', b'"', "").unwrap();
         assert_eq!(
             header_rows,
             vec![
@@ -46437,6 +47159,17 @@ mod tests {
                     Some("t".to_string())
                 ]
             ]
+        );
+
+        let quoted_rows =
+            pg_copy_parse_csv_rows(b"1,|Ada, Lovelace|,|pipe || quote|\n", b',', b'|', "").unwrap();
+        assert_eq!(
+            quoted_rows,
+            vec![vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("pipe | quote".to_string())
+            ]]
         );
     }
 
@@ -46518,6 +47251,10 @@ mod tests {
         assert!(pg_catalog_result_column_override("usesuper").is_some());
         assert!(pg_catalog_result_column_override("grosysid").is_some());
         assert!(pg_catalog_result_column_override("spcowner").is_some());
+        assert!(pg_catalog_result_column_override("amhandler").is_some());
+        assert!(pg_catalog_result_column_override("classoid").is_some());
+        assert!(pg_catalog_result_column_override("objoid").is_some());
+        assert!(pg_catalog_result_column_override("objsubid").is_some());
         assert!(pg_catalog_result_column_override("hasindexes").is_some());
         assert!(pg_catalog_result_column_override("numbackends").is_some());
         assert!(pg_catalog_result_column_override("null_frac").is_some());
