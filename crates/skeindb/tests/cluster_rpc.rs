@@ -11320,6 +11320,69 @@ async fn pg_simple_query_copy_to_stdout_with_csv_quote_roundtrip() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn pg_simple_query_copy_to_stdout_with_csv_escape_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_to_stdout_with_csv_escape")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "pg_copy_csv_escape_out",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": true},
+                {"name": "note", "type": {"kind": "str"}, "nullable": true}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "pg_copy_csv_escape_out"},
+            "rows": [
+                {
+                    "id": {"t": "u64", "v": 1},
+                    "name": {"t": "str", "v": "Ada, Lovelace"},
+                    "note": {"t": "str", "v": "bang ! and pipe |"}
+                },
+                {
+                    "id": {"t": "u64", "v": 2},
+                    "name": {"t": "null", "v": null},
+                    "note": {"t": "str", "v": ""}
+                }
+            ]
+        }),
+    )
+    .await?;
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "COPY (SELECT id, name, note FROM app.pg_copy_csv_escape_out ORDER BY id) TO STDOUT WITH (FORMAT csv, QUOTE '|', ESCAPE '!')",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_message_tags(&msgs),
+        vec![b'H', b'd', b'd', b'c', b'C', b'Z']
+    );
+    assert_eq!(
+        pg_copy_data_lines(&msgs),
+        vec!["1,|Ada, Lovelace|,|bang !! and pipe !||\n", "2,,||\n"]
+    );
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_simple_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_csv_format")?;
@@ -11373,6 +11436,59 @@ async fn pg_simple_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::
                 Some("f".to_string()),
                 Some(String::new())
             ],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_copy_from_stdin_with_csv_escape_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_with_csv_escape")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_copy_csv_escape_in (id BIGINT NOT NULL, name VARCHAR(255), note VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'Q',
+                pg_query_payload(
+                    "COPY app.pg_copy_csv_escape_in FROM STDIN WITH (FORMAT csv, QUOTE '|', ESCAPE '!')",
+                ),
+            ),
+            (b'd', b"1,|Ada, Lovelace|,|bang !! and pipe !||\n2,,||\n".to_vec()),
+            (b'c', Vec::new()),
+        ],
+    )
+    .await?;
+
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name, note FROM app.pg_copy_csv_escape_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![
+                Some("1".to_string()),
+                Some("Ada, Lovelace".to_string()),
+                Some("bang ! and pipe |".to_string())
+            ],
+            vec![Some("2".to_string()), None, Some(String::new())],
         ]
     );
 
