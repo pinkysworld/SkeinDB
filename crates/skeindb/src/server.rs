@@ -13415,12 +13415,12 @@ async fn pg_finish_copy_from_stdin(
     copy_in: PgCopyInState,
 ) -> anyhow::Result<bool> {
     let delimiter = copy_in.options.delimiter();
-    let quote = copy_in.options.quote();
-    let escape = copy_in.options.escape();
     let null_string = copy_in.options.null_string();
     let parse_result = match copy_in.options.format {
         PgCopyFormat::Text => pg_copy_parse_text_rows(&copy_in.buffer, delimiter, null_string),
         PgCopyFormat::Csv => {
+            let quote = copy_in.options.quote();
+            let escape = copy_in.options.escape();
             pg_copy_parse_csv_rows(&copy_in.buffer, delimiter, quote, escape, null_string)
         }
         PgCopyFormat::Binary => {
