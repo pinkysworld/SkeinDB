@@ -170,8 +170,18 @@ pub struct RowEntry {
     pub commit_ts_ms: u64,
 }
 
-const TABLE_ROWS_FORMAT_VERSION: u32 = 3;
+// Bumped to 4 for T193: row segments/JSON may carry encrypted-at-rest cell payloads
+// keyed by `TABLE_ROW_ENC_KEY`. Version 2/3 files (plaintext only) remain readable.
+const TABLE_ROWS_FORMAT_VERSION: u32 = 4;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
+/// Marker key for an encrypted-at-rest row cell payload (T193). The payload object carries
+/// the originating column id, the value kind label, and a base64 of the self-describing
+/// [`skeindb_core::encryption::EncryptionEnvelope`] stored-bytes form. The plaintext cell is
+/// never written when this marker is present.
+const TABLE_ROW_ENC_KEY: &str = "$skein_enc";
+/// Codec version mixed into the encryption AAD for row-cell payloads. Bump only if the cell
+/// plaintext serialization (serde_json of `Lit`) changes in an incompatible way.
+const ENCRYPTION_CELL_CODEC_VERSION: u32 = 1;
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
@@ -398,6 +408,13 @@ pub struct Engine {
     key_manager: skeindb_core::encryption::DatabaseKeyManager,
     encryption_audit: Vec<EncryptionAuditEntry>,
     encryption_audit_next_id: u64,
+
+    /// Tables whose on-disk rows contain encrypted-at-rest cells (T193) that could not be
+    /// decrypted at load time because the database master key is not currently registered.
+    /// Such tables are loaded as empty in memory and are blocked from being persisted (which
+    /// would otherwise overwrite the ciphertext with empty/plaintext data). They are
+    /// transparently reloaded once the matching key is registered.
+    encrypted_locked_tables: HashSet<TableKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1981,6 +1998,7 @@ impl Engine {
             key_manager: skeindb_core::encryption::DatabaseKeyManager::new(),
             encryption_audit: Vec::new(),
             encryption_audit_next_id: 1,
+            encrypted_locked_tables: HashSet::new(),
         };
 
         engine.load_encryption_state_best_effort();
@@ -10806,31 +10824,77 @@ impl Engine {
             .join(format!("{table}.sidx.json"))
     }
 
-    fn load_table_rows_json_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
+    fn load_table_rows_json_best_effort(
+        &self,
+        path: &Path,
+        codec: &RowEncryptionCodec<'_>,
+    ) -> LoadedTableRows {
         if let Some(disk) = load_json::<TableRowsDisk>(path) {
-            if let Ok(rows) = decode_table_rows_disk(disk) {
-                return Some(rows);
+            match decode_table_rows_disk(disk, Some(codec)) {
+                Ok(rows) => return LoadedTableRows::Rows(rows),
+                Err(err) if is_encryption_locked_error(&err) => {
+                    return LoadedTableRows::Locked;
+                }
+                Err(_) => {}
             }
         }
-        load_json::<Vec<RowEntry>>(path)
+        match load_json::<Vec<RowEntry>>(path) {
+            Some(rows) => LoadedTableRows::Rows(rows),
+            None => LoadedTableRows::Missing,
+        }
     }
 
-    fn load_table_rows_segment_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
-        let bytes = fs::read(path).ok()?;
-        let disk = decode_table_rows_segment(&bytes).ok()?;
-        decode_table_rows_disk(disk).ok()
+    fn load_table_rows_segment_best_effort(
+        &self,
+        path: &Path,
+        codec: &RowEncryptionCodec<'_>,
+    ) -> LoadedTableRows {
+        let Ok(bytes) = fs::read(path) else {
+            return LoadedTableRows::Missing;
+        };
+        let Ok(disk) = decode_table_rows_segment(&bytes) else {
+            return LoadedTableRows::Missing;
+        };
+        match decode_table_rows_disk(disk, Some(codec)) {
+            Ok(rows) => LoadedTableRows::Rows(rows),
+            Err(err) if is_encryption_locked_error(&err) => LoadedTableRows::Locked,
+            Err(_) => LoadedTableRows::Missing,
+        }
     }
 
-    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> Vec<RowEntry> {
+    /// Load a table's rows, decrypting encrypted-at-rest cells when the database key is
+    /// registered. Returns `(rows, locked)` where `locked` is true if encrypted cells were
+    /// present but could not be decrypted (the table is then loaded empty and blocked from
+    /// being persisted until the key is registered).
+    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> (Vec<RowEntry>, bool) {
         let json_path = self.table_path(db, table);
         let segment_path = self.table_segment_path(db, table);
-        let from_json = || self.load_table_rows_json_best_effort(&json_path);
-        let from_segment = || self.load_table_rows_segment_best_effort(&segment_path);
-        let loaded = match self.storage_mode {
-            TableStorageMode::Json => from_json().or_else(from_segment),
-            TableStorageMode::Segment | TableStorageMode::Dual => from_segment().or_else(from_json),
+        let codec = self.row_encryption_codec(db, table);
+        let from_json = || self.load_table_rows_json_best_effort(&json_path, &codec);
+        let from_segment = || self.load_table_rows_segment_best_effort(&segment_path, &codec);
+        let (first, second) = match self.storage_mode {
+            TableStorageMode::Json => (from_json(), from_segment()),
+            TableStorageMode::Segment | TableStorageMode::Dual => (from_segment(), from_json()),
         };
-        loaded.unwrap_or_default()
+        match first {
+            LoadedTableRows::Rows(rows) => (rows, false),
+            LoadedTableRows::Locked => (Vec::new(), true),
+            LoadedTableRows::Missing => match second {
+                LoadedTableRows::Rows(rows) => (rows, false),
+                LoadedTableRows::Locked => (Vec::new(), true),
+                LoadedTableRows::Missing => (Vec::new(), false),
+            },
+        }
+    }
+
+    /// Build a row-cell encryption codec scoped to `db`/`table`. The codec is inert (no
+    /// encryption) unless the database has an active mode and a registered key.
+    fn row_encryption_codec(&self, db: &str, table: &str) -> RowEncryptionCodec<'_> {
+        RowEncryptionCodec {
+            key_manager: &self.key_manager,
+            db: db.to_string(),
+            table: table.to_string(),
+        }
     }
 
     fn load_table_secondary_indexes_best_effort(
@@ -10930,6 +10994,12 @@ impl Engine {
             db: db.to_string(),
             table: table.to_string(),
         };
+        if self.encrypted_locked_tables.contains(&key) {
+            anyhow::bail!(
+                "encryption key required: table '{db}.{table}' has encrypted data at rest; \
+                 register the database key before writing"
+            );
+        }
         let Some(tdata) = self.tables.get(&key) else {
             return Ok(());
         };
@@ -10937,13 +11007,28 @@ impl Engine {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let ref_plan = plan_value_refs_for_rows(&tdata.rows);
+        let codec = self.row_encryption_codec(db, table);
+        let encrypting = codec.active();
+        // Encrypted cells produce per-row ciphertext that must not be deduplicated via the
+        // plaintext value-ref planner, so disable ref planning while encryption is active.
+        let ref_plan = if encrypting {
+            HashSet::new()
+        } else {
+            plan_value_refs_for_rows(&tdata.rows)
+        };
         let mut seen_refs = HashSet::new();
         let rows = tdata
             .rows
             .iter()
-            .map(|entry| encode_row_entry_disk(entry, &mut seen_refs, &ref_plan))
-            .collect();
+            .map(|entry| {
+                encode_row_entry_disk(
+                    entry,
+                    &mut seen_refs,
+                    &ref_plan,
+                    encrypting.then_some(&codec),
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let disk = TableRowsDisk {
             format_version: TABLE_ROWS_FORMAT_VERSION,
             rows,
@@ -11000,6 +11085,15 @@ impl Engine {
             }
         }
         for (db, table) in table_targets.into_iter() {
+            // Skip tables whose encrypted data could not be unlocked at load time; persisting
+            // them would attempt to overwrite ciphertext we cannot currently reproduce.
+            let key = TableKey {
+                db: db.clone(),
+                table: table.clone(),
+            };
+            if self.encrypted_locked_tables.contains(&key) {
+                continue;
+            }
             self.persist_table(&db, &table)?;
         }
 
@@ -11036,37 +11130,87 @@ impl Engine {
     }
 
     fn load_tables_best_effort(&mut self) {
-        for (db, d) in self.catalog.databases.iter() {
-            for (table, _) in d.tables.iter() {
-                let rows = self.load_table_rows_best_effort_for_mode(db, table);
-                let secondary_indexes =
-                    self.load_table_secondary_indexes_best_effort(db, table, rows.len());
-                let mut tdata = TableData {
-                    rows,
-                    secondary_indexes: Mutex::new(secondary_indexes),
-                    ..TableData::default()
-                };
-                // Build pk index.
-                if let Ok(schema) = self.get_schema(db, table) {
-                    for (idx, entry) in tdata.rows.iter().enumerate() {
-                        if entry.deleted {
-                            continue;
-                        }
-                        if let Ok(pk) = extract_pk(schema, &entry.row) {
-                            tdata.pk_index.insert(pk_key(&pk), idx);
-                        }
-                    }
-                    ensure_mysql_compat_secondary_indexes(schema, &tdata);
-                }
-
-                self.tables.insert(
-                    TableKey {
-                        db: db.clone(),
-                        table: table.clone(),
-                    },
-                    tdata,
-                );
+        let targets: Vec<(String, String)> = self
+            .catalog
+            .databases
+            .iter()
+            .flat_map(|(db, d)| {
+                d.tables
+                    .keys()
+                    .map(move |table| (db.clone(), table.clone()))
+            })
+            .collect();
+        for (db, table) in targets {
+            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&db, &table);
+            let key = TableKey {
+                db: db.clone(),
+                table: table.clone(),
+            };
+            if locked {
+                self.encrypted_locked_tables.insert(key.clone());
+            } else {
+                self.encrypted_locked_tables.remove(&key);
             }
+            let secondary_indexes =
+                self.load_table_secondary_indexes_best_effort(&db, &table, rows.len());
+            let mut tdata = TableData {
+                rows,
+                secondary_indexes: Mutex::new(secondary_indexes),
+                ..TableData::default()
+            };
+            // Build pk index.
+            if let Ok(schema) = self.get_schema(&db, &table) {
+                for (idx, entry) in tdata.rows.iter().enumerate() {
+                    if entry.deleted {
+                        continue;
+                    }
+                    if let Ok(pk) = extract_pk(schema, &entry.row) {
+                        tdata.pk_index.insert(pk_key(&pk), idx);
+                    }
+                }
+                ensure_mysql_compat_secondary_indexes(schema, &tdata);
+            }
+
+            self.tables.insert(key, tdata);
+        }
+    }
+
+    /// Attempt to reload any encrypted tables for `db` that were locked at load time because
+    /// the master key was missing. Called after a key is registered/activated so previously
+    /// inaccessible encrypted-at-rest data becomes available without requiring a restart.
+    fn unlock_encrypted_tables_for_db(&mut self, db: &str) {
+        let db = db.trim();
+        let locked_targets: Vec<TableKey> = self
+            .encrypted_locked_tables
+            .iter()
+            .filter(|key| key.db == db)
+            .cloned()
+            .collect();
+        for key in locked_targets {
+            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
+            if locked {
+                continue;
+            }
+            self.encrypted_locked_tables.remove(&key);
+            let secondary_indexes =
+                self.load_table_secondary_indexes_best_effort(&key.db, &key.table, rows.len());
+            let mut tdata = TableData {
+                rows,
+                secondary_indexes: Mutex::new(secondary_indexes),
+                ..TableData::default()
+            };
+            if let Ok(schema) = self.get_schema(&key.db, &key.table) {
+                for (idx, entry) in tdata.rows.iter().enumerate() {
+                    if entry.deleted {
+                        continue;
+                    }
+                    if let Ok(pk) = extract_pk(schema, &entry.row) {
+                        tdata.pk_index.insert(pk_key(&pk), idx);
+                    }
+                }
+                ensure_mysql_compat_secondary_indexes(schema, &tdata);
+            }
+            self.tables.insert(key, tdata);
         }
     }
 
@@ -12680,6 +12824,7 @@ impl Engine {
             None,
             Some("master key bytes redacted"),
         );
+        self.unlock_encrypted_tables_for_db(&params.db);
         self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionRegisterKeyResult {
             ok: true,
@@ -12707,6 +12852,7 @@ impl Engine {
             None,
             None,
         );
+        self.unlock_encrypted_tables_for_db(&params.db);
         self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionSetActiveKeyResult {
             ok: true,
@@ -25947,18 +26093,194 @@ fn encode_row_entry_disk(
     entry: &RowEntry,
     seen_refs: &mut HashSet<ValueId>,
     ref_plan: &HashSet<ValueId>,
-) -> RowEntryDisk {
+    enc: Option<&RowEncryptionCodec<'_>>,
+) -> anyhow::Result<RowEntryDisk> {
     let mut row = BTreeMap::new();
     for (k, v) in entry.row.iter() {
+        if let Some(codec) = enc {
+            if codec.active() {
+                if let Some(payload) = codec.encrypt_cell(k, v)? {
+                    row.insert(k.clone(), payload);
+                    continue;
+                }
+            }
+        }
         row.insert(k.clone(), encode_lit_for_disk(v, seen_refs, ref_plan));
     }
-    RowEntryDisk {
+    Ok(RowEntryDisk {
         row,
         version: entry.version,
         schema_version: entry.schema_version,
         deleted: entry.deleted,
         commit_ts_ms: entry.commit_ts_ms,
+    })
+}
+
+/// Error returned by [`decode_table_rows_disk`] when a table's on-disk rows contain
+/// encrypted-at-rest cells (T193) that cannot be decrypted because the database master key is
+/// not currently registered. Callers treat this as a "locked table" signal rather than a
+/// generic decode failure so the ciphertext is preserved and never overwritten.
+#[derive(Debug)]
+struct EncryptionLockedError {
+    db: String,
+    table: String,
+    detail: String,
+}
+
+impl std::fmt::Display for EncryptionLockedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "encryption key required to read table '{}.{}': {}",
+            self.db, self.table, self.detail
+        )
     }
+}
+
+impl std::error::Error for EncryptionLockedError {}
+
+/// Returns true if `err` (or one of its sources) is an [`EncryptionLockedError`].
+fn is_encryption_locked_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<EncryptionLockedError>().is_some()
+}
+
+/// Outcome of attempting to load one table's rows from a single backing file.
+enum LoadedTableRows {
+    /// Rows decoded successfully (encrypted cells, if any, were decrypted).
+    Rows(Vec<RowEntry>),
+    /// Encrypted-at-rest cells are present but the database key is not registered.
+    Locked,
+    /// No usable file was found / could be parsed.
+    Missing,
+}
+
+/// Encrypt-on-write / decrypt-on-read codec for individual row cells (T193).
+///
+/// The codec is borrowed from the engine's [`DatabaseKeyManager`] together with the scope
+/// (`db`/`table`) so the encryption AAD can be reconstructed deterministically on read. Only
+/// variable-length "cell" payloads (`Str`/`Json`/`Bytes`/`Uuid`) and `Embedding` values are
+/// encrypted — these mirror the value-store candidate set. Fixed-width scalars (numbers,
+/// booleans, dates) remain plaintext, which is documented in `docs/ON_DISK_FORMAT.md`.
+struct RowEncryptionCodec<'a> {
+    key_manager: &'a skeindb_core::encryption::DatabaseKeyManager,
+    db: String,
+    table: String,
+}
+
+impl<'a> RowEncryptionCodec<'a> {
+    /// True when the database has an active encryption mode and a usable registered key, so
+    /// new writes should be encrypted at rest.
+    fn active(&self) -> bool {
+        use skeindb_core::encryption::EncryptionMode;
+        let Some(profile) = self.key_manager.profile(&self.db) else {
+            return false;
+        };
+        if matches!(profile.mode, EncryptionMode::Off) {
+            return false;
+        }
+        let Some(active_key) = profile.active_key_id.as_deref() else {
+            return false;
+        };
+        self.key_manager
+            .registered_key_ids(&self.db)
+            .iter()
+            .any(|k| k == active_key)
+    }
+
+    /// Encrypt a single cell, returning the `$skein_enc` payload object, or `Ok(None)` when
+    /// the value kind is not an encryptable variable-length payload (left plaintext).
+    fn encrypt_cell(&self, column: &str, lit: &Lit) -> anyhow::Result<Option<serde_json::Value>> {
+        use base64::{engine::general_purpose, Engine as _};
+        use skeindb_core::encryption::EncryptionContext;
+
+        let Some(item) = value_store_item(lit) else {
+            return Ok(None);
+        };
+        let plaintext = serde_json::to_vec(lit)?;
+        let ctx = EncryptionContext::new(
+            self.db.clone(),
+            self.table.clone(),
+            column.to_string(),
+            item.kind,
+            ENCRYPTION_CELL_CODEC_VERSION,
+        );
+        let envelope = self
+            .key_manager
+            .encrypt(&ctx, &plaintext)
+            .map_err(|e| anyhow::anyhow!("encrypt cell '{}': {}", column, e))?;
+        let env_b64 = general_purpose::STANDARD.encode(envelope.stored_bytes());
+
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "col".to_string(),
+            serde_json::Value::String(column.to_string()),
+        );
+        payload.insert(
+            "kind".to_string(),
+            serde_json::Value::String(value_kind_label(item.kind).to_string()),
+        );
+        payload.insert("env_b64".to_string(), serde_json::Value::String(env_b64));
+        let mut out = serde_json::Map::new();
+        out.insert(
+            TABLE_ROW_ENC_KEY.to_string(),
+            serde_json::Value::Object(payload),
+        );
+        Ok(Some(serde_json::Value::Object(out)))
+    }
+
+    /// Decrypt a `$skein_enc` payload back to its original [`Lit`].
+    fn decrypt_cell(&self, column: &str, kind_label: &str, env_b64: &str) -> anyhow::Result<Lit> {
+        use base64::{engine::general_purpose, Engine as _};
+        use skeindb_core::encryption::{EncryptionContext, EncryptionEnvelope};
+
+        let kind = value_kind_from_label(kind_label)
+            .ok_or_else(|| anyhow::anyhow!("unknown encrypted cell kind: {kind_label}"))?;
+        let stored = general_purpose::STANDARD
+            .decode(env_b64.as_bytes())
+            .map_err(|e| anyhow::anyhow!("encrypted cell payload is not valid base64: {e}"))?;
+        let envelope = EncryptionEnvelope::from_stored_bytes(&stored)
+            .map_err(|e| anyhow::anyhow!("malformed encryption envelope: {e}"))?;
+        let ctx = EncryptionContext::new(
+            self.db.clone(),
+            self.table.clone(),
+            column.to_string(),
+            kind,
+            ENCRYPTION_CELL_CODEC_VERSION,
+        );
+        let plaintext = self
+            .key_manager
+            .decrypt(&ctx, &envelope)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let lit = serde_json::from_slice::<Lit>(&plaintext)
+            .map_err(|e| anyhow::anyhow!("decrypted cell is not a valid value: {e}"))?;
+        Ok(lit)
+    }
+}
+
+/// Parsed view of a `$skein_enc` payload object.
+struct EncryptedCellPayload {
+    column: String,
+    kind: String,
+    env_b64: String,
+}
+
+fn decode_encrypted_cell_payload(value: &serde_json::Value) -> Option<EncryptedCellPayload> {
+    let obj = value.as_object()?;
+    let payload = obj.get(TABLE_ROW_ENC_KEY)?.as_object()?;
+    Some(EncryptedCellPayload {
+        column: payload.get("col")?.as_str()?.to_string(),
+        kind: payload.get("kind")?.as_str()?.to_string(),
+        env_b64: payload.get("env_b64")?.as_str()?.to_string(),
+    })
+}
+
+#[cfg(test)]
+fn disk_rows_contain_encrypted_cells(disk: &TableRowsDisk) -> bool {
+    disk.rows.iter().any(|row| {
+        row.row
+            .values()
+            .any(|v| decode_encrypted_cell_payload(v).is_some())
+    })
 }
 
 fn encode_lit_for_disk(
@@ -26063,8 +26385,14 @@ fn plan_value_refs_for_rows(rows: &[RowEntry]) -> HashSet<ValueId> {
     use_refs
 }
 
-fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> {
-    if disk.format_version != 2 && disk.format_version != TABLE_ROWS_FORMAT_VERSION {
+fn decode_table_rows_disk(
+    disk: TableRowsDisk,
+    enc: Option<&RowEncryptionCodec<'_>>,
+) -> anyhow::Result<Vec<RowEntry>> {
+    if disk.format_version != 2
+        && disk.format_version != 3
+        && disk.format_version != TABLE_ROWS_FORMAT_VERSION
+    {
         anyhow::bail!("unsupported table format version: {}", disk.format_version);
     }
 
@@ -26091,6 +26419,26 @@ fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> 
     for row in disk.rows.into_iter() {
         let mut decoded = RowObject::new();
         for (k, v) in row.row.into_iter() {
+            if let Some(payload) = decode_encrypted_cell_payload(&v) {
+                let codec = enc.ok_or_else(|| {
+                    anyhow::Error::from(EncryptionLockedError {
+                        db: String::new(),
+                        table: String::new(),
+                        detail: "database master key is not registered".to_string(),
+                    })
+                })?;
+                let lit = codec
+                    .decrypt_cell(&payload.column, &payload.kind, &payload.env_b64)
+                    .map_err(|e| {
+                        anyhow::Error::from(EncryptionLockedError {
+                            db: codec.db.clone(),
+                            table: codec.table.clone(),
+                            detail: e.to_string(),
+                        })
+                    })?;
+                decoded.insert(k, lit);
+                continue;
+            }
             let lit = if let Some(refv) = decode_value_ref_payload(&v) {
                 let _kind = value_kind_from_label(&refv.kind);
                 if let Some(inline) = refv.lit {
@@ -33058,6 +33406,15 @@ mod tests {
         out
     }
 
+    fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return false;
+        }
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
     fn seed_events_table(
         engine: &mut Engine,
         payload_a: &str,
@@ -39297,6 +39654,182 @@ mod tests {
             rehydrated["databases"][0]["active_key_id"].as_str(),
             Some("k1")
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_at_rest_cells_roundtrip_and_lock_without_key() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_at_rest_roundtrip");
+        let master_key_b64 = BASE64_STANDARD.encode([9u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let secret_a = "top-secret-payload-A";
+        let secret_b = "top-secret-payload-B";
+
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+
+            seed_events_table(&mut engine, secret_a, secret_b)?;
+
+            // The plaintext secret must not appear anywhere in the on-disk table file.
+            let table_bytes = fs::read(engine.table_path("app", "events"))
+                .or_else(|_| fs::read(engine.table_segment_path("app", "events")))?;
+            assert!(
+                !contains_subslice(&table_bytes, secret_a.as_bytes()),
+                "plaintext secret leaked into the on-disk table file"
+            );
+
+            // The on-disk rows must carry encrypted cell payloads.
+            let disk: TableRowsDisk = load_json(&engine.table_path("app", "events"))
+                .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
+            assert_eq!(disk.format_version, TABLE_ROWS_FORMAT_VERSION);
+            assert!(disk_rows_contain_encrypted_cells(&disk));
+
+            // In-memory reads transparently decrypt.
+            let rows = &engine
+                .tables
+                .get(&TableKey {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                })
+                .expect("events table present")
+                .rows;
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().any(|entry| matches!(
+                entry.row.get("payload"),
+                Some(Lit::Str { v }) if v == secret_a
+            )));
+        }
+
+        // Reopen WITHOUT registering the key: the table must be locked (loaded empty) and
+        // writes/persist must be refused so the ciphertext is never overwritten.
+        {
+            let engine = Engine::open(&dir)?;
+            let key = TableKey {
+                db: "app".to_string(),
+                table: "events".to_string(),
+            };
+            assert!(engine.encrypted_locked_tables.contains(&key));
+            assert_eq!(
+                engine.tables.get(&key).map(|t| t.rows.len()).unwrap_or(0),
+                0
+            );
+            let err = engine
+                .persist_table("app", "events")
+                .expect_err("persisting a locked table must fail");
+            assert!(err.to_string().contains("encryption key required"));
+        }
+
+        // Reopen and register the key: the encrypted table unlocks and decrypts.
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            let key = TableKey {
+                db: "app".to_string(),
+                table: "events".to_string(),
+            };
+            assert!(!engine.encrypted_locked_tables.contains(&key));
+            let rows = &engine.tables.get(&key).expect("events present").rows;
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().any(|entry| matches!(
+                entry.row.get("payload"),
+                Some(Lit::Str { v }) if v == secret_b
+            )));
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_at_rest_mle_is_deterministic_for_equal_plaintext() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_at_rest_mle");
+        let master_key_b64 = BASE64_STANDARD.encode([3u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let mut engine = Engine::open(&dir)?;
+        engine
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine
+            .settings_encryption_set_mode(
+                skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                    db: "app".to_string(),
+                    mode: "enc_mle_db".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+
+        // Both rows share the same payload; MLE mode must produce identical ciphertext.
+        seed_events_table(&mut engine, "same-secret", "same-secret")?;
+
+        let disk: TableRowsDisk = load_json(&engine.table_path("app", "events"))
+            .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
+        let env_b64s: Vec<String> = disk
+            .rows
+            .iter()
+            .filter_map(|row| {
+                row.row
+                    .get("payload")
+                    .and_then(decode_encrypted_cell_payload)
+                    .map(|p| p.env_b64)
+            })
+            .collect();
+        assert_eq!(env_b64s.len(), 2);
+        assert_eq!(
+            env_b64s[0], env_b64s[1],
+            "MLE ciphertext must be deterministic"
+        );
+
+        // And the values still decrypt correctly in memory.
+        let rows = &engine
+            .tables
+            .get(&TableKey {
+                db: "app".to_string(),
+                table: "events".to_string(),
+            })
+            .expect("events present")
+            .rows;
+        assert!(rows.iter().all(|entry| matches!(
+            entry.row.get("payload"),
+            Some(Lit::Str { v }) if v == "same-secret"
+        )));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

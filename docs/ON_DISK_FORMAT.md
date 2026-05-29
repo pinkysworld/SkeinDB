@@ -645,6 +645,58 @@ Rules:
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 - v2 table-row payloads without `schema_version` remain readable and are normalized from `schema_versions.json` when loaded.
 
+#### 11.8.1 Encrypted-at-rest cells (`format_version: 4`)
+
+When a database has an active encryption profile (`ENC_RANDOM` or `ENC_MLE_DB`
+with a registered active key), the engine writes table-row files with
+`"format_version": 4` and replaces the value of each encryptable cell with a
+self-describing `"$skein_enc"` envelope object instead of storing the plaintext
+literal inline:
+
+```json
+{
+  "format_version": 4,
+  "rows": [
+    {
+      "row": {
+        "id": {"t":"u64","v":1},
+        "payload": {
+          "$skein_enc": {
+            "col": "payload",
+            "kind": "str",
+            "env_b64": "<base64 EncryptionEnvelope.stored_bytes()>"
+          }
+        }
+      },
+      "version": 1,
+      "schema_version": 4,
+      "deleted": false
+    }
+  ]
+}
+```
+
+Rules:
+- Only value-store-eligible cell kinds are encrypted (`Str`, `Json`, `Bytes`,
+  `Uuid`, `Embedding`). Scalar/key cells (e.g. integer primary keys) stay
+  plaintext so primary-key and secondary-index maintenance keep working.
+- `"$skein_enc".env_b64` is the base64 encoding of the canonical, self-describing
+  `EncryptionEnvelope` (mode tag, key id, salt/nonce, ciphertext). The plaintext
+  is `serde_json::to_vec(&Lit)` of the original cell, so the literal type is
+  recovered exactly on decrypt.
+- Under `ENC_MLE_DB`, equal plaintext within the same encryption context yields
+  an identical envelope (deterministic), which preserves equality semantics;
+  under `ENC_RANDOM` each cell uses a random nonce, so value-reference dedup
+  (`"$skein_ref"`) is disabled while encryption is active.
+- Master keys are never persisted. If a `format_version: 4` file is loaded and no
+  matching key is registered (or decryption fails), that table is marked
+  **locked**: it loads with zero rows and any persist of the table is refused so
+  the on-disk ciphertext is never overwritten or lost. Registering/activating the
+  key transparently reloads, decrypts, and unlocks the table and rebuilds its
+  indexes.
+- v2/v3 row files (plaintext, optionally value-ref-backed) remain readable; v4 is
+  only emitted when encryption is active for the owning database.
+
 ### 11.9 tables/<db>/<table>.rseg (prototype segment container v1)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
