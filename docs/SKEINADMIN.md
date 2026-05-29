@@ -249,6 +249,7 @@ Security note:
 ### 4.10 Cluster Management
 (See docs/CLUSTERING.md)
 - Node list (health, role, lag)
+- Replication stats via `cluster.replication_stats` (Observe → Replication)
 - Add node / leave node / remove node
 - Promote replica
 - Shards and placement
@@ -273,20 +274,22 @@ Security note:
 (See docs/INDEX_ADVISOR.md)
 - Ranked index suggestions from live advisor telemetry
 - Apply / dismiss actions wired to `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, and `advisor.history`
+- Dry-run retirement of unused indexes via `advisor.retire_unused`
+- Workload phase evaluation available via `advisor.evaluate` (RPC Explorer template)
 - Embedded history log for prior advisor actions
 - Observed-before and expected-after scan report for each suggestion
 - Online build progress remains backlog work
 
 
 
-### 4.13 Views (Incremental Maintenance)
+### 4.14 Views (Incremental Maintenance)
 (See `docs/research_agenda/R08_*`)
 - Create/drop views
 - Show view freshness/lag
 - Trigger refresh (incremental or full)
 - Show dependency graph edges (what base tables feed the view)
 
-### 4.14 Forensics (Verifiable WAL Queries)
+### 4.15 Forensics (Verifiable WAL Queries)
 (See `docs/AUDIT_WAL.md` and `docs/research_agenda/R06_*`)
 - Inspect chain length, checkpoint anchors, and last verified time via `maintenance.audit_status`
 - Run full-chain verification via `maintenance.audit_verify` and surface the persisted `last_verified_ms`
@@ -294,32 +297,27 @@ Security note:
 - Proof-verify the current query slice by first fetching records and then calling `forensic.verify` with the returned `records` and boundary hash
 - Export `skein.forensic.bundle.v1` report bundles with query manifest, proof, records, and verification summary
 
-### 4.15 Migration Assistant (MySQL → SkeinQL)
+### 4.16 Migration Assistant (MySQL → SkeinQL)
 (See `docs/TELEMETRY_AND_MIGRATION.md` and `docs/research_agenda/R17_*`)
 - Compatibility report (unsupported features)
 - Intent inference: detect patterns like pagination, polling, soft deletes
 - Rewrite previews: before/after SkeinQL migration hints
 - Exportable rewrite reports (JSON/Markdown/HTML) + copy-to-clipboard
 
-### 4.16 NL Query (Hardened Research Baseline)
+### 4.17 NL Query (Hardened Research Baseline)
 (See `docs/research_agenda/R12_*`)
 - Natural language prompt workspace
 - `ai.nl.translate` preview + query JSON editor
 - `ai.nl.explain` summary + preview rows + approval token
 - `ai.nl.execute` gated execution using approval token
 - Re-explain/edit loop before execution, backed by approval-token recomputation
+- Autoparameterization (R11) controls: `ai.autoparam.analyze`, `ai.autoparam.classify`, `ai.autoparam.feedback`, `ai.autoparam.metrics`, and `ai.autoparam.classifiers`
 
-### 4.17 Embeddings
+### 4.18 Embeddings
 (See `docs/research_agenda/R10_*`)
 - Ingest embedding vectors
 - Build / monitor ANN index health
 - Playground for hybrid queries (filters + ANN order-by)
-
-### 4.16 Natural Language Queries
-(See `docs/research_agenda/R12_*`)
-- NL-to-SkeinQL translation (read-only by default)
-- Explanation + dry-run preview
-- Explicit confirmation gate for write queries
 ---
 
 ## 5) API usage

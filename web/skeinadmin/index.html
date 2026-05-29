@@ -1034,7 +1034,7 @@
             </div>
             <div class="card wide"><h2>Observe</h2>
               <p class="card-summary">Snapshot live cluster, node membership, and transport state.</p>
-              <div class="actions"><button id="btnClusterStatus" class="primary sm">Status</button><button id="btnClusterNodes" class="sm">Nodes</button><button id="btnClusterTransport" class="sm">Transport</button></div>
+              <div class="actions"><button id="btnClusterStatus" class="primary sm">Status</button><button id="btnClusterNodes" class="sm">Nodes</button><button id="btnClusterReplication" class="sm">Replication</button><button id="btnClusterTransport" class="sm">Transport</button></div>
             </div>
             <div class="card wide"><h2>Enroll Nodes</h2>
               <p class="card-summary">Mint a join token and register a peer with role + URL.</p>
@@ -1517,7 +1517,8 @@
             <div class="row"><div class="field"><label>Target</label><select id="wasmTarget"><option value="wasm32-unknown-unknown">wasm32-unknown-unknown</option><option value="wasm32-wasi">wasm32-wasi</option></select></div><div class="field"><label>Result format</label><select id="wasmResultFormat"><option value="objects_json">objects_json</option><option value="rows_json">rows_json</option><option value="wasm_batch_v1">wasm_batch_v1</option></select></div></div>
             <div class="field"><label>Artifact B64</label><textarea id="wasmArtifact" rows="3" placeholder="Compile a query to fill this artifact."></textarea></div>
             <div class="row"><div class="field"><label>Args</label><textarea id="wasmArgs" rows="2" placeholder='[{"t":"u64","v":7}]'></textarea></div><div class="field"><label>Package name</label><input id="wasmPackageName" value="skein-wasm-plan" /></div></div>
-            <div class="actions"><button id="btnWasmCompile" class="primary sm">Compile</button><button id="btnWasmInspect" class="sm">Inspect</button><button id="btnWasmEdgePackage" class="sm">Edge Package</button><button id="btnWasmRun" class="sm">Run</button></div>
+            <div class="row"><div class="field"><label>Perf iterations</label><input id="wasmPerfIterations" type="number" value="100" /></div><div class="field"><label>Warmup iterations</label><input id="wasmPerfWarmup" type="number" value="10" /></div></div>
+            <div class="actions"><button id="btnWasmCompile" class="primary sm">Compile</button><button id="btnWasmInspect" class="sm">Inspect</button><button id="btnWasmPerfReport" class="sm">Perf Report</button><button id="btnWasmEdgePackage" class="sm">Edge Package</button><button id="btnWasmRun" class="sm">Run</button></div>
             <pre id="wasmOut">Ready.</pre>
           </div></div>
         </section>
@@ -1533,7 +1534,7 @@
             <div class="card wide"><h2>Index Advisor (R16)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="advDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="advTable" /></div></div>
             <div class="row"><div class="field"><label>Selected suggestion</label><input id="advSelection" placeholder="Run Synthesize and pick a suggestion" readonly /></div><div class="field"><label>Note</label><input id="advNote" placeholder="optional note for history" /></div></div>
-            <div class="actions"><button id="btnAdvSynthesize" class="primary sm">Synthesize</button><button id="btnAdvHistory" class="sm">History</button><button id="btnAdvApply" class="secondary sm">Apply</button><button id="btnAdvDismiss" class="sm">Dismiss</button></div>
+            <div class="actions"><button id="btnAdvSynthesize" class="primary sm">Synthesize</button><button id="btnAdvHistory" class="sm">History</button><button id="btnAdvApply" class="secondary sm">Apply</button><button id="btnAdvDismiss" class="sm">Dismiss</button><button id="btnAdvRetire" class="sm" title="Preview unused-index retirement candidates (dry run)">Retire Unused</button></div>
             <div id="advisorReport" class="list">Run Synthesize to see ranked index suggestions and an observed-before/expected-after report.</div>
             <pre id="advOut">Ready.</pre>
           </div></div>
@@ -1578,7 +1579,7 @@
             </div>
             <div class="card wide"><h2>Autoparameterization (R11)</h2>
               <div class="field"><label>SQL</label><textarea id="autoparamSql" rows="2" placeholder="SELECT * FROM users WHERE id = 42"></textarea></div>
-              <div class="actions"><button id="btnAutoparamAnalyze" class="primary sm">Analyze</button><button id="btnAutoparamClassify" class="sm">Classify</button></div>
+              <div class="actions"><button id="btnAutoparamAnalyze" class="primary sm">Analyze</button><button id="btnAutoparamClassify" class="sm">Classify</button><button id="btnAutoparamFeedback" class="sm" title="Record a cache-miss feedback signal for the SQL above">Feedback</button><button id="btnAutoparamMetrics" class="sm">Metrics</button><button id="btnAutoparamClassifiers" class="sm">Classifiers</button></div>
               <pre id="autoparamOut">Ready.</pre>
             </div>
           </div>

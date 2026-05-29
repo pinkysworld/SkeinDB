@@ -96,7 +96,7 @@ const PANEL_META = {
 // Research tracks
 // ---------------------------------------------------------------------------
 const RESEARCH_TRACKS = [
-  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['stats.snapshot', 'system.capabilities'], panel: 'overview', status: 'prototype' },
+  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['stats.snapshot', 'system.capabilities'], panel: 'overview', status: 'hardened' },
   { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['stats.snapshot', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.evaluate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
@@ -106,15 +106,15 @@ const RESEARCH_TRACKS = [
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.evaluate', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native protocol with prepared-query streams, 0-RTT write rejection, and rebind coverage; comparative p99 benchmarking remains open.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
   { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search and recall/latency benchmarking.', methods: ['vector.search', 'vector.benchmark', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
-  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
+  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify', 'ai.autoparam.classifiers', 'ai.autoparam.label_schema', 'ai.autoparam.feedback', 'ai.autoparam.metrics'], panel: 'nl', status: 'hardened' },
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'hardened' },
-  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch', 'query.select'], panel: 'workspace', status: 'hardened' },
+  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch', 'query.select', 'query.subscribe'], panel: 'workspace', status: 'hardened' },
   { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'replay', status: 'hardened' },
   { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with divergence guidance, rollout simulation, and controlled apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.simulate_rollout', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
-  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
+  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.evaluate', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss', 'advisor.retire_unused'], panel: 'advisor', status: 'hardened' },
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report', 'migration.report_export'], panel: 'migration', status: 'hardened' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['maintenance.replay.export', 'maintenance.replay.import', 'maintenance.replay.run'], panel: 'replay', status: 'prototype' },
-  { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
+  { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.inspect', 'wasm.plan.perf_report', 'wasm.plan.edge_package', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
   { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['maintenance.compaction.status', 'maintenance.compaction.set_policy', 'maintenance.compaction.pause', 'maintenance.compaction.resume'], panel: 'engine', status: 'hardened' }
 ];
 
@@ -4034,6 +4034,7 @@ async function txRollback() {
 // ---------------------------------------------------------------------------
 async function clusterReadStatus() { await call('cluster.status',{},'clusterOut'); }
 async function clusterReadNodes() { await call('cluster.nodes',{},'clusterOut'); }
+async function clusterReplicationStats() { await call('cluster.replication_stats',{},'clusterOut'); }
 async function clusterTransportCapabilities() { await call('transport.capabilities',{},'clusterOut'); }
 
 async function clusterCreateToken() {
@@ -6179,6 +6180,15 @@ async function wasmRun() {
     await call('wasm.plan.run', cleanParams({ artifact_b64, args, result_format }), 'wasmOut');
   } catch (e) { setOut({error:String(e)},'wasmOut'); }
 }
+async function wasmPerfReport() {
+  try {
+    const artifact_b64 = readWasmArtifact();
+    const args = parseJsonInput($('wasmArgs')?.value, 'Args') || [];
+    const iterations = parseInt($('wasmPerfIterations')?.value, 10);
+    const warmup_iterations = parseInt($('wasmPerfWarmup')?.value, 10);
+    await call('wasm.plan.perf_report', cleanParams({ artifact_b64, args, iterations: Number.isNaN(iterations) ? undefined : iterations, warmup_iterations: Number.isNaN(warmup_iterations) ? undefined : warmup_iterations }), 'wasmOut');
+  } catch (e) { setOut({error:String(e)},'wasmOut'); }
+}
 
 // ---------------------------------------------------------------------------
 // Index Advisor (R16)
@@ -6272,6 +6282,17 @@ async function advDismiss() {
   } catch (e) { setOut({error:String(e)},'advOut'); }
 }
 
+async function advRetireUnused() {
+  try {
+    const db = $('advDb')?.value.trim();
+    const table = $('advTable')?.value.trim();
+    const params = (db && table) ? { table: tableRef(db, table), dry_run: true } : { dry_run: true };
+    const res = await call('advisor.retire_unused', params, 'advOut');
+    const result = unwrapRpcResult(res, 'advisor.retire_unused');
+    showToast('Retire-unused dry run: ' + (result.retired || 0) + '/' + (result.evaluated || 0) + ' candidate(s).', 'info');
+  } catch (e) { setOut({error:String(e)},'advOut'); }
+}
+
 // ---------------------------------------------------------------------------
 // NL Lab (R11-R12)
 // ---------------------------------------------------------------------------
@@ -6309,6 +6330,18 @@ async function autoparamAnalyze() {
 
 async function autoparamClassify() {
   try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('ai.autoparam.classify',{sql},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
+}
+
+async function autoparamFeedback() {
+  try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('ai.autoparam.feedback',{sql, cache_event:'miss'},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
+}
+
+async function autoparamMetrics() {
+  try { await call('ai.autoparam.metrics',{},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
+}
+
+async function autoparamClassifiers() {
+  try { await call('ai.autoparam.classifiers',{},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -6444,7 +6477,7 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'workspace', title: 'SQL Workspace',     purpose: 'Run SQL/SkeinQL, prepare statements, manage explicit transaction handles.', actions: 'Execute (⌘↵), prepare/execute, begin/commit/rollback, ETag-aware patches.' },
   { panel: 'schema',    title: 'Schema',            purpose: 'Database, table, column, secondary-index, and schema-evolution DDL with conflict-free rollout planning.', actions: 'CREATE/ALTER tables, manage indexes, propose/inspect/simulate/apply schema changes (R15).' },
   { panel: 'data',      title: 'Data Browse',       purpose: 'Row browser with filters, pagination, and inline edits.', actions: 'Filter, paginate, patch rows, cross-link to CDC and replay panels.' },
-  { panel: 'cluster',   title: 'Cluster',           purpose: 'Topology, transport capabilities, shard placement, and node enrollment.', actions: 'Observe nodes, enroll members, plan shard placement, inspect QUIC/HTTP transport.' },
+  { panel: 'cluster',   title: 'Cluster',           purpose: 'Topology, transport capabilities, shard placement, and node enrollment.', actions: 'Observe nodes, inspect replication stats, enroll members, plan shard placement, inspect QUIC/HTTP transport.' },
   { panel: 'settings',  title: 'Settings',          purpose: 'Server settings and feature flags with safe round-tripping.', actions: 'Read/update settings; toggle dedup, MVCC, cache, and research feature flags.' },
   { panel: 'engine',    title: 'Engine Config',     purpose: 'Storage, compaction, energy policy, and learned-index controls.', actions: 'Configure compaction (R20 energy-aware), MVCC, learned ValueID index (R01).' },
   { panel: 'users',     title: 'Users & Grants',    purpose: 'Identity and access control surface.', actions: 'Create users, assign roles, grant per-database privileges.' },
@@ -6460,10 +6493,10 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with filtered verification and forensic proof bundles.', actions: 'Audit status, verify chain, query by DB/table/op/id/filter, proof-verify the returned slice, and export report bundles.' },
   { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, evaluate incremental-vs-full correctness, status, drop, explain dependencies.' },
   { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions, conflict evaluation, and values-only Wasm merge modules.', actions: 'Apply/register policies, simulate current+incoming rows, evaluate conflict workloads, manage Wasm modules.' },
-  { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, run, inspect plan artifacts, package for edge.' },
-  { panel: 'advisor',   title: 'Index Advisor',     purpose: 'Workload-driven index recommendation and synthesis.', actions: 'Synthesize, history, apply, dismiss recommendations.' },
+  { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, inspect, perf-report, run, and edge-package plan artifacts.' },
+  { panel: 'advisor',   title: 'Index Advisor',     purpose: 'Workload-driven index recommendation and synthesis.', actions: 'Synthesize, history, apply, dismiss, and dry-run retire-unused recommendations.' },
   { panel: 'migration', title: 'Migration',         purpose: 'Compatibility telemetry, rewrite previews, intent reports.', actions: 'Preview rewrites, export intent reports as JSON/Markdown.' },
-  { panel: 'nl',        title: 'NL Lab',            purpose: 'Natural-language to SkeinQL translation and SQL autoparameterization.', actions: 'Translate, explain, approve-and-execute; classify and analyze.' },
+  { panel: 'nl',        title: 'NL Lab',            purpose: 'Natural-language to SkeinQL translation and SQL autoparameterization.', actions: 'Translate, explain, approve-and-execute; analyze, classify, submit feedback, view metrics and classifiers.' },
   { panel: 'rpc',       title: 'RPC Explorer',      purpose: 'Browse every advertised method and dispatch JSON params directly.', actions: 'Filter methods, load templates, send raw RPC.' },
   { panel: 'help',      title: 'Help & Docs',       purpose: 'This page. Quick start, panel reference, research index, shortcuts, glossary, and doc links.', actions: 'Search topics, jump to any panel, open canonical documentation.' }
 ];
@@ -6971,6 +7004,7 @@ if ($('dataTable')) $('dataTable').addEventListener('change', () => { if ($('dat
 // Cluster
 wire('btnClusterStatus', clusterReadStatus);
 wire('btnClusterNodes', clusterReadNodes);
+wire('btnClusterReplication', clusterReplicationStats);
 wire('btnClusterTransport', clusterTransportCapabilities);
 wire('btnClusterCreateToken', clusterCreateToken);
 wire('btnClusterJoinNode', clusterJoinNode);
@@ -7101,6 +7135,7 @@ wire('btnMergeWasmDrop', mergeWasmDrop);
 // Wasm
 wire('btnWasmCompile', wasmCompile);
 wire('btnWasmInspect', wasmInspect);
+wire('btnWasmPerfReport', wasmPerfReport);
 wire('btnWasmEdgePackage', wasmEdgePackage);
 wire('btnWasmRun', wasmRun);
 
@@ -7109,6 +7144,7 @@ wire('btnAdvSynthesize', advSynthesize);
 wire('btnAdvHistory', advHistory);
 wire('btnAdvApply', advApply);
 wire('btnAdvDismiss', advDismiss);
+wire('btnAdvRetire', advRetireUnused);
 if ($('advisorReport')) $('advisorReport').addEventListener('click', (event) => {
   const btn = event.target.closest('[data-adv-source][data-adv-index]');
   if (!btn) return;
@@ -7134,6 +7170,9 @@ wire('btnNlExplain', nlExplain);
 wire('btnNlExecute', nlExecute);
 wire('btnAutoparamAnalyze', autoparamAnalyze);
 wire('btnAutoparamClassify', autoparamClassify);
+wire('btnAutoparamFeedback', autoparamFeedback);
+wire('btnAutoparamMetrics', autoparamMetrics);
+wire('btnAutoparamClassifiers', autoparamClassifiers);
 
 // Migration
 wire('btnMigrationPreview', migrationPreview);

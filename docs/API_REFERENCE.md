@@ -80,12 +80,12 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `merge.*` | register, apply, simulate, evaluate, Wasm registry | Experimental | Optimistic conflict resolution, values-only Wasm merge policies, and conflict workload evaluation. |
 | `view.*` | create, drop, refresh, evaluate, status, explain deps | Experimental | Incremental/full/auto materialized views plus an incremental-vs-full oracle/benchmark report. |
 | `vector.*` | insert, search, benchmark, index status | Experimental | Embedding storage, ANN search, and exact-vs-indexed recall/latency measurement. |
-| `ai.*` | autoparam classification/analysis, NL translate/explain/execute | Experimental | Verification-gated natural-language workflows. |
+| `ai.*` | autoparam classification/analysis/feedback/metrics, NL translate/explain/execute | Experimental | Verification-gated natural-language workflows. |
 | `advisor.*` | synthesize, apply, retire_unused, evaluate, dismiss, history | Experimental | Dependency-driven index suggestions, workload-shift convergence evaluation, equality/single-range/order/group latency benchmarks, and lifecycle controls. |
 | `migration.*` | intent report, rewrite preview, report export | Experimental | Migration intent detection and reporting. |
 | `maintenance.*` | audit, compaction, history GC, replay export/import/run | Core + experimental | Operational maintenance and replay bundles; replay export supports optional primary-key redaction. |
 | `edge.*` | bundle request/apply/status | Experimental | Bounded replay bundles for edge replication. |
-| `wasm.plan.*` | compile, inspect, edge_package, run | Prototype | Host-interpreted Wasm query-operator artifact ABI plus edge packaging helper. |
+| `wasm.plan.*` | compile, inspect, perf_report, edge_package, run | Prototype | Host-interpreted Wasm query-operator artifact ABI, micro-benchmark perf report, plus edge packaging helper. |
 | `security.token.*` | create, list, revoke | Core | Bearer-token management. |
 | `admin.user.*` | create, list, drop, grant, revoke | Core | Embedded admin user/role helpers. |
 
@@ -121,7 +121,8 @@ sql.exec, data.get, data.insert, data.update, data.delete,
 query.prepare, query.execute_prepared, query.select, query.patch, query.subscribe,
 cdc.subscribe_table, cdc.subscribe_query, cdc.poll, cdc.pause, cdc.resume, cdc.ack, cdc.close,
 vector.insert, vector.search, vector.benchmark, vector.index.status,
-ai.autoparam.classify, ai.autoparam.analyze, ai.nl.translate, ai.nl.explain, ai.nl.execute,
+ai.autoparam.classify, ai.autoparam.analyze, ai.autoparam.classifiers, ai.autoparam.label_schema, ai.autoparam.feedback, ai.autoparam.metrics,
+ai.nl.translate, ai.nl.explain, ai.nl.execute,
 dp.aggregate, dp.evaluate, dp.budget.set, dp.budget.get, dp.audit.log,
 oblivious.policy.set, oblivious.policy.get, oblivious.explain, oblivious.evaluate,
 forensic.query, forensic.verify, forensic.export,
@@ -133,7 +134,7 @@ settings.encryption.status, settings.encryption.set_mode, settings.encryption.re
 settings.encryption.set_active_key, settings.encryption.rotate_key,
 edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.evaluate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
-wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
+wasm.plan.compile, wasm.plan.inspect, wasm.plan.perf_report, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.evaluate, view.status, view.explain_deps,
 advisor.index_synthesize, advisor.apply_index, advisor.retire_unused, advisor.evaluate, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,

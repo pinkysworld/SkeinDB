@@ -364,7 +364,7 @@ Runtime baseline: v0.3.18 plus current main, SkeinQL 1.0, 145 advertised RPC met
 </tr>
 <tr>
 <td><code>ai.*</code></td>
-<td>autoparam classification/analysis, NL translate/explain/execute</td>
+<td>autoparam classification/analysis/feedback/metrics, NL translate/explain/execute</td>
 <td>Experimental</td>
 <td>Verification-gated natural-language workflows.</td>
 </tr>
@@ -394,9 +394,9 @@ Runtime baseline: v0.3.18 plus current main, SkeinQL 1.0, 145 advertised RPC met
 </tr>
 <tr>
 <td><code>wasm.plan.*</code></td>
-<td>compile, inspect, edge_package, run</td>
+<td>compile, inspect, perf_report, edge_package, run</td>
 <td>Prototype</td>
-<td>Host-interpreted Wasm query-operator artifact ABI plus edge packaging helper.</td>
+<td>Host-interpreted Wasm query-operator artifact ABI, micro-benchmark perf report, plus edge packaging helper.</td>
 </tr>
 <tr>
 <td><code>security.token.*</code></td>
@@ -440,7 +440,8 @@ sql.exec, data.get, data.insert, data.update, data.delete,
 query.prepare, query.execute_prepared, query.select, query.patch, query.subscribe,
 cdc.subscribe_table, cdc.subscribe_query, cdc.poll, cdc.pause, cdc.resume, cdc.ack, cdc.close,
 vector.insert, vector.search, vector.benchmark, vector.index.status,
-ai.autoparam.classify, ai.autoparam.analyze, ai.nl.translate, ai.nl.explain, ai.nl.execute,
+ai.autoparam.classify, ai.autoparam.analyze, ai.autoparam.classifiers, ai.autoparam.label_schema, ai.autoparam.feedback, ai.autoparam.metrics,
+ai.nl.translate, ai.nl.explain, ai.nl.execute,
 dp.aggregate, dp.evaluate, dp.budget.set, dp.budget.get, dp.audit.log,
 oblivious.policy.set, oblivious.policy.get, oblivious.explain, oblivious.evaluate,
 forensic.query, forensic.verify, forensic.export,
@@ -452,7 +453,7 @@ settings.encryption.status, settings.encryption.set_mode, settings.encryption.re
 settings.encryption.set_active_key, settings.encryption.rotate_key,
 edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.evaluate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
-wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
+wasm.plan.compile, wasm.plan.inspect, wasm.plan.perf_report, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.evaluate, view.status, view.explain_deps,
 advisor.index_synthesize, advisor.apply_index, advisor.retire_unused, advisor.evaluate, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,
