@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.18 - 2026-05-28
+
+- Adds encrypted-at-rest cell payloads for table rows, introducing on-disk format v4 with transparent encrypt-on-write / decrypt-on-read of cell values while keeping older v1-v3 segments readable.
+- Expands PostgreSQL `COPY` parity: PostgreSQL-style `WITH (TEXT|CSV|BINARY)` aliases and legacy bare `WITH TEXT|CSV|BINARY` forms, text/csv `NULL '...'`, CSV `HEADER MATCH` on `COPY ... FROM STDIN`, and single-byte `QUOTE` and `ESCAPE` on supported CSV forms.
+- Expands virtual `pg_catalog` coverage with `pg_am`, `pg_description`, and related probes for broader tooling introspection.
+- Fixes a `COPY FROM STDIN` regression where text-format ingestion panicked the connection worker (clients saw "unexpected end of file"); text and CSV `COPY FROM STDIN` round-trips are restored.
+- Validates the release with a green `cargo test --workspace`, clean `cargo clippy --workspace --all-targets`, and the 15-test SkeinAdmin Playwright live-UI suite. Roadmap stays **140 done / 0 open** and research **109 done / 0 open** (R18/R19 prototype caveats intact).
+
 ## v0.3.17 - 2026-05-13
 
 - Improves SQL compatibility catalogs with MySQL `information_schema.check_constraints`, `information_schema.parameters`, and `information_schema.tablespaces` probes.

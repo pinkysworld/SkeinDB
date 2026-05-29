@@ -1,7 +1,7 @@
 class Skeindb < Formula
   desc "Single-binary database server with SkeinQL, SkeinAdmin, MySQL, and PostgreSQL surfaces"
   homepage "https://github.com/pinkysworld/SkeinDB"
-  url "https://github.com/pinkysworld/SkeinDB/releases/download/v0.3.17/skeindb-0.3.17-source.tar.gz"
+  url "https://github.com/pinkysworld/SkeinDB/releases/download/v0.3.18/skeindb-0.3.18-source.tar.gz"
   sha256 "9ad7ec5d1afbc267cbe5de734840529cc7cbd3a788dbfa49f378e503267aea2b"
   head "https://github.com/pinkysworld/SkeinDB.git", branch: "main"
   license "Apache-2.0"

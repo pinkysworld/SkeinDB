@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
 Last updated: 2026-05-27
-Runtime baseline: v0.3.17 plus current main, SkeinQL 1.0, 145 advertised RPC methods
+Runtime baseline: v0.3.18 plus current main, SkeinQL 1.0, 145 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
