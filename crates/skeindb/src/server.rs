@@ -861,7 +861,73 @@ struct StatsAlertRoute {
 
 #[derive(Debug, Default)]
 struct StatsAlertDeliveryState {
-    active: HashSet<String>,
+    /// Content-keyed map of currently active deliveries -> last delivered epoch ms.
+    active: HashMap<String, u64>,
+    /// Stable-identity-keyed map of alert first-seen epoch ms (used for escalation).
+    first_seen: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StatsAlertEscalationConfig {
+    /// Re-deliver an already-active alert once this many ms have elapsed since the
+    /// last delivery. `0` disables re-firing (deliver once per active alert).
+    refire_after_ms: u64,
+    /// Escalate a `warning` alert to `critical` once it has been continuously active
+    /// for this many ms. `0` disables severity escalation.
+    escalate_after_ms: u64,
+}
+
+fn stats_alert_escalation_config(
+    settings: &serde_json::Map<String, Value>,
+) -> StatsAlertEscalationConfig {
+    let obj = settings
+        .get("observability.alert_escalation")
+        .and_then(Value::as_object);
+    let secs = |key: &str| -> u64 {
+        obj.and_then(|o| o.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    StatsAlertEscalationConfig {
+        refire_after_ms: secs("refire_after_secs").saturating_mul(1000),
+        escalate_after_ms: secs("escalate_after_secs").saturating_mul(1000),
+    }
+}
+
+/// Returns true when an active `warning` alert has persisted long enough to be
+/// escalated to `critical`.
+fn stats_alert_should_escalate(
+    now_ms: u64,
+    first_seen_ms: u64,
+    severity: &str,
+    config: &StatsAlertEscalationConfig,
+) -> bool {
+    config.escalate_after_ms > 0
+        && severity.eq_ignore_ascii_case("warning")
+        && now_ms.saturating_sub(first_seen_ms) >= config.escalate_after_ms
+}
+
+/// Returns true when an already-delivered alert is due to be re-delivered.
+fn stats_alert_should_refire(
+    now_ms: u64,
+    last_delivered_ms: u64,
+    config: &StatsAlertEscalationConfig,
+) -> bool {
+    config.refire_after_ms > 0 && now_ms.saturating_sub(last_delivered_ms) >= config.refire_after_ms
+}
+
+/// Stable identity for an alert, independent of its mutable severity/title fields.
+/// Used to track first-seen time across snapshots for escalation decisions.
+fn stats_alert_identity_key(item: &Value) -> String {
+    let identity = serde_json::json!({
+        "code": item.get("code").cloned().unwrap_or(Value::Null),
+        "component": item.get("component").cloned().unwrap_or(Value::Null),
+        "panel": item.get("panel").cloned().unwrap_or(Value::Null),
+    });
+    let mut hasher = Sha1::new();
+    hasher.update(serde_json::to_vec(&identity).unwrap_or_default());
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
 fn stats_alert_route_string_list(obj: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
@@ -990,10 +1056,60 @@ fn stats_alert_delivery_key(route_id: &str, target: &str, item: &Value) -> Strin
     digest.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
-async fn deliver_stats_snapshot_alerts(state: &AppState, alerts: &mut Value) {
+async fn deliver_stats_snapshot_alerts(
+    state: &AppState,
+    alerts: &mut Value,
+    routes: &[StatsAlertRoute],
+    config: StatsAlertEscalationConfig,
+) {
+    let now_ms = now_unix_ms_u64();
     let Some(items) = alerts.get_mut("items").and_then(Value::as_array_mut) else {
         return;
     };
+
+    // Escalation pre-pass: track each alert's first-seen time by stable identity and,
+    // when configured, escalate a persistent `warning` to `critical` before delivery.
+    let mut escalated = 0u64;
+    {
+        let mut seen_identities = HashSet::new();
+        for item in items.iter_mut() {
+            let identity = stats_alert_identity_key(item);
+            seen_identities.insert(identity.clone());
+            let first_seen = {
+                let mut delivery = state.alert_delivery.lock().unwrap();
+                *delivery.first_seen.entry(identity).or_insert(now_ms)
+            };
+            let severity = item
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if stats_alert_should_escalate(now_ms, first_seen, &severity, &config) {
+                escalated = escalated.saturating_add(1);
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert(
+                        "severity".to_string(),
+                        Value::String("critical".to_string()),
+                    );
+                    obj.insert("escalated".to_string(), Value::Bool(true));
+                    obj.insert("escalated_from".to_string(), Value::String(severity));
+                }
+                // Severity changed: re-evaluate route matches so critical-only routes apply.
+                let new_routes = stats_alert_item_routes(item, routes);
+                if let Some(obj) = item.as_object_mut() {
+                    if new_routes.is_empty() {
+                        obj.remove("routes");
+                    } else {
+                        obj.insert("routes".to_string(), Value::Array(new_routes));
+                    }
+                }
+            }
+        }
+        let mut delivery = state.alert_delivery.lock().unwrap();
+        delivery
+            .first_seen
+            .retain(|key, _| seen_identities.contains(key));
+    }
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -1055,11 +1171,12 @@ async fn deliver_stats_snapshot_alerts(state: &AppState, alerts: &mut Value) {
                 seen_active.insert(delivery_key.clone());
                 let should_send = {
                     let mut delivery = state.alert_delivery.lock().unwrap();
-                    if delivery.active.contains(&delivery_key) {
-                        false
-                    } else {
-                        delivery.active.insert(delivery_key.clone());
-                        true
+                    match delivery.active.get(&delivery_key).copied() {
+                        Some(last) if !stats_alert_should_refire(now_ms, last, &config) => false,
+                        _ => {
+                            delivery.active.insert(delivery_key.clone(), now_ms);
+                            true
+                        }
                     }
                 };
                 if !should_send {
@@ -1124,7 +1241,44 @@ async fn deliver_stats_snapshot_alerts(state: &AppState, alerts: &mut Value) {
 
     {
         let mut delivery = state.alert_delivery.lock().unwrap();
-        delivery.active.retain(|key| seen_active.contains(key));
+        delivery.active.retain(|key, _| seen_active.contains(key));
+    }
+
+    // Escalation may have rewritten item severities; refresh the top-level summary.
+    if escalated > 0 {
+        let (critical, warning, total) = alerts
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                let critical = items
+                    .iter()
+                    .filter(|item| item.get("severity").and_then(Value::as_str) == Some("critical"))
+                    .count() as u64;
+                let warning = items
+                    .iter()
+                    .filter(|item| item.get("severity").and_then(Value::as_str) == Some("warning"))
+                    .count() as u64;
+                (critical, warning, items.len() as u64)
+            })
+            .unwrap_or((0, 0, 0));
+        let status = if critical > 0 {
+            "critical"
+        } else if warning > 0 {
+            "warning"
+        } else {
+            "healthy"
+        };
+        if let Some(obj) = alerts.as_object_mut() {
+            obj.insert("status".to_string(), Value::String(status.to_string()));
+            obj.insert(
+                "summary".to_string(),
+                serde_json::json!({
+                    "critical": critical,
+                    "warning": warning,
+                    "total": total,
+                }),
+            );
+        }
     }
 
     if let Some(routing) = alerts.get_mut("routing").and_then(Value::as_object_mut) {
@@ -1135,6 +1289,7 @@ async fn deliver_stats_snapshot_alerts(state: &AppState, alerts: &mut Value) {
                 "suppressed": suppressed,
                 "failed": failed,
                 "unsupported": unsupported,
+                "escalated": escalated,
             }),
         );
     }
@@ -32233,8 +32388,12 @@ async fn stats_snapshot(state: &AppState) -> Value {
         let settings = state.settings.lock().unwrap();
         stats_alert_routes(&settings)
     };
+    let escalation_config = {
+        let settings = state.settings.lock().unwrap();
+        stats_alert_escalation_config(&settings)
+    };
     let mut alerts = stats_snapshot_alerts(&compaction_runtime, &cdc, &alert_routes);
-    deliver_stats_snapshot_alerts(state, &mut alerts).await;
+    deliver_stats_snapshot_alerts(state, &mut alerts, &alert_routes, escalation_config).await;
     let cluster = state.cluster.lock().unwrap().clone();
     let (
         total_rpc,
@@ -42810,6 +42969,202 @@ mod tests {
             Some(1)
         );
         assert_eq!(seen_payloads.lock().unwrap().len(), 1);
+
+        remote.abort();
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn stats_alert_escalation_config_parses_seconds_to_ms() {
+        let mut settings = serde_json::Map::new();
+        assert_eq!(
+            stats_alert_escalation_config(&settings).refire_after_ms,
+            0,
+            "missing config disables refire"
+        );
+        assert_eq!(
+            stats_alert_escalation_config(&settings).escalate_after_ms,
+            0
+        );
+
+        settings.insert(
+            "observability.alert_escalation".to_string(),
+            serde_json::json!({"refire_after_secs": 30, "escalate_after_secs": 120}),
+        );
+        let config = stats_alert_escalation_config(&settings);
+        assert_eq!(config.refire_after_ms, 30_000);
+        assert_eq!(config.escalate_after_ms, 120_000);
+    }
+
+    #[test]
+    fn stats_alert_should_refire_respects_cooldown() {
+        let disabled = StatsAlertEscalationConfig::default();
+        assert!(!stats_alert_should_refire(1_000_000, 0, &disabled));
+
+        let config = StatsAlertEscalationConfig {
+            refire_after_ms: 10_000,
+            escalate_after_ms: 0,
+        };
+        assert!(!stats_alert_should_refire(15_000, 10_000, &config));
+        assert!(stats_alert_should_refire(20_000, 10_000, &config));
+        assert!(stats_alert_should_refire(21_000, 10_000, &config));
+    }
+
+    #[test]
+    fn stats_alert_should_escalate_only_warnings_after_window() {
+        let config = StatsAlertEscalationConfig {
+            refire_after_ms: 0,
+            escalate_after_ms: 60_000,
+        };
+        // Disabled by default.
+        assert!(!stats_alert_should_escalate(
+            120_000,
+            0,
+            "warning",
+            &StatsAlertEscalationConfig::default()
+        ));
+        // Not yet elapsed.
+        assert!(!stats_alert_should_escalate(50_000, 0, "warning", &config));
+        // Warning past window escalates.
+        assert!(stats_alert_should_escalate(60_000, 0, "warning", &config));
+        // Critical never escalates further.
+        assert!(!stats_alert_should_escalate(
+            200_000, 0, "critical", &config
+        ));
+    }
+
+    #[test]
+    fn stats_alert_identity_key_ignores_severity_and_title() {
+        let warning = serde_json::json!({
+            "code": "query_tail_latency",
+            "component": "query",
+            "panel": "telemetry",
+            "severity": "warning",
+            "title": "Slow queries are accumulating",
+        });
+        let critical = serde_json::json!({
+            "code": "query_tail_latency",
+            "component": "query",
+            "panel": "telemetry",
+            "severity": "critical",
+            "title": "Query tail latency is elevated",
+        });
+        assert_eq!(
+            stats_alert_identity_key(&warning),
+            stats_alert_identity_key(&critical),
+            "identity must be stable across severity/title changes"
+        );
+
+        let other = serde_json::json!({
+            "code": "cdc_resnapshot_required",
+            "component": "cdc",
+            "panel": "telemetry",
+        });
+        assert_ne!(
+            stats_alert_identity_key(&warning),
+            stats_alert_identity_key(&other)
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_refires_alert_after_cooldown() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_alert_escalation_refire");
+        let mut engine = Engine::open(&dir)?;
+        engine.set_cdc_retention_events_for_test(2);
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let seen_payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let payloads_ref = seen_payloads.clone();
+        let app = Router::new().route(
+            "/notify",
+            post(move |Json(payload): Json<Value>| {
+                let payloads_ref = payloads_ref.clone();
+                async move {
+                    payloads_ref.lock().unwrap().push(payload);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let remote = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // refire_after_secs = 1 re-delivers an active alert once 1s has elapsed since
+        // its last delivery (0 would keep the deliver-once-per-active behavior).
+        let configured = call_rpc(
+            &state,
+            "settings.set",
+            serde_json::json!({
+                "observability.alert_routes": [
+                    {
+                        "id": "ops-webhook",
+                        "min_severity": "critical",
+                        "components": ["cdc"],
+                        "targets": [format!("http://{}/notify", addr)]
+                    }
+                ],
+                "observability.alert_escalation": {"refire_after_secs": 1}
+            }),
+        )
+        .await;
+        assert!(configured.ok);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            serde_json::json!({"db":"app","table":"events"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+        for id in 1..=3 {
+            let insert = call_rpc(
+                &state,
+                "data.insert",
+                serde_json::json!({
+                    "into": {"db":"app","table":"events"},
+                    "rows": [{"id": {"t":"u64","v": id}}]
+                }),
+            )
+            .await;
+            assert!(insert.ok);
+        }
+
+        let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
+        assert!(first.ok);
+        let first_alerts = first.result.unwrap()["alerts"].clone();
+        assert_eq!(
+            first_alerts["routing"]["delivery"]["delivered"].as_u64(),
+            Some(1)
+        );
+
+        // Wait beyond the 1s cooldown; the same (unchanged) alert is still active and
+        // should now re-fire rather than stay suppressed.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let second = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
+        assert!(second.ok);
+        let second_alerts = second.result.unwrap()["alerts"].clone();
+        assert_eq!(
+            second_alerts["routing"]["delivery"]["delivered"].as_u64(),
+            Some(1),
+            "alert should re-fire after the cooldown elapses"
+        );
+        assert_eq!(seen_payloads.lock().unwrap().len(), 2);
 
         remote.abort();
         std::fs::remove_dir_all(&dir).ok();

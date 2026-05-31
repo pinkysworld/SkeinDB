@@ -1,6 +1,6 @@
 # Observability and Server Statistics
 
-Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, and `stats.snapshot`-driven HTTP(S) webhook delivery landed; standalone escalation automation is still evolving
+Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, `stats.snapshot`-driven HTTP(S) webhook delivery, and configurable escalation automation (cooldown re-fire + warning->critical severity ladder) landed; non-HTTP sinks and retry policies remain backlog
 Last updated: 2026-05-27
 
 This document defines the observability surface of SkeinDB:
@@ -235,7 +235,11 @@ Delivered operator routing baseline:
 - per-alert matched route IDs/targets in `stats.snapshot.alerts.items[*].routes`
 - top-level route summary counters in `stats.snapshot.alerts.routing`
 - HTTP(S) route targets receive JSON `POST` delivery once per active alert while `stats.snapshot` is being evaluated
-- broader escalation policies, retries, and non-HTTP sinks remain backlog work
+- escalation automation via `observability.alert_escalation`:
+  - `refire_after_secs` (default `0`, disabled): re-deliver an already-active alert once this many seconds have elapsed since its last delivery instead of suppressing it for the lifetime of the alert
+  - `escalate_after_secs` (default `0`, disabled): promote a `warning` alert to `critical` once it has been continuously active for this many seconds; escalated items gain `escalated: true` / `escalated_from`, re-match routes at the higher severity, and update the snapshot `summary`/`status`
+  - `stats.snapshot.alerts.routing.delivery.escalated` reports how many alerts were escalated in the current evaluation
+- non-HTTP sinks and per-target retry policies remain backlog work
 
 ---
 
