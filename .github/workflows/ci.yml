@@ -81,6 +81,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: SkeinQL Node SDK example tests
+        run: node --test examples/sdk/node/
+
       - name: Install Playwright dependencies
         working-directory: tests/playwright
         run: |
@@ -119,3 +122,6 @@ jobs:
 
       - name: Build documentation site
         run: python scripts/build_docs_site.py
+
+      - name: SkeinQL Python SDK example tests
+        run: python -m unittest discover -s examples/sdk/python
