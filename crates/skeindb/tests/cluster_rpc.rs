@@ -696,6 +696,13 @@ async fn admin_embeds_live_console_surface() -> anyhow::Result<()> {
         .error_for_status()?
         .text()
         .await?;
+    let catalog = client
+        .get(format!("{}/admin/src/lib/catalog.js", server.base_url()))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
 
     assert!(html.contains("data-panel=\"telemetry\""));
     assert!(html.contains("data-panel=\"security\""));
@@ -716,7 +723,10 @@ async fn admin_embeds_live_console_surface() -> anyhow::Result<()> {
     assert!(body.contains("dp.audit.log"));
     assert!(body.contains("researchSettingsLoad"));
     assert!(body.contains("renderSettingsCapabilities"));
-    assert!(body.contains("security:"));
+    // PANEL_META (which carries the per-panel "security:" capability hints)
+    // now lives in the extracted catalog.js ES module, imported by main.js.
+    assert!(body.contains("from './lib/catalog.js'"));
+    assert!(catalog.contains("security:"));
     assert!(body.contains("advisorReport"));
     assert!(!body.contains("advisor.synthesize"));
     assert!(!body.contains("call('advisor.apply'"));
