@@ -97,6 +97,10 @@ const ADMIN_MAIN_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../web/skeinadmin/src/main.js"
 ));
+const ADMIN_CATALOG_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../web/skeinadmin/src/lib/catalog.js"
+));
 const MYSQL_PROTOCOL_VERSION: u8 = 0x0a;
 const MYSQL_SERVER_VERSION: &str = "8.0.0-skeindb";
 const MYSQL_AUTH_PLUGIN: &str = "mysql_native_password";
@@ -127,6 +131,10 @@ fn admin_index_html() -> &'static str {
 
 fn admin_main_js() -> &'static str {
     ADMIN_MAIN_JS
+}
+
+fn admin_catalog_js() -> &'static str {
+    ADMIN_CATALOG_JS
 }
 
 #[derive(Debug, Clone)]
@@ -16249,10 +16257,13 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .route("/console", get(console_handler))
         .route("/console/", get(console_handler))
         .route("/console/src/main.js", get(console_main_js_handler))
+        .route("/console/src/lib/catalog.js", get(admin_catalog_js_handler))
         .route("/admin", get(admin_handler))
         .route("/admin/", get(admin_handler))
         .route("/admin/src/main.js", get(admin_main_js_handler))
+        .route("/admin/src/lib/catalog.js", get(admin_catalog_js_handler))
         .route("/src/main.js", get(admin_main_js_handler))
+        .route("/src/lib/catalog.js", get(admin_catalog_js_handler))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -16520,6 +16531,13 @@ async fn console_main_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         admin_main_js(),
+    )
+}
+
+async fn admin_catalog_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        admin_catalog_js(),
     )
 }
 
@@ -33089,7 +33107,6 @@ mod tests {
         assert!(js.contains("vector.benchmark"));
         assert!(js.contains("vector.index.status"));
         assert!(js.contains("dp.audit.log"));
-        assert!(js.contains("security:"));
         assert!(js.contains("advisorReport"));
         assert!(js.contains("easyDoCreateTable"));
         assert!(js.contains("easyRenderDataGrid"));
@@ -33102,6 +33119,21 @@ mod tests {
         assert!(!js.contains("call('advisor.apply'"));
         assert!(!js.contains("dp.audit_log"));
         assert!(!js.contains("vector.index_status"));
+        // The static catalog data now lives in a separate ES module that main.js
+        // imports; the binary must embed and serve it for the console to boot.
+        assert!(js.contains(
+            "import { PANEL_META, RESEARCH_TRACKS, FEATURE_CENTER } from './lib/catalog.js';"
+        ));
+        assert!(!js.contains("const PANEL_META = {"));
+        assert!(!js.contains("const RESEARCH_TRACKS = ["));
+        assert!(!js.contains("const FEATURE_CENTER = ["));
+        let catalog = admin_catalog_js();
+        assert!(catalog.contains("export const PANEL_META"));
+        assert!(catalog.contains("export const RESEARCH_TRACKS"));
+        assert!(catalog.contains("export const FEATURE_CENTER"));
+        assert!(catalog.contains("'R19'"));
+        assert!(catalog.contains("'R20'"));
+        assert!(catalog.contains("security:"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
