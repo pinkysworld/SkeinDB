@@ -13442,6 +13442,159 @@ fn pg_copy_value_to_sql_literal(value: Option<&str>, kind: &str) -> Result<Strin
     }
 }
 
+/// Decode a single PostgreSQL binary COPY field into its canonical text form, using
+/// the destination column `kind` to pick the right interpretation. The resulting text
+/// is fed back through [`pg_copy_value_to_sql_literal`], so it must match the textual
+/// forms that function accepts.
+fn pg_copy_decode_binary_field(kind: &str, raw: &[u8]) -> Result<String, String> {
+    let read_signed = |raw: &[u8]| -> Result<i64, String> {
+        match raw.len() {
+            2 => Ok(i16::from_be_bytes([raw[0], raw[1]]) as i64),
+            4 => Ok(i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as i64),
+            8 => Ok(i64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ])),
+            other => Err(format!(
+                "COPY binary integer field has unsupported width {other}"
+            )),
+        }
+    };
+
+    match kind {
+        "u64" | "u32" => {
+            let signed = read_signed(raw)?;
+            if signed < 0 {
+                return Err(format!(
+                    "COPY binary value {signed} is negative for unsigned column"
+                ));
+            }
+            Ok(signed.to_string())
+        }
+        "i64" | "int" | "integer" | "i32" => read_signed(raw).map(|v| v.to_string()),
+        "f64" | "float" | "double" => match raw.len() {
+            4 => Ok(f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]).to_string()),
+            8 => Ok(f64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ])
+            .to_string()),
+            other => Err(format!(
+                "COPY binary float field has unsupported width {other}"
+            )),
+        },
+        "bool" => match raw {
+            [0] => Ok("f".to_string()),
+            [_] => Ok("t".to_string()),
+            _ => Err("COPY binary bool field must be exactly one byte".to_string()),
+        },
+        "bytes" => Err("COPY FROM STDIN does not yet support bytes columns".to_string()),
+        "uuid" => {
+            if raw.len() != 16 {
+                return Err("COPY binary uuid field must be 16 bytes".to_string());
+            }
+            let hex: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+            Ok(format!(
+                "{}-{}-{}-{}-{}",
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
+            ))
+        }
+        _ => String::from_utf8(raw.to_vec())
+            .map_err(|_| "COPY binary text field is not valid UTF-8".to_string()),
+    }
+}
+
+/// Parse a buffered PostgreSQL binary COPY stream into per-row text values.
+///
+/// Implements the documented binary format: an 11-byte signature, a 4-byte flags
+/// field (the OID bit is rejected), a 4-byte header extension that is skipped, then a
+/// sequence of tuples each prefixed by an `int16` field count (`-1` marks the trailer).
+fn pg_copy_parse_binary_rows(
+    buffer: &[u8],
+    column_kinds: &[String],
+) -> Result<Vec<Vec<Option<String>>>, String> {
+    const SIGNATURE: &[u8] = b"PGCOPY\n\xFF\r\n\0";
+    if buffer.len() < SIGNATURE.len() + 8 {
+        return Err("COPY binary stream is too short for its header".to_string());
+    }
+    if &buffer[..SIGNATURE.len()] != SIGNATURE {
+        return Err("COPY binary stream has an invalid signature".to_string());
+    }
+    let mut pos = SIGNATURE.len();
+
+    let read_i32 = |buffer: &[u8], pos: usize| -> i32 {
+        i32::from_be_bytes([
+            buffer[pos],
+            buffer[pos + 1],
+            buffer[pos + 2],
+            buffer[pos + 3],
+        ])
+    };
+
+    let flags = read_i32(buffer, pos);
+    pos += 4;
+    if flags & (1 << 16) != 0 {
+        return Err("COPY binary stream with OIDs is not supported".to_string());
+    }
+
+    let header_ext = read_i32(buffer, pos);
+    pos += 4;
+    if header_ext < 0 {
+        return Err("COPY binary stream has a negative header extension".to_string());
+    }
+    let header_ext = header_ext as usize;
+    if pos + header_ext > buffer.len() {
+        return Err("COPY binary stream header extension exceeds the payload".to_string());
+    }
+    pos += header_ext;
+
+    let mut rows = Vec::new();
+    loop {
+        if pos + 2 > buffer.len() {
+            return Err("COPY binary stream ended before its trailer".to_string());
+        }
+        let field_count = i16::from_be_bytes([buffer[pos], buffer[pos + 1]]);
+        pos += 2;
+        if field_count == -1 {
+            break;
+        }
+        if field_count < 0 {
+            return Err("COPY binary tuple has a negative field count".to_string());
+        }
+        if field_count as usize != column_kinds.len() {
+            return Err("COPY binary tuple has the wrong column count".to_string());
+        }
+
+        let mut row = Vec::with_capacity(column_kinds.len());
+        for kind in column_kinds {
+            if pos + 4 > buffer.len() {
+                return Err("COPY binary stream ended inside a field length".to_string());
+            }
+            let field_len = read_i32(buffer, pos);
+            pos += 4;
+            if field_len == -1 {
+                row.push(None);
+                continue;
+            }
+            if field_len < 0 {
+                return Err("COPY binary field has a negative length".to_string());
+            }
+            let field_len = field_len as usize;
+            if pos + field_len > buffer.len() {
+                return Err("COPY binary field length exceeds the payload".to_string());
+            }
+            let raw = &buffer[pos..pos + field_len];
+            pos += field_len;
+            row.push(Some(pg_copy_decode_binary_field(kind, raw)?));
+        }
+        rows.push(row);
+    }
+
+    Ok(rows)
+}
+
 async fn pg_start_copy_from_stdin(
     state: &AppState,
     stream: &mut TcpStream,
@@ -13450,18 +13603,6 @@ async fn pg_start_copy_from_stdin(
     target: &PgCopyTableTarget,
     await_sync: bool,
 ) -> anyhow::Result<Option<PgCopyInState>> {
-    if target.options.format == PgCopyFormat::Binary {
-        pg_wire::write_error_response(
-            stream,
-            "ERROR",
-            "0A000",
-            "COPY FROM STDIN WITH (FORMAT binary) is not supported",
-        )
-        .await?;
-        *tx_status = pg_tx_status_for_session(session, session.tx_active);
-        return Ok(None);
-    }
-
     let Some((db, table)) = pg_split_copy_table_ref(target, session.default_db.as_deref()) else {
         pg_wire::write_error_response(
             stream,
@@ -13540,7 +13681,17 @@ async fn pg_start_copy_from_stdin(
         })
         .collect();
     let column_formats = vec![0i16; column_kinds.len()];
-    pg_wire::write_copy_in_response(stream, 0, &column_formats).await?;
+    let overall_format: u8 = if target.options.format == PgCopyFormat::Binary {
+        1
+    } else {
+        0
+    };
+    let column_formats = if target.options.format == PgCopyFormat::Binary {
+        vec![1i16; column_kinds.len()]
+    } else {
+        column_formats
+    };
+    pg_wire::write_copy_in_response(stream, overall_format, &column_formats).await?;
     let insert_columns: Vec<String> = selected_columns
         .iter()
         .map(|column| {
@@ -13578,9 +13729,7 @@ async fn pg_finish_copy_from_stdin(
             let escape = copy_in.options.escape();
             pg_copy_parse_csv_rows(&copy_in.buffer, delimiter, quote, escape, null_string)
         }
-        PgCopyFormat::Binary => {
-            unreachable!("binary COPY FROM STDIN is rejected before buffering")
-        }
+        PgCopyFormat::Binary => pg_copy_parse_binary_rows(&copy_in.buffer, &copy_in.column_kinds),
     };
     let rows = match parse_result {
         Ok(rows) => rows,
@@ -47387,6 +47536,102 @@ mod tests {
         assert_eq!(
             pg_parse_copy_to_stdout("COPY app.users TO STDOUT WITH (FORMAT text, ESCAPE '!')"),
             None
+        );
+    }
+
+    #[test]
+    fn pg_copy_binary_from_stdin_roundtrip_and_errors() {
+        // Build a binary COPY stream the way a client would, then parse it back.
+        let columns = vec![
+            pg_wire::PgColumn::text("id", pg_wire::oid::INT8, 8),
+            pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1),
+            pg_wire::PgColumn::text("active", pg_wire::oid::BOOL, 1),
+        ];
+        let source_rows = vec![
+            vec![
+                Some("42".to_string()),
+                Some("Ada".to_string()),
+                Some("t".to_string()),
+            ],
+            vec![Some("7".to_string()), None, Some("f".to_string())],
+        ];
+
+        let mut stream = pg_copy_binary_header();
+        for row in &source_rows {
+            stream.extend_from_slice(&pg_copy_binary_encode_row(row, &columns).unwrap());
+        }
+        stream.extend_from_slice(&pg_copy_binary_trailer());
+
+        let kinds = vec!["i64".to_string(), "str".to_string(), "bool".to_string()];
+        let parsed = pg_copy_parse_binary_rows(&stream, &kinds).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                vec![
+                    Some("42".to_string()),
+                    Some("Ada".to_string()),
+                    Some("t".to_string())
+                ],
+                vec![Some("7".to_string()), None, Some("f".to_string())],
+            ]
+        );
+
+        // A bad signature is rejected.
+        let mut bad = stream.clone();
+        bad[0] = b'X';
+        assert!(pg_copy_parse_binary_rows(&bad, &kinds)
+            .unwrap_err()
+            .contains("invalid signature"));
+
+        // The OID flag is unsupported.
+        let mut with_oids = pg_copy_binary_header();
+        with_oids[11..15].copy_from_slice(&(1i32 << 16).to_be_bytes());
+        with_oids.extend_from_slice(&pg_copy_binary_trailer());
+        assert!(pg_copy_parse_binary_rows(&with_oids, &kinds)
+            .unwrap_err()
+            .contains("OIDs"));
+
+        // A truncated stream (missing trailer) is an error rather than a silent success.
+        let truncated = &stream[..stream.len() - 2];
+        assert!(pg_copy_parse_binary_rows(truncated, &kinds).is_err());
+    }
+
+    #[test]
+    fn pg_copy_decode_binary_field_handles_widths() {
+        assert_eq!(
+            pg_copy_decode_binary_field("i64", &7i64.to_be_bytes()).unwrap(),
+            "7"
+        );
+        assert_eq!(
+            pg_copy_decode_binary_field("i64", &(-3i32).to_be_bytes()).unwrap(),
+            "-3"
+        );
+        assert_eq!(
+            pg_copy_decode_binary_field("u64", &9i32.to_be_bytes()).unwrap(),
+            "9"
+        );
+        assert!(pg_copy_decode_binary_field("u64", &(-1i32).to_be_bytes()).is_err());
+        assert_eq!(
+            pg_copy_decode_binary_field("f64", &1.5f64.to_be_bytes()).unwrap(),
+            "1.5"
+        );
+        assert_eq!(
+            pg_copy_decode_binary_field("f64", &2.5f32.to_be_bytes()).unwrap(),
+            "2.5"
+        );
+        assert_eq!(pg_copy_decode_binary_field("bool", &[0]).unwrap(), "f");
+        assert_eq!(pg_copy_decode_binary_field("bool", &[1]).unwrap(), "t");
+        assert_eq!(
+            pg_copy_decode_binary_field("str", b"hello").unwrap(),
+            "hello"
+        );
+        let uuid_bytes: [u8; 16] = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        assert_eq!(
+            pg_copy_decode_binary_field("uuid", &uuid_bytes).unwrap(),
+            "550e8400-e29b-41d4-a716-446655440000"
         );
     }
 
