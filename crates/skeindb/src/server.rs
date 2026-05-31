@@ -33061,7 +33061,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 145);
+        assert_eq!(methods.len(), 147);
         assert!(methods.contains(&"migration.report_export"));
         assert!(methods.contains(&"stats.query_fingerprint_latency"));
         assert!(methods.contains(&"cdc.pause"));
