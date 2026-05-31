@@ -1622,7 +1622,7 @@ fn mysql_decode_time_lit(payload: &[u8], cursor: &mut usize) -> Result<Lit, Stri
         payload[*cursor + 3],
         payload[*cursor + 4],
     ]);
-    let hours = payload[*cursor + 5] as u32 + days.saturating_mul(24);
+    let hours = (payload[*cursor + 5] as u32).saturating_add(days.saturating_mul(24));
     let minutes = payload[*cursor + 6];
     let seconds = payload[*cursor + 7];
     let micros = if len == 12 {
@@ -33136,6 +33136,117 @@ mod tests {
         assert!(catalog.contains("security:"));
     }
 
+    /// Deterministic, stable-Rust fuzz harness for the wire-protocol byte
+    /// parsers. cargo-fuzz/libFuzzer require a nightly toolchain, which the
+    /// project forbids, so instead we drive a seeded xorshift PRNG through the
+    /// raw byte decoders and assert none of them panic (or hang) on adversarial
+    /// input. Any panic is caught and reported with the exact seed + hex bytes
+    /// so failures are fully reproducible. This runs in `cargo test --all` and
+    /// is additionally gated as a dedicated CI step.
+    #[test]
+    fn protocol_parsers_never_panic_on_fuzz_input() {
+        // Suppress the default panic hook noise; catch_unwind already captures
+        // the payload, so we don't want thousands of backtraces on a real bug.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        struct XorShift64(u64);
+        impl XorShift64 {
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn byte(&mut self) -> u8 {
+                (self.next_u64() & 0xff) as u8
+            }
+            fn len_up_to(&mut self, max: usize) -> usize {
+                (self.next_u64() as usize) % (max + 1)
+            }
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        const ITERATIONS: usize = 20_000;
+        const MAX_LEN: usize = 64;
+        let pg_kinds = ["int2", "int4", "int8", "float4", "float8", "bool", "text"];
+
+        let mut rng = XorShift64(0x5165_4ce4_d3a1_b00b);
+        let mut failures: Vec<String> = Vec::new();
+
+        for iter in 0..ITERATIONS {
+            let len = rng.len_up_to(MAX_LEN);
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                buf.push(rng.byte());
+            }
+            // Occasionally bias toward MySQL length-encoded markers so we
+            // exercise the multi-byte branches more often.
+            if !buf.is_empty() && (rng.next_u64() & 0x3) == 0 {
+                buf[0] = *[0xfc_u8, 0xfd, 0xfe]
+                    .get((rng.next_u64() as usize) % 3)
+                    .unwrap();
+            }
+
+            let buf_clone = buf.clone();
+            let pg_kind = pg_kinds[(rng.next_u64() as usize) % pg_kinds.len()];
+            let parsers: &[(&str, fn(&[u8], &str))] = &[
+                ("parse_lenenc_int", |b, _| {
+                    let mut cursor = 0usize;
+                    let _ = parse_lenenc_int(b, &mut cursor);
+                }),
+                ("parse_lenenc_bytes", |b, _| {
+                    let mut cursor = 0usize;
+                    let _ = parse_lenenc_bytes(b, &mut cursor);
+                }),
+                ("mysql_decode_time_lit", |b, _| {
+                    let mut cursor = 0usize;
+                    let _ = mysql_decode_time_lit(b, &mut cursor);
+                }),
+                ("parse_mysql_handshake_response", |b, _| {
+                    let _ = parse_mysql_handshake_response(b);
+                }),
+                ("pg_copy_decode_text_field", |b, _| {
+                    let _ = pg_copy_decode_text_field(b, b"\\N");
+                }),
+                ("pg_copy_decode_binary_field", |b, kind| {
+                    let _ = pg_copy_decode_binary_field(kind, b);
+                }),
+            ];
+
+            for (name, parser) in parsers {
+                let b = buf_clone.clone();
+                let kind = pg_kind.to_string();
+                let outcome = std::panic::catch_unwind(move || parser(&b, &kind));
+                if outcome.is_err() {
+                    failures.push(format!(
+                        "iteration {iter}: parser={name} pg_kind={pg_kind} input=0x{}",
+                        hex(&buf)
+                    ));
+                    if failures.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+            if failures.len() >= 5 {
+                break;
+            }
+        }
+
+        std::panic::set_hook(prev_hook);
+
+        assert!(
+            failures.is_empty(),
+            "wire-protocol parser panicked on fuzz input:\n{}",
+            failures.join("\n")
+        );
+    }
+
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
         skeindb_skeinql::types::TypeDesc {
             kind: kind.to_string(),
@@ -39159,6 +39270,29 @@ mod tests {
         assert_eq!(parsed.username, "root");
         assert_eq!(parsed.auth_response, b"abc");
         assert_eq!(parsed.auth_plugin.as_deref(), Some(MYSQL_AUTH_PLUGIN));
+    }
+
+    #[test]
+    fn mysql_decode_time_lit_does_not_overflow_on_large_days() {
+        // Regression: a crafted binary TIME parameter with a huge `days` field
+        // used to overflow the `hours` u32 addition and panic in debug builds.
+        // Found by `protocol_parsers_never_panic_on_fuzz_input`.
+        let mut payload = vec![8u8]; // length byte: 8-byte TIME body, no micros.
+        payload.push(0x00); // sign (positive)
+        payload.extend_from_slice(&u32::MAX.to_le_bytes()); // days = u32::MAX
+        payload.push(23); // hours
+        payload.push(59); // minutes
+        payload.push(59); // seconds
+        let mut cursor = 0usize;
+        let lit = mysql_decode_time_lit(&payload, &mut cursor).expect("decode time");
+        match lit {
+            Lit::Time { iso } => {
+                // hours saturates at u32::MAX rather than panicking.
+                assert!(iso.ends_with(":59:59"));
+            }
+            other => panic!("expected Lit::Time, got {other:?}"),
+        }
+        assert_eq!(cursor, payload.len());
     }
 
     #[test]

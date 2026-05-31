@@ -50,6 +50,9 @@ jobs:
       - name: Test
         run: cargo test --all --all-features
 
+      - name: Wire-protocol fuzz harness
+        run: cargo test -p skeindb --bins protocol_parsers_never_panic_on_fuzz_input -- --nocapture
+
   playwright:
     name: SkeinAdmin e2e
     runs-on: ubuntu-latest
