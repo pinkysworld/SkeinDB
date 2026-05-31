@@ -15948,13 +15948,13 @@ fn wasm_plan_simd_exploration(artifact: &WasmPlanArtifactV1) -> WasmPlanSimdExpl
             .iter()
             .chain(generated.param_columns.iter())
             .chain(generated.output_columns.iter())
-            .all(|column| matches!(column.r#type.kind.as_str(), "bool" | "u64"));
+            .all(|column| matches!(column.r#type.kind.as_str(), "bool" | "u64" | "i64"));
         return WasmPlanSimdExploration {
             candidate: fixed_columns,
             enabled: false,
             strategy: "scalar_generated_filter_project_v1".to_string(),
             notes: vec![
-                "generated artifact uses fixed-width bool/u64 column batches".to_string(),
+                "generated artifact uses fixed-width bool/u64/i64 column batches".to_string(),
                 "SIMD lane lowering is not emitted by this build; report captures the scalar baseline for future SIMD comparison".to_string(),
             ],
         };
@@ -16002,6 +16002,7 @@ fn wasm_plan_perf_latency_stats(mut latencies: Vec<u64>) -> WasmPlanPerfLatencyS
 enum GeneratedWasmValueType {
     Bool,
     U64,
+    I64,
 }
 
 impl GeneratedWasmValueType {
@@ -16009,21 +16010,30 @@ impl GeneratedWasmValueType {
         match self {
             Self::Bool => "bool",
             Self::U64 => "u64",
+            Self::I64 => "i64",
         }
     }
 
     fn width(self) -> u32 {
         match self {
             Self::Bool => 1,
-            Self::U64 => 8,
+            Self::U64 | Self::I64 => 8,
         }
     }
 
     fn wasm_batch_tag(self) -> u32 {
         match self {
             Self::Bool => 1,
+            Self::I64 => 2,
             Self::U64 => 3,
         }
+    }
+
+    /// True for the fixed-width signed/unsigned 64-bit integer types that share the same
+    /// 8-byte storage and `i64.*` Wasm load/store path (they differ only in signed vs unsigned
+    /// comparison/division opcodes).
+    fn is_integer(self) -> bool {
+        matches!(self, Self::U64 | Self::I64)
     }
 
     fn from_type_desc(desc: &TypeDesc, nullable: bool) -> Option<Self> {
@@ -16033,6 +16043,7 @@ impl GeneratedWasmValueType {
         match desc.kind.as_str() {
             "bool" => Some(Self::Bool),
             "u64" => Some(Self::U64),
+            "i64" => Some(Self::I64),
             _ => None,
         }
     }
@@ -16041,6 +16052,7 @@ impl GeneratedWasmValueType {
         match lit {
             Lit::Bool { .. } => Some(Self::Bool),
             Lit::U64 { .. } => Some(Self::U64),
+            Lit::I64 { .. } => Some(Self::I64),
             _ => None,
         }
     }
@@ -16255,17 +16267,11 @@ fn analyze_generated_wasm_expr(
                     Ok(GeneratedWasmValueType::Bool)
                 }
                 "lt" | "le" | "gt" | "ge" => {
-                    analyze_generated_wasm_expr(
+                    analyze_generated_wasm_numeric_pair(
                         required_generated_operand(a.as_deref())?,
-                        schema,
-                        state,
-                        Some(GeneratedWasmValueType::U64),
-                    )?;
-                    analyze_generated_wasm_expr(
                         required_generated_operand(b.as_deref())?,
                         schema,
                         state,
-                        Some(GeneratedWasmValueType::U64),
                     )?;
                     if let Some(expected) = expected {
                         if expected != GeneratedWasmValueType::Bool {
@@ -16275,24 +16281,18 @@ fn analyze_generated_wasm_expr(
                     Ok(GeneratedWasmValueType::Bool)
                 }
                 "add" | "sub" | "mul" | "div" | "mod" => {
-                    analyze_generated_wasm_expr(
+                    let ty = analyze_generated_wasm_numeric_pair(
                         required_generated_operand(a.as_deref())?,
-                        schema,
-                        state,
-                        Some(GeneratedWasmValueType::U64),
-                    )?;
-                    analyze_generated_wasm_expr(
                         required_generated_operand(b.as_deref())?,
                         schema,
                         state,
-                        Some(GeneratedWasmValueType::U64),
                     )?;
                     if let Some(expected) = expected {
-                        if expected != GeneratedWasmValueType::U64 {
+                        if expected != ty {
                             anyhow::bail!("unsupported generated wasm numeric context");
                         }
                     }
-                    Ok(GeneratedWasmValueType::U64)
+                    Ok(ty)
                 }
                 _ => anyhow::bail!("unsupported generated wasm op"),
             }
@@ -16323,6 +16323,37 @@ fn analyze_generated_wasm_eq_expr(
         anyhow::bail!("unsupported generated wasm eq type mismatch");
     }
     Ok(lhs)
+}
+
+/// Analyze a numeric (`u64`/`i64`) binary operand pair for comparison/arithmetic, mirroring
+/// the param-inference rules of [`analyze_generated_wasm_eq_expr`] but rejecting non-integer
+/// operands. Returns the shared integer type so callers can pick signed vs unsigned opcodes.
+fn analyze_generated_wasm_numeric_pair(
+    left: &Expr,
+    right: &Expr,
+    schema: &TableSchema,
+    state: &mut GeneratedWasmPlanCompileState,
+) -> anyhow::Result<GeneratedWasmValueType> {
+    let ty = if matches!(left, Expr::Param { .. }) && !matches!(right, Expr::Param { .. }) {
+        let rhs = analyze_generated_wasm_expr(right, schema, state, None)?;
+        analyze_generated_wasm_expr(left, schema, state, Some(rhs))?;
+        rhs
+    } else if matches!(right, Expr::Param { .. }) && !matches!(left, Expr::Param { .. }) {
+        let lhs = analyze_generated_wasm_expr(left, schema, state, None)?;
+        analyze_generated_wasm_expr(right, schema, state, Some(lhs))?;
+        lhs
+    } else {
+        let lhs = analyze_generated_wasm_expr(left, schema, state, None)?;
+        let rhs = analyze_generated_wasm_expr(right, schema, state, Some(lhs))?;
+        if lhs != rhs {
+            anyhow::bail!("unsupported generated wasm numeric type mismatch");
+        }
+        lhs
+    };
+    if !ty.is_integer() {
+        anyhow::bail!("unsupported generated wasm numeric operands");
+    }
+    Ok(ty)
 }
 
 fn required_generated_operand(expr: Option<&Expr>) -> anyhow::Result<&Expr> {
@@ -16658,8 +16689,12 @@ fn compile_generated_wasm_expr_wat(
                     let instr = match (op_name, left_ty) {
                         ("eq", GeneratedWasmValueType::Bool) => "i32.eq",
                         ("ne", GeneratedWasmValueType::Bool) => "i32.ne",
-                        ("eq", GeneratedWasmValueType::U64) => "i64.eq",
-                        ("ne", GeneratedWasmValueType::U64) => "i64.ne",
+                        ("eq", GeneratedWasmValueType::U64 | GeneratedWasmValueType::I64) => {
+                            "i64.eq"
+                        }
+                        ("ne", GeneratedWasmValueType::U64 | GeneratedWasmValueType::I64) => {
+                            "i64.ne"
+                        }
                         _ => unreachable!(),
                     };
                     Ok((
@@ -16676,16 +16711,19 @@ fn compile_generated_wasm_expr_wat(
                         required_generated_operand(b.as_deref())?,
                         ctx,
                     )?;
-                    if left_ty != GeneratedWasmValueType::U64
-                        || right_ty != GeneratedWasmValueType::U64
-                    {
+                    if !left_ty.is_integer() || left_ty != right_ty {
                         anyhow::bail!("unsupported generated wasm comparison operands");
                     }
-                    let instr = match op_name {
-                        "lt" => "i64.lt_u",
-                        "le" => "i64.le_u",
-                        "gt" => "i64.gt_u",
-                        "ge" => "i64.ge_u",
+                    let signed = left_ty == GeneratedWasmValueType::I64;
+                    let instr = match (op_name, signed) {
+                        ("lt", false) => "i64.lt_u",
+                        ("le", false) => "i64.le_u",
+                        ("gt", false) => "i64.gt_u",
+                        ("ge", false) => "i64.ge_u",
+                        ("lt", true) => "i64.lt_s",
+                        ("le", true) => "i64.le_s",
+                        ("gt", true) => "i64.gt_s",
+                        ("ge", true) => "i64.ge_s",
                         _ => unreachable!(),
                     };
                     Ok((
@@ -16702,23 +16740,21 @@ fn compile_generated_wasm_expr_wat(
                         required_generated_operand(b.as_deref())?,
                         ctx,
                     )?;
-                    if left_ty != GeneratedWasmValueType::U64
-                        || right_ty != GeneratedWasmValueType::U64
-                    {
+                    if !left_ty.is_integer() || left_ty != right_ty {
                         anyhow::bail!("unsupported generated wasm arithmetic operands");
                     }
-                    let instr = match op_name {
-                        "add" => "i64.add",
-                        "sub" => "i64.sub",
-                        "mul" => "i64.mul",
-                        "div" => "i64.div_u",
-                        "mod" => "i64.rem_u",
+                    let signed = left_ty == GeneratedWasmValueType::I64;
+                    let instr = match (op_name, signed) {
+                        ("add", _) => "i64.add",
+                        ("sub", _) => "i64.sub",
+                        ("mul", _) => "i64.mul",
+                        ("div", false) => "i64.div_u",
+                        ("mod", false) => "i64.rem_u",
+                        ("div", true) => "i64.div_s",
+                        ("mod", true) => "i64.rem_s",
                         _ => unreachable!(),
                     };
-                    Ok((
-                        GeneratedWasmValueType::U64,
-                        format!("{left}\n{right}\n{instr}"),
-                    ))
+                    Ok((left_ty, format!("{left}\n{right}\n{instr}")))
                 }
                 _ => anyhow::bail!("unsupported generated wasm op"),
             }
@@ -16751,7 +16787,10 @@ fn generated_wasm_read_input_wat(idx: usize, ty: GeneratedWasmValueType) -> Stri
         GeneratedWasmValueType::Bool => {
             format!("local.get $input_ptr\ni32.const {idx}\nlocal.get $row\ncall $read_bool")
         }
-        GeneratedWasmValueType::U64 => {
+        // `i64` columns share the raw 8-byte little-endian layout of `u64`, so the same
+        // `i64.load`-based host helper reads either signedness; signed vs unsigned only
+        // affects the comparison/division opcodes chosen by the caller.
+        GeneratedWasmValueType::U64 | GeneratedWasmValueType::I64 => {
             format!("local.get $input_ptr\ni32.const {idx}\nlocal.get $row\ncall $read_u64")
         }
     }
@@ -16761,6 +16800,7 @@ fn generated_wasm_literal_wat(lit: &Lit) -> anyhow::Result<String> {
     match lit {
         Lit::Bool { v } => Ok(format!("i32.const {}", if *v { 1 } else { 0 })),
         Lit::U64 { v } => Ok(format!("i64.const {v}")),
+        Lit::I64 { v } => Ok(format!("i64.const {v}")),
         _ => anyhow::bail!("unsupported generated wasm literal"),
     }
 }
@@ -16833,7 +16873,9 @@ fn generated_wasm_arg_value(args: &[Lit], idx: usize, expected: &TypeDesc) -> an
         .get(idx)
         .ok_or_else(|| anyhow::anyhow!("invalid_request: missing generated wasm arg"))?;
     match (expected.kind.as_str(), arg) {
-        ("bool", Lit::Bool { .. }) | ("u64", Lit::U64 { .. }) => Ok(arg.clone()),
+        ("bool", Lit::Bool { .. }) | ("u64", Lit::U64 { .. }) | ("i64", Lit::I64 { .. }) => {
+            Ok(arg.clone())
+        }
         _ => anyhow::bail!("invalid_request: generated wasm arg type mismatch"),
     }
 }
@@ -47469,6 +47511,161 @@ mod tests {
         assert_eq!(perf.host.rows, 1);
         let generated = perf.generated.expect("generated perf stats");
         assert_eq!(generated.rows, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_plan_compile_runs_signed_i64_filter_and_arithmetic() -> anyhow::Result<()> {
+        let dir = temp_dir("wasm_plan_compile_i64");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "metrics",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "delta".to_string(),
+                    r#type: type_desc("i64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("delta", Lit::I64 { v: -5 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("delta", Lit::I64 { v: 3 })]),
+                row(&[("id", Lit::U64 { v: 3 }), ("delta", Lit::I64 { v: -1 })]),
+            ],
+            None,
+        )?;
+
+        // Signed comparison: delta < $param (param i64 0) must select the negative rows. An
+        // unsigned comparison would treat -5/-1 as huge positive values and exclude them.
+        let predicate = Expr::Op {
+            op: "lt".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "delta".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Param { param: 0 })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        // Signed addition: delta + delta stays integral (host returns Lit::I64 in range), and
+        // the generated i64.add path must produce the same negative results.
+        let doubled = Expr::Op {
+            op: "add".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "delta".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Col {
+                col: "delta".to_string(),
+                table: None,
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: None,
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "delta".to_string(),
+                                table: None,
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: doubled,
+                            r#as: Some("doubled".to_string()),
+                        },
+                    ],
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "metrics".to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: Some(predicate),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let compiled = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query,
+            abi: None,
+            target: None,
+        })?;
+        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
+        assert!(compiled.supports_edge_package);
+
+        let result = engine.wasm_plan_run(
+            &compiled.artifact_b64,
+            &[Lit::I64 { v: 0 }],
+            ResultFormat::ObjectsJson,
+            true,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let data = result.data.expect("missing data");
+        let rows = data.as_array().cloned().unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        // id=1 delta=-5 doubled=-10
+        assert_eq!(rows[0]["id"]["v"].as_u64(), Some(1));
+        assert_eq!(rows[0]["delta"]["v"].as_i64(), Some(-5));
+        assert_eq!(rows[0]["doubled"]["v"].as_i64(), Some(-10));
+        // id=3 delta=-1 doubled=-2
+        assert_eq!(rows[1]["id"]["v"].as_u64(), Some(3));
+        assert_eq!(rows[1]["delta"]["v"].as_i64(), Some(-1));
+        assert_eq!(rows[1]["doubled"]["v"].as_i64(), Some(-2));
+
+        let perf = engine.wasm_plan_perf_report(WasmPlanPerfReportParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+            args: vec![Lit::I64 { v: 0 }],
+            iterations: Some(2),
+            warmup_iterations: Some(1),
+        })?;
+        assert_eq!(perf.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
+        assert!(perf.outputs_match);
+        assert!(perf.simd.candidate);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

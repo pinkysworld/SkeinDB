@@ -133,7 +133,7 @@ Rules:
 - `scan` must be first and exactly once.
 - `project` must be last and exactly once.
 - `filter` is optional and must appear between scan and project.
-- `execution` is `generated_filter_project_v1` when the compiler can lower a fixed-width, non-null `u64`/`bool` filter/project plan into an embedded Wasm module.
+- `execution` is `generated_filter_project_v1` when the compiler can lower a fixed-width, non-null `u64`/`i64`/`bool` filter/project plan into an embedded Wasm module. Signed `i64` columns, params, and literals use signed Wasm opcodes (`i64.lt_s`/`le_s`/`gt_s`/`ge_s`, `i64.div_s`/`rem_s`); `u64` uses the unsigned variants. The two integer types share the 8-byte `i64.load`/`i64.store` layout and cannot be mixed in a single comparison/arithmetic operand pair.
 - `execution` falls back to `host_interpreted_v1` when the plan uses unsupported operators, nullable values, or non-fixed-width types.
 - `generated` is present only for compiled artifacts and records the generated module plus its input/output column metadata.
 
