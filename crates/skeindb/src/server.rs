@@ -33195,7 +33195,8 @@ mod tests {
 
             let buf_clone = buf.clone();
             let pg_kind = pg_kinds[(rng.next_u64() as usize) % pg_kinds.len()];
-            let parsers: &[(&str, fn(&[u8], &str))] = &[
+            type FuzzParser = fn(&[u8], &str);
+            let parsers: &[(&str, FuzzParser)] = &[
                 ("parse_lenenc_int", |b, _| {
                     let mut cursor = 0usize;
                     let _ = parse_lenenc_int(b, &mut cursor);
@@ -33207,6 +33208,14 @@ mod tests {
                 ("mysql_decode_time_lit", |b, _| {
                     let mut cursor = 0usize;
                     let _ = mysql_decode_time_lit(b, &mut cursor);
+                }),
+                ("mysql_decode_date_lit", |b, _| {
+                    let mut cursor = 0usize;
+                    let _ = mysql_decode_dateish_lit(b, &mut cursor, false);
+                }),
+                ("mysql_decode_datetime_lit", |b, _| {
+                    let mut cursor = 0usize;
+                    let _ = mysql_decode_dateish_lit(b, &mut cursor, true);
                 }),
                 ("parse_mysql_handshake_response", |b, _| {
                     let _ = parse_mysql_handshake_response(b);
