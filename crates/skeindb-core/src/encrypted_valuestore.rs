@@ -124,6 +124,29 @@ impl<'a> EncryptedValueStore<'a> {
             None => Ok(None),
         }
     }
+
+    /// Re-encrypt a batch of envelopes under the database's currently-active key. This is
+    /// the operational sweep used during key rotation: it walks `value_ids` in order,
+    /// calls [`Self::reencrypt_value`] for each, and returns the old/new [`ValueId`]
+    /// mapping for every envelope that was actually rewritten. Envelopes that are already
+    /// current (or have mode `ENC_OFF`) are skipped and recorded in `progress` but are not
+    /// included in the returned mapping. The first error aborts the sweep so callers can
+    /// retry from a known `progress` checkpoint; the old envelopes are never removed, so a
+    /// partial sweep leaves all historical references intact.
+    pub fn reencrypt_values(
+        &mut self,
+        ctx: &EncryptionContext,
+        value_ids: &[ValueId],
+        progress: &mut ReencryptionProgress,
+    ) -> Result<Vec<(ValueId, ValueId)>, EncryptedValueStoreError> {
+        let mut rewritten = Vec::new();
+        for value_id in value_ids {
+            if let Some(new_id) = self.reencrypt_value(ctx, value_id, progress)? {
+                rewritten.push((*value_id, new_id));
+            }
+        }
+        Ok(rewritten)
+    }
 }
 
 /// Convenience wrapper around [`DatabaseKeyManager::rotate_active_key`] that re-exports the

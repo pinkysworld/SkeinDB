@@ -209,3 +209,66 @@ fn encrypted_value_store_reencrypt_value_writes_new_envelope() {
     let new_env = wrap.read_envelope(&new_id).unwrap();
     assert_eq!(new_env.key_id.as_deref(), Some("k2"));
 }
+
+#[test]
+fn encrypted_value_store_reencrypt_values_sweeps_batch_under_active_key() {
+    use skeindb_core::encrypted_valuestore::EncryptedValueStore;
+    use skeindb_core::encryption::ReencryptionProgress;
+    use skeindb_core::valuestore::{ValueStore, ValueStoreConfig};
+
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut manager = DatabaseKeyManager::new();
+    manager.register_database_key("app", "k1", key(81)).unwrap();
+    manager.register_database_key("app", "k2", key(83)).unwrap();
+    manager
+        .set_database_mode("app", EncryptionMode::EncRandom)
+        .unwrap();
+    let ctx = EncryptionContext::new("app", "events", "payload", ValueKind::Cell, 1);
+
+    let payloads: Vec<&[u8]> = vec![b"alpha", b"beta", b"gamma"];
+    let value_ids = {
+        let mut wrap = EncryptedValueStore::new(&mut store, &manager);
+        payloads
+            .iter()
+            .map(|p| wrap.put_encrypted(&ctx, p).unwrap().value_id)
+            .collect::<Vec<_>>()
+    };
+
+    manager.rotate_active_key("app", "k2").unwrap();
+
+    let mut progress = ReencryptionProgress::new("app");
+    let mapping = {
+        let mut wrap = EncryptedValueStore::new(&mut store, &manager);
+        wrap.reencrypt_values(&ctx, &value_ids, &mut progress)
+            .unwrap()
+    };
+
+    // Every envelope was rewritten under the new key.
+    assert_eq!(mapping.len(), 3);
+    assert_eq!(progress.envelopes_inspected, 3);
+    assert_eq!(progress.envelopes_rewritten, 3);
+    assert_eq!(progress.envelopes_skipped_current, 0);
+
+    let mut wrap = EncryptedValueStore::new(&mut store, &manager);
+    for ((old_id, new_id), expected) in mapping.iter().zip(payloads.iter()) {
+        assert_ne!(old_id, new_id);
+        // Old and new ValueIds both decrypt to the original plaintext.
+        assert_eq!(&wrap.get_decrypted(&ctx, old_id).unwrap(), expected);
+        assert_eq!(&wrap.get_decrypted(&ctx, new_id).unwrap(), expected);
+        assert_eq!(
+            wrap.read_envelope(new_id).unwrap().key_id.as_deref(),
+            Some("k2")
+        );
+    }
+
+    // A second sweep over the rewritten ids is a no-op (already current).
+    let new_ids = mapping.iter().map(|(_, n)| *n).collect::<Vec<_>>();
+    let mut progress2 = ReencryptionProgress::new("app");
+    let again = wrap
+        .reencrypt_values(&ctx, &new_ids, &mut progress2)
+        .unwrap();
+    assert!(again.is_empty());
+    assert_eq!(progress2.envelopes_inspected, 3);
+    assert_eq!(progress2.envelopes_rewritten, 0);
+    assert_eq!(progress2.envelopes_skipped_current, 3);
+}
