@@ -125,3 +125,6 @@ jobs:
 
       - name: SkeinQL Python SDK example tests
         run: python -m unittest discover -s examples/sdk/python
+
+      - name: Benchmark report generator tests
+        run: python -m unittest discover -s eval -p 'test_*.py'

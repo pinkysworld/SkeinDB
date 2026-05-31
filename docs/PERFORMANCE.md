@@ -148,3 +148,27 @@ Measurable outcomes:
 - fewer write stalls
 - lower p99 write latency
 - smoother throughput over time
+
+## Reproducing the transport benchmark
+
+SkeinDB ships a built-in `transport-bench` subcommand that measures SkeinQL
+round-trip latency (p50/p95/p99) across the HTTP/2, QUIC, and MySQL transports
+under concurrent load, and emits a JSON report. `eval/benchmark_report.py`
+renders that JSON into a deterministic Markdown report annotated with the
+environment (git commit, rustc version, OS, CPU count) so runs are reproducible
+and comparable across commits.
+
+```bash
+# 1. Build and start a server.
+cargo build -p skeindb --release
+target/release/skeindb serve --data ./data &
+
+# 2. Capture a JSON benchmark report.
+target/release/skeindb transport-bench --json > report.json
+
+# 3. Render a reproducible Markdown report.
+python eval/benchmark_report.py --from-json report.json -o BENCHMARK_REPORT.md
+```
+
+The report-formatting and summary logic is pure and unit-tested
+(`eval/test_benchmark_report.py`, run(`eval/test_benchmark_report.py`, run(`eval/test_benchmark_report.py`, run(`eval/test_benchmark_report.py`, run(`evalrver.(`eval/test_benchmark_report.py`, ruepro(`eval/test_benchmark_report.py`, run(`eval/test_benchmark_report.py`, ruful deltas.
