@@ -33,7 +33,7 @@ use skeindb_skeinql::{
         AiAutoparamAnalyzeParams, AiAutoparamClassifiersParams, AiAutoparamClassifyParams,
         AiAutoparamFeedbackParams, AiAutoparamLabelSchemaParams, AiAutoparamMetricsParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcAckParams, CdcCloseParams,
-        CdcPauseParams, CdcPollParams, CdcPrimaryKeyRange, CdcResumeParams,
+        CdcPauseParams, CdcPollParams, CdcPrimaryKeyRange, CdcResumeParams, CdcSinkDrainParams,
         CdcSubscribeQueryParams, CdcSubscribeTableParams, ClusterJoinTokenCreateParams,
         ClusterNodeJoinParams, ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
         ClusterReplicaPromoteParams, ClusterShardCreateParams, ClusterShardMoveParams,
@@ -20117,6 +20117,17 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "cdc.sink_drain" => {
+                    let p: CdcSinkDrainParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let lim = p.limit.unwrap_or(500);
+                    let r = eng
+                        .cdc_sink_drain(&mut subs, &p.sub_id, lim)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "cdc.pause" => {
                     let p: CdcPauseParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
@@ -31112,6 +31123,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cdc.subscribe_query",
         "cdc.poll",
         "cdc.ack",
+        "cdc.sink_drain",
         "cdc.pause",
         "cdc.resume",
         "cdc.close",

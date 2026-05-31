@@ -95,6 +95,11 @@ Current runtime support:
   - drains the retained change log in bounded batches so reconnecting consumers can catch up inside the retained horizon
   - emits `backpressure` control frames when the subscription enters `pressure`, `throttle`, `paused`, or `resnapshot_required`
   - emits a final `resnapshot` control frame with the same recovery metadata returned by `cdc.poll`
+- External sink connector: `cdc.sink_drain` (RPC)
+  - a subscription may declare `options.sink` to push delivery events to an external destination
+  - the first supported connector is a durable append-only **file sink** (`{"type": "file", "path": "..."}`) that writes one NDJSON-encoded delivery event per line, so downstream tools can tail the file
+  - the sink tracks its own per-subscription `sink_offset` cursor (independent of the consumer ACK cursor) so repeated drains never re-deliver rows
+  - the cursor is persisted in `cdc_subscriptions.json` and survives restarts; events honor the subscription's filters, projection, and `format`
 
 Backpressure state model:
 - `healthy`: lag is below the warning threshold.
@@ -131,6 +136,7 @@ Methods:
 - `cdc.subscribe_query`
 - `cdc.poll`
 - `cdc.ack`
+- `cdc.sink_drain`
 - `cdc.pause`
 - `cdc.resume`
 - `cdc.close`

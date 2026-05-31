@@ -3176,6 +3176,13 @@ pub struct CdcAckParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSinkDrainParams {
+    pub sub_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcPauseParams {
     pub sub_id: String,
 }

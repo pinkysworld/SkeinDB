@@ -640,7 +640,7 @@ const SCHEMA_FLAGS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
 const CHANGE_LOG_FORMAT_VERSION: u32 = 2;
-const CDC_SUBSCRIPTIONS_FORMAT_VERSION: u32 = 8;
+const CDC_SUBSCRIPTIONS_FORMAT_VERSION: u32 = 9;
 const REPLAY_BUNDLE_FORMAT_VERSION: u32 = 1;
 const REPLAY_PERFORMANCE_FORMAT_V1: &str = "skein.replay.performance.v1";
 const REPLAY_WORKSPACES_DIR: &str = ".replay_workspaces";
@@ -1464,6 +1464,13 @@ pub struct CdcAckResult {
     pub acked_offset: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSinkDrainResult {
+    pub sub_id: String,
+    pub delivered: u64,
+    pub sink_offset: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CdcBackpressureStatus {
     pub state: String,
@@ -1576,6 +1583,22 @@ pub struct CdcSubscriptionOptions {
     pub ops: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink: Option<CdcSinkConfig>,
+}
+
+/// External sink connector configuration for a CDC subscription.
+///
+/// The first supported connector is a durable append-only file sink that
+/// writes one NDJSON-encoded delivery event per line, allowing downstream
+/// consumers to tail the file. The sink is advanced explicitly via
+/// `Engine::cdc_sink_drain`, which tracks its own per-subscription cursor so
+/// repeated drains never duplicate already-delivered rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CdcSinkConfig {
+    /// Append delivery events as NDJSON lines to `path`.
+    File { path: String },
 }
 
 struct CdcDeliveryEvent<'a> {
@@ -1713,6 +1736,8 @@ pub struct Subscription {
     pub paused: bool,
     pub options: CdcSubscriptionOptions,
     pub target: SubscriptionTarget,
+    /// Highest change-log offset already pushed to the external sink.
+    pub sink_offset: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1744,6 +1769,8 @@ struct CdcSubscriptionDisk {
     paused: bool,
     #[serde(default)]
     options: CdcSubscriptionOptions,
+    #[serde(default)]
+    sink_offset: u64,
     target: CdcSubscriptionTargetDisk,
 }
 
@@ -1789,6 +1816,7 @@ impl From<&Subscription> for CdcSubscriptionDisk {
             acked_offset: value.acked_offset,
             paused: value.paused,
             options: value.options.clone(),
+            sink_offset: value.sink_offset,
             target,
         }
     }
@@ -1817,6 +1845,7 @@ impl From<CdcSubscriptionDisk> for Subscription {
             acked_offset: value.acked_offset,
             paused: value.paused,
             options: value.options,
+            sink_offset: value.sink_offset,
             target,
         }
     }
@@ -10294,6 +10323,7 @@ impl Engine {
                 acked_offset: self.change_seq,
                 paused: false,
                 options,
+                sink_offset: self.change_seq,
                 target: SubscriptionTarget::Table {
                     db: db.to_string(),
                     table: table.to_string(),
@@ -10352,6 +10382,7 @@ impl Engine {
                 acked_offset: self.change_seq,
                 paused: false,
                 options,
+                sink_offset: self.change_seq,
                 target: SubscriptionTarget::Query {
                     query_id: query_id.to_string(),
                     query: prepared.query,
@@ -10380,7 +10411,7 @@ impl Engine {
             anyhow::bail!("not_found");
         };
 
-        let mut events = Vec::new();
+        let events: Vec<ChangeEvent> = Vec::new();
         let resume_offset = from_offset.max(sub.acked_offset);
         let earliest_offset = self.current_cdc_earliest_offset();
         let latest_offset = self.change_seq;
@@ -10421,9 +10452,39 @@ impl Engine {
                 backpressure,
             });
         }
-        let mut next_offset = resume_offset;
         let options = sub.options.clone();
-        match &sub.target {
+        let (events, next_offset) =
+            self.cdc_collect_events(&sub.target, &options, resume_offset, limit)?;
+
+        Ok(CdcPollResult {
+            format: sub.options.format,
+            events,
+            next_offset,
+            earliest_offset,
+            latest_offset,
+            resnapshot_required: false,
+            resnapshot_from_offset: None,
+            resnapshot_reason: None,
+            backpressure,
+        })
+    }
+
+    /// Collect the projected delivery events for `target` starting *after*
+    /// `resume_offset`, honoring all subscription filters and the per-call
+    /// `limit`. Returns the events plus the highest change-log offset consumed
+    /// (which equals `resume_offset` when nothing matched). Shared by
+    /// `cdc_poll` and the external sink drain path so both observe identical
+    /// filtering and projection semantics.
+    fn cdc_collect_events(
+        &self,
+        target: &SubscriptionTarget,
+        options: &CdcSubscriptionOptions,
+        resume_offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<(Vec<ChangeEvent>, u64)> {
+        let mut events = Vec::new();
+        let mut next_offset = resume_offset;
+        match target {
             SubscriptionTarget::Table { db, table } => {
                 for ev in self.changes.iter() {
                     if ev.seq <= resume_offset {
@@ -10431,16 +10492,16 @@ impl Engine {
                     }
                     if ev.db == *db
                         && ev.table == *table
-                        && cdc_subscription_allows_source_op(&options, &ev.op)
-                        && cdc_subscription_matches_pk(&options, ev.pk.as_ref())
-                        && cdc_subscription_matches_pk_range(&options, ev.pk.as_ref())
+                        && cdc_subscription_allows_source_op(options, &ev.op)
+                        && cdc_subscription_matches_pk(options, ev.pk.as_ref())
+                        && cdc_subscription_matches_pk_range(options, ev.pk.as_ref())
                         && cdc_subscription_matches_columns(
-                            &options,
+                            options,
                             ev.before.as_ref(),
                             ev.after.as_ref(),
                         )
                     {
-                        events.push(project_cdc_event_for_subscription(ev, &options));
+                        events.push(project_cdc_event_for_subscription(ev, options));
                         next_offset = ev.seq;
                         if events.len() as u64 >= limit {
                             break;
@@ -10466,16 +10527,16 @@ impl Engine {
                     }
                     let changed_table = format!("{}.{}", ev.db, ev.table);
                     if dep_tables.contains(&changed_table)
-                        && cdc_subscription_allows_source_op(&options, &ev.op)
-                        && cdc_subscription_matches_pk(&options, ev.pk.as_ref())
-                        && cdc_subscription_matches_pk_range(&options, ev.pk.as_ref())
+                        && cdc_subscription_allows_source_op(options, &ev.op)
+                        && cdc_subscription_matches_pk(options, ev.pk.as_ref())
+                        && cdc_subscription_matches_pk_range(options, ev.pk.as_ref())
                         && cdc_subscription_matches_columns(
-                            &options,
+                            options,
                             ev.before.as_ref(),
                             ev.after.as_ref(),
                         )
                     {
-                        let mut invalidation = project_cdc_event_for_subscription(ev, &options);
+                        let mut invalidation = project_cdc_event_for_subscription(ev, options);
                         invalidation.op = "invalidate".to_string();
                         invalidation.query_id = Some(query_id.clone());
                         invalidation.etag = Some(etag.clone());
@@ -10488,17 +10549,74 @@ impl Engine {
                 }
             }
         }
+        Ok((events, next_offset))
+    }
 
-        Ok(CdcPollResult {
-            format: sub.options.format,
-            events,
-            next_offset,
-            earliest_offset,
-            latest_offset,
-            resnapshot_required: false,
-            resnapshot_from_offset: None,
-            resnapshot_reason: None,
-            backpressure,
+    /// Push newly produced CDC events for a subscription to its configured
+    /// external sink connector, advancing a dedicated `sink_offset` cursor so
+    /// repeated drains never re-deliver rows. Returns the number of delivered
+    /// events and the new cursor. Requires the subscription to declare a sink.
+    pub fn cdc_sink_drain(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+        limit: u64,
+    ) -> anyhow::Result<CdcSinkDrainResult> {
+        let Some(sub) = subs.subs.get(sub_id) else {
+            anyhow::bail!("not_found");
+        };
+        let Some(sink) = sub.options.sink.clone() else {
+            anyhow::bail!("invalid_request: subscription has no sink configured");
+        };
+        let drain_limit = limit.max(1);
+        let resume_offset = sub.sink_offset;
+        let format = sub.options.format;
+        let options = sub.options.clone();
+        let (events, next_offset) =
+            self.cdc_collect_events(&sub.target, &options, resume_offset, drain_limit)?;
+
+        let delivered = events.len() as u64;
+        if delivered > 0 {
+            match &sink {
+                CdcSinkConfig::File { path } => {
+                    use std::io::Write as _;
+                    let mut payload = String::new();
+                    for event in &events {
+                        payload.push_str(&cdc_event_delivery_string(event, format)?);
+                        payload.push('\n');
+                    }
+                    let path = PathBuf::from(path);
+                    if let Some(parent) = path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent)?;
+                        }
+                    }
+                    let mut file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)?;
+                    file.write_all(payload.as_bytes())?;
+                    file.flush()?;
+                }
+            }
+        }
+
+        let mut updated = subs.clone();
+        if let Some(target) = updated.subs.get_mut(sub_id) {
+            target.sink_offset = target.sink_offset.max(next_offset);
+        }
+        self.persist_cdc_subscriptions(&updated)?;
+        let sink_offset = updated
+            .subs
+            .get(sub_id)
+            .map(|sub| sub.sink_offset)
+            .unwrap_or(next_offset);
+        *subs = updated;
+
+        Ok(CdcSinkDrainResult {
+            sub_id: sub_id.to_string(),
+            delivered,
+            sink_offset,
         })
     }
 
@@ -38895,6 +39013,7 @@ mod tests {
                 pk_range: None,
                 ops: Vec::new(),
                 columns: Vec::new(),
+                sink: None,
             },
         )?;
 
@@ -39497,7 +39616,7 @@ mod tests {
 
         let disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("cdc_subscriptions.json"))?)?;
-        assert_eq!(disk["format_version"].as_u64(), Some(8));
+        assert_eq!(disk["format_version"].as_u64(), Some(9));
         assert_eq!(
             disk["subs"][0]["options"]["format"].as_str(),
             Some("plain_json")
@@ -39684,6 +39803,108 @@ mod tests {
 
         reopened.cdc_close(&mut reopened_subs, &subscribe.sub_id)?;
         assert!(!dir.join("cdc_subscriptions.json").exists());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_file_sink_drain_writes_ndjson_and_advances_cursor() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_file_sink_drain");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let sink_path = dir.join("sink").join("events.ndjson");
+        let options = CdcSubscriptionOptions {
+            sink: Some(CdcSinkConfig::File {
+                path: sink_path.to_string_lossy().into_owned(),
+            }),
+            ..Default::default()
+        };
+        let mut subs = Subscriptions::default();
+        let subscribe =
+            engine.cdc_subscribe_table_with_options(&mut subs, "app", "events", options)?;
+
+        let insert = |engine: &mut Engine, id: u64, data: &str| -> anyhow::Result<()> {
+            engine.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: data.to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            Ok(())
+        };
+
+        insert(&mut engine, 1, "one")?;
+        insert(&mut engine, 2, "two")?;
+
+        let drained = engine.cdc_sink_drain(&mut subs, &subscribe.sub_id, 10)?;
+        assert_eq!(drained.delivered, 2);
+        assert_eq!(drained.sink_offset, 2);
+
+        let contents = fs::read_to_string(&sink_path)?;
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0])?;
+        assert_eq!(first["op"], "insert");
+        assert_eq!(first["seq"], 1);
+        let second: serde_json::Value = serde_json::from_str(lines[1])?;
+        assert_eq!(second["seq"], 2);
+
+        // Cursor advanced: a second drain with no new events delivers nothing.
+        let drained_again = engine.cdc_sink_drain(&mut subs, &subscribe.sub_id, 10)?;
+        assert_eq!(drained_again.delivered, 0);
+        assert_eq!(drained_again.sink_offset, 2);
+        assert_eq!(fs::read_to_string(&sink_path)?.lines().count(), 2);
+
+        // The sink cursor is durable across a restart.
+        insert(&mut engine, 3, "three")?;
+        let reopened = Engine::open(&dir)?;
+        let mut reopened_subs = reopened.load_cdc_subscriptions_best_effort();
+        let drained_after_restart =
+            reopened.cdc_sink_drain(&mut reopened_subs, &subscribe.sub_id, 10)?;
+        assert_eq!(drained_after_restart.delivered, 1);
+        assert_eq!(drained_after_restart.sink_offset, 3);
+        assert_eq!(fs::read_to_string(&sink_path)?.lines().count(), 3);
+
+        // A subscription without a sink rejects drains.
+        let plain = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
+        let err = engine
+            .cdc_sink_drain(&mut subs, &plain.sub_id, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no sink"), "unexpected error: {err}");
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

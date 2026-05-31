@@ -33,7 +33,7 @@ data/
   schema_changes.json         (prototype schema change log, format v2)
   schema_flags.json           (prototype schema flags, format v1)
   changes.json                (prototype retained CDC change log, format v2)
-  cdc_subscriptions.json      (prototype CDC subscription cursors, format v8)
+  cdc_subscriptions.json      (prototype CDC subscription cursors, format v9)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
@@ -831,18 +831,19 @@ See docs/COLUMN_SNAPSHOTS.md for cseg v1.
 - Each record persists `seq`, `db`, `table`, `op`, optional `pk` / `before` / `after` / `query_id` / `etag`, plus `commit_ts_ms` and optional `lsn` metadata.
 - Legacy format v1 envelopes and older unversioned array snapshots are still accepted on load and rewritten to the current versioned envelope on the next persist.
 
-`cdc_subscriptions.json` stores durable consumer cursor and control state for CDC subscriptions (format v8):
+`cdc_subscriptions.json` stores durable consumer cursor and control state for CDC subscriptions (format v9):
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "next_id": 3,
   "subs": [
     {
       "id": "sub_1",
       "acked_offset": 42,
       "paused": true,
-      "options": {"format": "plain_json", "include_before": true, "include_after": true, "pk_range": {"lower_bound": {"t": "u64", "v": 2}, "upper_bound": {"t": "u64", "v": 4}}, "ops": ["update"], "columns": ["status"]},
+      "options": {"format": "plain_json", "include_before": true, "include_after": true, "pk_range": {"lower_bound": {"t": "u64", "v": 2}, "upper_bound": {"t": "u64", "v": 4}}, "ops": ["update"], "columns": ["status"], "sink": {"type": "file", "path": "/var/lib/skeindb/sinks/events.ndjson"}},
+      "sink_offset": 40,
       "target": {"kind": "table", "db": "app", "table": "events"}
     },
     {
@@ -864,8 +865,9 @@ Compatibility notes:
 - Format v6 adds per-subscription `options.columns` changed-column filters used by `cdc.subscribe_table` / `cdc.subscribe_query` replay filtering and row-image projection.
 - Format v7 adds per-subscription `options.pk_range` inclusive primary-key range filters used by `cdc.subscribe_table` / `cdc.subscribe_query` replay filtering.
 - Format v8 adds per-subscription `options.format` delivery encoding. Missing values default to `objects_json`; supported values are `objects_json` and `plain_json`.
+- Format v9 adds the optional per-subscription `options.sink` external connector (first connector `{"type": "file", "path": ...}`) and the durable `sink_offset` cursor advanced by `cdc.sink_drain`. Missing `options.sink` defaults to no sink and missing `sink_offset` defaults to `0`.
 - Format v2 adds the per-subscription `paused` flag used by `cdc.pause` / `cdc.resume` and the CDC backpressure state machine.
-- Format v1/v2/v3/v4/v5/v6/v7 subscription files are still accepted on load; missing `paused` defaults to `false`, missing `options` default to both row images disabled, missing `options.ops` defaults to an empty allowlist, missing `options.pk` defaults to an empty tuple filter, missing `options.pk_range` defaults to no primary-key range filter, missing `options.columns` defaults to an empty changed-column filter, missing `options.format` defaults to `objects_json`, and the file is rewritten as v8 on the next subscription persist.
+- Format v1/v2/v3/v4/v5/v6/v7/v8 subscription files are still accepted on load; missing `paused` defaults to `false`, missing `options` default to both row images disabled, missing `options.ops` defaults to an empty allowlist, missing `options.pk` defaults to an empty tuple filter, missing `options.pk_range` defaults to no primary-key range filter, missing `options.columns` defaults to an empty changed-column filter, missing `options.format` defaults to `objects_json`, missing `options.sink` defaults to no sink, missing `sink_offset` defaults to `0`, and the file is rewritten as v9 on the next subscription persist.
 - If all subscriptions are closed, `cdc_subscriptions.json` is removed.
 
 The CDC files are optional: missing `changes.json` means no retained replay window has been loaded, and missing `cdc_subscriptions.json` means there are no durable subscriptions to restore.
