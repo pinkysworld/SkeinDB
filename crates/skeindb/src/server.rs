@@ -19847,6 +19847,13 @@ pub(crate) async fn handle_rpc(
                     eng.settings_encryption_rotate_key(p)
                         .map_err(|e| RpcError::new("invalid_argument", e))
                 }
+                "settings.encryption.reencrypt_table" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionReencryptTableParams =
+                        parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.settings_encryption_reencrypt_table(p)
+                        .map_err(|e| RpcError::new("invalid_argument", e))
+                }
 
                 // --------------------
                 // edge.* (research)
@@ -31098,6 +31105,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "settings.encryption.register_key",
         "settings.encryption.set_active_key",
         "settings.encryption.rotate_key",
+        "settings.encryption.reencrypt_table",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",

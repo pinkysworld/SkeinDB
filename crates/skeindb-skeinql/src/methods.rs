@@ -3381,3 +3381,24 @@ pub struct SettingsEncryptionRotateKeyResult {
     pub new_key_id: String,
     pub mode: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionReencryptTableParams {
+    pub db: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionReencryptTableResult {
+    pub ok: bool,
+    pub db: String,
+    pub table: String,
+    /// True when the database has an active encryption mode + key, so rows are encrypted at rest.
+    pub encrypted: bool,
+    /// True when the on-disk rows were rewritten (re-encrypted under the active key).
+    pub rewrote: bool,
+    /// Number of row entries re-persisted.
+    pub rows: u64,
+    /// The active key id the rows were re-encrypted under, when encryption is active.
+    pub active_key_id: Option<String>,
+}

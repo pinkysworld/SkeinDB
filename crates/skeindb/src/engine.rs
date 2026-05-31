@@ -13008,6 +13008,83 @@ impl Engine {
         })
         .unwrap_or(serde_json::Value::Null))
     }
+
+    /// Re-encrypt a table's at-rest rows under the database's currently active key (T193).
+    ///
+    /// Key rotation ([`Self::settings_encryption_rotate_key`]) only flips the active key id;
+    /// rows already persisted under a previous key remain encrypted with that key (still
+    /// readable while it is registered). This rewrites the table's backing file so every
+    /// encryptable cell is re-sealed under the active key, completing a rotation. It is a
+    /// no-op (no rewrite) when the database has no active encryption mode/key.
+    pub fn settings_encryption_reencrypt_table(
+        &mut self,
+        params: skeindb_skeinql::methods::SettingsEncryptionReencryptTableParams,
+    ) -> Result<serde_json::Value, String> {
+        use skeindb_skeinql::methods::SettingsEncryptionReencryptTableResult;
+
+        let db = params.db.trim().to_string();
+        let table = params.table.trim().to_string();
+        let key = TableKey {
+            db: db.clone(),
+            table: table.clone(),
+        };
+        if self.encrypted_locked_tables.contains(&key) {
+            return Err(format!(
+                "encryption key required: table '{db}.{table}' is locked at rest; register the database key first"
+            ));
+        }
+        let Some(tdata) = self.tables.get(&key) else {
+            return Err(format!("table not found: {db}.{table}"));
+        };
+        let rows = tdata.rows.len() as u64;
+
+        let codec = self.row_encryption_codec(&db, &table);
+        let encrypted = codec.active();
+        let active_key_id = self
+            .key_manager
+            .profile(&db)
+            .and_then(|p| p.active_key_id.clone());
+
+        if !encrypted {
+            return Ok(
+                serde_json::to_value(SettingsEncryptionReencryptTableResult {
+                    ok: true,
+                    db,
+                    table,
+                    encrypted: false,
+                    rewrote: false,
+                    rows,
+                    active_key_id,
+                })
+                .unwrap_or(serde_json::Value::Null),
+            );
+        }
+
+        self.persist_table(&db, &table).map_err(|e| e.to_string())?;
+        let note = format!("table={table} rows={rows}");
+        self.record_encryption_audit(
+            "reencrypt_table",
+            Some(&db),
+            active_key_id.as_deref(),
+            None,
+            None,
+            Some(note.as_str()),
+        );
+        self.persist_encryption_state_best_effort();
+
+        Ok(
+            serde_json::to_value(SettingsEncryptionReencryptTableResult {
+                ok: true,
+                db,
+                table,
+                encrypted: true,
+                rewrote: true,
+                rows,
+                active_key_id,
+            })
+            .unwrap_or(serde_json::Value::Null),
+        )
+    }
 }
 
 impl SnapshotManager {
@@ -40200,6 +40277,161 @@ mod tests {
             entry.row.get("payload"),
             Some(Lit::Str { v }) if v == "same-secret"
         )));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn reencrypt_table_reseals_rows_under_active_key_after_rotation() -> anyhow::Result<()> {
+        use skeindb_core::encryption::{EncryptionEnvelope, ENCRYPTION_MASTER_KEY_LEN};
+
+        // Read the distinct key ids that the on-disk `payload` envelopes are sealed under.
+        fn payload_key_ids(disk: &TableRowsDisk) -> Vec<Option<String>> {
+            disk.rows
+                .iter()
+                .filter_map(|row| {
+                    let payload = decode_encrypted_cell_payload(row.row.get("payload")?)?;
+                    let stored = BASE64_STANDARD.decode(payload.env_b64.as_bytes()).ok()?;
+                    let env = EncryptionEnvelope::from_stored_bytes(&stored).ok()?;
+                    Some(env.key_id)
+                })
+                .collect()
+        }
+
+        let dir = temp_dir("reencrypt_table_rotation");
+        let secret_a = "rotate-secret-A";
+        let secret_b = "rotate-secret-B";
+        let k1 = BASE64_STANDARD.encode([5u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let k2 = BASE64_STANDARD.encode([6u8; ENCRYPTION_MASTER_KEY_LEN]);
+
+        let mut engine = Engine::open(&dir)?;
+        engine
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64: k1,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine
+            .settings_encryption_set_mode(
+                skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                    db: "app".to_string(),
+                    mode: "enc_random".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        seed_events_table(&mut engine, secret_a, secret_b)?;
+
+        // Rows are initially sealed under k1.
+        let disk: TableRowsDisk = load_json(&engine.table_path("app", "events"))
+            .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
+        assert!(disk_rows_contain_encrypted_cells(&disk));
+        assert!(payload_key_ids(&disk)
+            .iter()
+            .all(|k| k.as_deref() == Some("k1")));
+
+        // Register and rotate to k2. Rotation only flips the active key; existing rows are
+        // still sealed under k1 until a re-encryption sweep runs.
+        engine
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k2".to_string(),
+                    master_key_b64: k2,
+                    make_active: false,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine
+            .settings_encryption_rotate_key(
+                skeindb_skeinql::methods::SettingsEncryptionRotateKeyParams {
+                    db: "app".to_string(),
+                    new_key_id: "k2".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        let pre_sweep: TableRowsDisk = load_json(&engine.table_path("app", "events"))
+            .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
+        assert!(payload_key_ids(&pre_sweep)
+            .iter()
+            .all(|k| k.as_deref() == Some("k1")));
+
+        // Sweep: re-encrypt the table under the active key (k2).
+        let result = engine
+            .settings_encryption_reencrypt_table(
+                skeindb_skeinql::methods::SettingsEncryptionReencryptTableParams {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(result["ok"], serde_json::json!(true));
+        assert_eq!(result["encrypted"], serde_json::json!(true));
+        assert_eq!(result["rewrote"], serde_json::json!(true));
+        assert_eq!(result["rows"], serde_json::json!(2));
+        assert_eq!(result["active_key_id"], serde_json::json!("k2"));
+
+        // On-disk envelopes are now sealed under k2.
+        let post_sweep: TableRowsDisk = load_json(&engine.table_path("app", "events"))
+            .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
+        assert!(payload_key_ids(&post_sweep)
+            .iter()
+            .all(|k| k.as_deref() == Some("k2")));
+
+        // Values still decrypt transparently after re-opening with both keys removed but k2
+        // registered (proves the new envelopes are independent of k1).
+        let rows = &engine
+            .tables
+            .get(&TableKey {
+                db: "app".to_string(),
+                table: "events".to_string(),
+            })
+            .expect("events present")
+            .rows;
+        assert!(rows.iter().any(|entry| matches!(
+            entry.row.get("payload"),
+            Some(Lit::Str { v }) if v == secret_a
+        )));
+
+        // A table in a database without active encryption is a no-op (no rewrite).
+        engine.create_table(
+            "plain",
+            "notes",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let noop = engine
+            .settings_encryption_reencrypt_table(
+                skeindb_skeinql::methods::SettingsEncryptionReencryptTableParams {
+                    db: "plain".to_string(),
+                    table: "notes".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(noop["encrypted"], serde_json::json!(false));
+        assert_eq!(noop["rewrote"], serde_json::json!(false));
+
+        // Unknown table is rejected.
+        let err = engine
+            .settings_encryption_reencrypt_table(
+                skeindb_skeinql::methods::SettingsEncryptionReencryptTableParams {
+                    db: "app".to_string(),
+                    table: "missing".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("table not found"), "unexpected error: {err}");
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

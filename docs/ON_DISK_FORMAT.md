@@ -696,6 +696,13 @@ Rules:
   indexes.
 - v2/v3 row files (plaintext, optionally value-ref-backed) remain readable; v4 is
   only emitted when encryption is active for the owning database.
+- Rotating the active key (`settings.encryption.rotate_key`) only flips the
+  database's active key id; rows already written stay sealed under the previous
+  key (still decryptable while it is registered). The
+  `settings.encryption.reencrypt_table` RPC rewrites a table's backing file so
+  every encrypted cell is re-sealed under the current active key, completing the
+  rotation. It does not change the on-disk format (still `format_version: 4`) and
+  is a no-op when the database has no active encryption mode/key.
 
 ### 11.9 tables/<db>/<table>.rseg (prototype segment container v1)
 
