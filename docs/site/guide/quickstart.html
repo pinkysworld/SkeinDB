@@ -175,12 +175,12 @@ cargo<span class="w"> </span>build<span class="w"> </span>--release
 <h2 id="3-run-your-first-query">3. Run your first query<a class="headerlink" href="#3-run-your-first-query" title="Permanent link">¶</a></h2>
 <p>Pick your favourite path:</p>
 <h3 id="a-native-skeinql-curl">A. Native SkeinQL (curl)<a class="headerlink" href="#a-native-skeinql-curl" title="Permanent link">¶</a></h3>
-<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/skeinql<span class="w"> </span><span class="se">\</span>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;ping&quot;,&quot;params&quot;:{}}&#39;</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;system.ping&quot;,&quot;params&quot;:{}}&#39;</span>
 </code></pre></div>
 
-<p>You should see <code>{"jsonrpc":"2.0","id":1,"result":{"pong":true,...}}</code>.</p>
+<p>You should see <code>{"id":1,"ok":true,"result":{"pong":true,...}}</code>.</p>
 <p>Continue with <a href="first-query.html">Your first query</a> to create a table and insert rows.</p>
 <h3 id="b-mysql-client">B. MySQL client<a class="headerlink" href="#b-mysql-client" title="Permanent link">¶</a></h3>
 <div class="codehilite"><pre><span></span><code>mysql<span class="w"> </span>-h<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>-P<span class="w"> </span><span class="m">3306</span><span class="w"> </span>-u<span class="w"> </span>root<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;SELECT VERSION();&quot;</span>

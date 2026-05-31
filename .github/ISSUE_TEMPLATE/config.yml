@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Commercial inquiry
+    url: https://github.com/pinkysworld/SkeinDB/issues/new?template=commercial_inquiry.md
+    about: Licensing, support, or partnership questions.
+  - name: Security disclosure
+    url: https://github.com/pinkysworld/SkeinDB/security/advisories/new
+    about: Report a vulnerability privately (see SECURITY.md).

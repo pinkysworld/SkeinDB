@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an enhancement or new capability
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and what is blocking you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or API you would like.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - SkeinQL
+        - MySQL compatibility
+        - PostgreSQL compatibility
+        - SkeinAdmin console
+        - Storage engine
+        - Research track (R01-R20)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

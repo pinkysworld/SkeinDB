@@ -61,7 +61,7 @@ test('CDC table subscription begins, polls, and closes cleanly', async ({ page }
 
   await waitForRpc(page, 'cdc.poll', () => page.locator('#btnCdcPoll').click());
   await page.locator('#btnCdcClose').click();
-  await expect(page.locator('#modalOverlay.active')).toBeVisible();
+  await expect(page.locator('#modalOverlay.open')).toBeVisible();
   const confirmClose = page.locator('#modalActions button').filter({ hasText: 'Close' });
   await expect(confirmClose).toBeVisible();
   await waitForRpc(page, 'cdc.close', () => confirmClose.evaluate((button) => button.click()));

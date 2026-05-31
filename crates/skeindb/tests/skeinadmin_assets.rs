@@ -801,3 +801,67 @@ fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_modal_uses_consistent_open_class_and_no_inline_handlers() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    // The modal overlay is shown via the `.open` class in CSS, so skeinModal must
+    // toggle the same class. A regression to `.active` makes the dialog invisible.
+    assert!(
+        html.contains(".modal-overlay.open{"),
+        "modal CSS should key visibility on the .open class"
+    );
+    assert!(
+        js.contains("overlay.classList.add('open')")
+            && js.contains("overlay.classList.remove('open')"),
+        "skeinModal must toggle the .open class to match the CSS"
+    );
+    assert!(
+        !js.contains("classList.add('active')") || !js.contains("modalOverlay"),
+        "skeinModal must not rely on the unstyled .active class"
+    );
+
+    // ES-module scripts cannot expose inline onclick handlers, so the bundle must
+    // not emit any. Revoke actions go through delegated data-attributes instead.
+    assert!(
+        !js.contains("onclick=\""),
+        "main.js must not render inline onclick handlers (module scope)"
+    );
+    assert!(
+        js.contains("data-revoke-token=") && js.contains("data-revoke-token]"),
+        "token revoke must use a delegated data-attribute handler"
+    );
+
+    // Destructive Easy-Viewer schema changes must use the in-app modal, not the
+    // native confirm dialog (which is blocked in many embedded contexts).
+    assert!(
+        !js.contains("window.confirm"),
+        "main.js must not use window.confirm; use skeinModal instead"
+    );
+}
+
+#[test]
+fn skeinadmin_modal_and_palette_expose_accessibility_roles() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+
+    for marker in [
+        "id=\"modalOverlay\" aria-hidden=\"true\"",
+        "role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modalTitle\"",
+        "id=\"cmdPalette\" aria-hidden=\"true\"",
+        "role=\"listbox\"",
+        "role=\"combobox\"",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin accessibility markup missing: {marker}"
+        );
+    }
+}

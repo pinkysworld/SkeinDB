@@ -43,12 +43,12 @@ Pick your favourite path:
 ### A. Native SkeinQL (curl)
 
 ```bash
-curl -s -XPOST http://127.0.0.1:8080/skeinql \
+curl -s -XPOST http://127.0.0.1:8080/api/v1/rpc \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+  -d '{"skeinql":"1.0","id":1,"method":"system.ping","params":{}}'
 ```
 
-You should see `{"jsonrpc":"2.0","id":1,"result":{"pong":true,...}}`.
+You should see `{"id":1,"ok":true,"result":{"pong":true,...}}`.
 
 Continue with [Your first query](first-query.html) to create a table and insert rows.
 

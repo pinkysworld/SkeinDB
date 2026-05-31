@@ -2227,7 +2227,7 @@ function easyShowToast(msg, type) {
 }
 
 // ---------------------------------------------------------------------------
-// Modal confirmation dialog (replaces window.confirm)
+// Modal confirmation dialog (in-app replacement for the native confirm dialog)
 // ---------------------------------------------------------------------------
 
 function skeinModal(icon, title, body, buttons) {
@@ -2241,18 +2241,45 @@ function skeinModal(icon, title, body, buttons) {
     if (iconEl) iconEl.textContent = icon || '\u26A0\uFE0F';
     if (titleEl) titleEl.textContent = title || 'Confirm';
     if (bodyEl) bodyEl.textContent = body || '';
+    const previouslyFocused = document.activeElement;
+    let settled = false;
+    const close = (value) => {
+      if (settled) return;
+      settled = true;
+      overlay.classList.remove('open');
+      overlay.setAttribute('aria-hidden', 'true');
+      document.removeEventListener('keydown', onKeydown, true);
+      overlay.removeEventListener('click', onOverlayClick);
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        try { previouslyFocused.focus(); } catch (_) {}
+      }
+      resolve(value);
+    };
+    const onOverlayClick = (e) => { if (e.target === overlay) close(false); };
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+    };
+    let firstButton = null;
     if (actionsEl) {
       actionsEl.textContent = '';
-      (buttons || [{ label: 'Cancel', value: false }, { label: 'OK', value: true, cls: 'primary' }]).forEach(btn => {
+      (buttons || [{ label: 'Cancel', value: false }, { label: 'OK', value: true, cls: 'primary' }]).forEach((btn, i) => {
         const b = document.createElement('button');
         b.textContent = btn.label;
         b.className = btn.cls || 'ghost';
-        b.addEventListener('click', () => { overlay.classList.remove('active'); resolve(btn.value); });
+        b.addEventListener('click', () => close(btn.value));
         actionsEl.appendChild(b);
+        if (i === 0) firstButton = b;
       });
     }
-    overlay.classList.add('active');
-    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.classList.remove('active'); resolve(false); } }, { once: true });
+    overlay.classList.add('open');
+    overlay.setAttribute('aria-hidden', 'false');
+    overlay.addEventListener('click', onOverlayClick);
+    document.addEventListener('keydown', onKeydown, true);
+    // Focus the primary/last action so keyboard users can confirm or cancel immediately.
+    const focusTarget = (actionsEl && actionsEl.lastElementChild) || firstButton;
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      try { focusTarget.focus(); } catch (_) {}
+    }
   });
 }
 
@@ -3576,11 +3603,14 @@ async function easyDesignApply() {
       easyShowToast('No changes to apply.', 'info');
       return;
     }
-    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-      const ok = window.confirm('Apply ' + plan.statements.length + ' ALTER TABLE statement(s) to '
-        + STATE.easyDesignTable.db + '.' + STATE.easyDesignTable.table + '?');
-      if (!ok) return;
-    }
+    const ok = await skeinModal('\u26A0\uFE0F', 'Apply schema changes',
+      'Apply ' + plan.statements.length + ' ALTER TABLE statement(s) to '
+        + STATE.easyDesignTable.db + '.' + STATE.easyDesignTable.table + '?',
+      [
+        { label: 'Cancel', cls: 'secondary' },
+        { label: 'Apply', cls: 'danger', value: true }
+      ]);
+    if (!ok) return;
     const results = [];
     for (const sql of plan.statements) {
       const res = await call('sql.exec', cleanParams({ sql, default_db: STATE.easyDesignTable.db }), 'easyDesignOut');
@@ -4740,7 +4770,7 @@ async function securityRefreshTokens(opts) {
       const created = t.created_at_ms ? new Date(t.created_at_ms).toLocaleString() : '-';
       const expires = t.expires_at_ms ? new Date(t.expires_at_ms).toLocaleString() : 'never';
       h += '<tr><td style="font-family:monospace;font-size:11px">' + escapeHtml(t.token_id) + '</td><td>' + escapeHtml(t.role) + '</td><td>' + escapeHtml(t.label || '-') + '</td><td>' + created + '</td><td>' + expires + '</td>';
-      h += '<td><button class="danger sm" onclick="securityRevokeToken(\'' + escapeHtml(t.token_id) + '\')">Revoke</button></td></tr>';
+      h += '<td><button class="danger sm" data-revoke-token="' + escapeHtml(t.token_id) + '">Revoke</button></td></tr>';
     });
     h += '</tbody></table>';
     grid.innerHTML = h;
@@ -6567,9 +6597,23 @@ function renderHelpPanel() {
 }
 
 function setActivePanel(panel, updateHash) {
+  // Guard against unknown hashes/links so the UI never lands on a blank screen.
+  const known = document.querySelector('.panel[data-panel="' + (window.CSS && CSS.escape ? CSS.escape(panel) : panel) + '"]');
+  if (!known) {
+    panel = window.location.pathname.includes('/console') ? 'workspace' : 'overview';
+  }
   document.querySelectorAll('.panel').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
-  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
-  document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
+  document.querySelectorAll('.nav-item').forEach(el => {
+    const isActive = el.dataset.panel === panel;
+    el.classList.toggle('active', isActive);
+    if (isActive) el.setAttribute('aria-current', 'page');
+    else el.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.tab-btn').forEach(el => {
+    const isActive = el.dataset.panel === panel;
+    el.classList.toggle('active', isActive);
+    el.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
   updateHeader(panel); updateContext();
   if (panel === 'workspace') {
     renderPreparedWorkspace();
@@ -6684,11 +6728,14 @@ function initCommandPalette() {
 }
 
 let cmdSelectedIndex = 0;
+let cmdPrevFocus = null;
 
 function openCommandPalette() {
   const overlay = $('cmdPalette');
   if (!overlay) return;
+  cmdPrevFocus = document.activeElement;
   overlay.classList.add('open');
+  overlay.setAttribute('aria-hidden', 'false');
   const input = $('cmdInput');
   if (input) { input.value = ''; input.focus(); }
   cmdSelectedIndex = 0;
@@ -6697,7 +6744,14 @@ function openCommandPalette() {
 
 function closeCommandPalette() {
   const overlay = $('cmdPalette');
-  if (overlay) overlay.classList.remove('open');
+  if (overlay) {
+    overlay.classList.remove('open');
+    overlay.setAttribute('aria-hidden', 'true');
+  }
+  if (cmdPrevFocus && typeof cmdPrevFocus.focus === 'function') {
+    try { cmdPrevFocus.focus(); } catch (_) {}
+    cmdPrevFocus = null;
+  }
 }
 
 function renderCommandResults(filter) {
@@ -6712,6 +6766,8 @@ function renderCommandResults(filter) {
   shown.forEach((item, i) => {
     const div = document.createElement('div');
     div.className = 'cmd-palette-item' + (i === cmdSelectedIndex ? ' selected' : '');
+    div.setAttribute('role', 'option');
+    div.setAttribute('aria-selected', i === cmdSelectedIndex ? 'true' : 'false');
     div.innerHTML = '<span class="cmd-item-label">' + escapeHtml(item.label) + '</span>' + (item.hint ? '<span class="cmd-item-hint">' + escapeHtml(item.hint) + '</span>' : '');
     div.addEventListener('click', () => { closeCommandPalette(); item.action(); });
     container.appendChild(div);
@@ -7187,6 +7243,13 @@ wire('btnMigrationCopyMd', copyMigrationMarkdown);
 wire('btnSecCreateToken', securityCreateToken);
 wire('btnSecRefreshTokens', securityRefreshTokens);
 wire('btnSecTopQueries', securityTopQueries);
+// Delegated revoke handling (the token grid is re-rendered, so bind once on the container).
+if ($('secTokenGrid')) $('secTokenGrid').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-revoke-token]');
+  if (!btn) return;
+  const tokenId = btn.getAttribute('data-revoke-token');
+  if (tokenId) securityRevokeToken(tokenId);
+});
 
 // Encryption (T193)
 wire('btnEncStatus', () => call('settings.encryption.status', {}, 'encStatusOut'));

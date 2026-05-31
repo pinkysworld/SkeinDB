@@ -2,10 +2,10 @@
   "name": "skeinadmin",
   "private": true,
   "version": "0.0.1",
-  "description": "Standalone management console for SkeinDB (placeholder scaffold)",
+  "description": "SkeinAdmin — framework-free management console for SkeinDB (served embedded at /admin and /console).",
   "license": "Apache-2.0",
   "scripts": {
     "dev": "npx http-server -p 5174 .",
-    "build": "echo 'Static placeholder: nothing to build yet.'"
+    "build": "echo 'Static console: no build step required (vanilla HTML/CSS/ES modules).'"
   }
 }

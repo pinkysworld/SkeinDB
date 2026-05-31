@@ -86,78 +86,112 @@ You can now access:
 
 ## 4) First SkeinQL commands
 
-### 3.1 Health check
+SkeinQL is a JSON-RPC-style protocol with its own envelope: every request sends
+`"skeinql":"1.0"`, a client-chosen `id`, a `method`, and `params`. Responses come
+back as `{"id":...,"ok":true,"result":{...}}` or `{"id":...,"ok":false,"error":{...}}`.
+
+### 4.1 Health check
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"system.ping","params":{}}'
+  -d '{"skeinql":"1.0","id":1,"method":"system.version","params":{}}'
 ```
 
-### 3.2 Create a schema
+### 4.2 Create a database
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
   -d '{
-    "jsonrpc":"2.0",
+    "skeinql":"1.0",
     "id":2,
-    "method":"schema.create",
+    "method":"schema.create_database",
+    "params":{"db":"demo"}
+  }'
+```
+
+### 4.3 Create a table
+
+Column types are described with a `TypeDesc` object (`{"kind":"i64"}`,
+`{"kind":"string"}`, ...).
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{
+    "skeinql":"1.0",
+    "id":3,
+    "method":"schema.create_table",
     "params":{
-      "name":"demo",
-      "tables":[
-        {"name":"users","primary_key":["id"],"columns":[
-          {"name":"id","type":"i64"},
-          {"name":"name","type":"string"},
-          {"name":"updated_at","type":"i64"}
-        ]}
+      "db":"demo",
+      "table":"users",
+      "primary_key":["id"],
+      "columns":[
+        {"name":"id","type":{"kind":"i64"},"nullable":false},
+        {"name":"name","type":{"kind":"string"},"nullable":false},
+        {"name":"updated_at","type":{"kind":"i64"},"nullable":true}
       ]
     }
   }'
 ```
 
-### 3.3 Insert data
+### 4.4 Insert data
+
+Row values are typed SkeinQL literals (`Lit` envelopes): `{"t":"i64","v":1}`,
+`{"t":"str","v":"Ada"}`, and so on.
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
   -d '{
-    "jsonrpc":"2.0",
-    "id":3,
+    "skeinql":"1.0",
+    "id":4,
     "method":"data.insert",
     "params":{
-      "schema":"demo",
-      "table":"users",
+      "into":{"db":"demo","table":"users"},
       "rows":[
-        {"id":1,"name":"Ada","updated_at":1},
-        {"id":2,"name":"Linus","updated_at":1}
+        {"id":{"t":"i64","v":1},"name":{"t":"str","v":"Ada"},"updated_at":{"t":"i64","v":1}},
+        {"id":{"t":"i64","v":2},"name":{"t":"str","v":"Linus"},"updated_at":{"t":"i64","v":1}}
       ]
     }
   }'
 ```
 
-### 3.4 Query select
+### 4.5 Query select
+
+A `query.select` request carries a structured `Query`: the projection and `from`
+list live under `body.select`, and `order_by` items reference an `expr`.
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
   -d '{
-    "jsonrpc":"2.0",
-    "id":4,
+    "skeinql":"1.0",
+    "id":5,
     "method":"query.select",
     "params":{
       "query":{
-        "schema":"demo",
-        "table":"users",
-        "select":[{"col":"id"},{"col":"name"}],
-        "order_by":[{"col":"id","dir":"asc"}]
+        "body":{
+          "select":{
+            "projection":[
+              {"expr":{"col":"id"}},
+              {"expr":{"col":"name"}}
+            ],
+            "from":[{"db":"demo","table":"users"}]
+          }
+        },
+        "order_by":[{"expr":{"col":"id"},"dir":"asc"}]
       },
       "result_format":"objects_json"
     }
   }'
 ```
 
-### 3.5 SQL compatibility endpoint + information_schema
+The response includes the rows under `result.data`, plus a cache `etag` and
+`causality` token you can feed back into later reads (see §6).
+
+### 4.6 SQL compatibility endpoint + information_schema
 
 The SQL compatibility helper endpoint is available at `POST /api/v1/sql/exec`.
 It now supports virtual metadata queries over:
@@ -172,12 +206,12 @@ curl -s http://127.0.0.1:8080/api/v1/sql/exec \
   -d '{"sql":"SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10"}'
 ```
 
-### 3.6 Transaction handles (SkeinQL)
+### 4.7 Transaction handles (SkeinQL)
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":8,"method":"tx.begin","params":{"read_only":true}}'
+  -d '{"skeinql":"1.0","id":8,"method":"tx.begin","params":{"read_only":true}}'
 ```
 
 Commit:
@@ -185,7 +219,7 @@ Commit:
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":9,"method":"tx.commit","params":{"tx_id":"tx_0000000000000001"}}'
+  -d '{"skeinql":"1.0","id":9,"method":"tx.commit","params":{"tx_id":"tx_0000000000000001"}}'
 ```
 
 ---
@@ -214,7 +248,7 @@ Example:
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":5,"method":"stats.snapshot","params":{}}'
+  -d '{"skeinql":"1.0","id":5,"method":"stats.snapshot","params":{}}'
 ```
 
 Top query fingerprints (by total time/count/latency):
@@ -222,7 +256,7 @@ Top query fingerprints (by total time/count/latency):
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":6,"method":"stats.top_queries","params":{"limit":10,"sort_by":"total_ms"}}'
+  -d '{"skeinql":"1.0","id":6,"method":"stats.top_queries","params":{"limit":10,"sort_by":"total_ms"}}'
 ```
 
 Recent slow queries:
@@ -230,7 +264,7 @@ Recent slow queries:
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":7,"method":"stats.slow_queries","params":{"min_ms":200,"limit":20}}'
+  -d '{"skeinql":"1.0","id":7,"method":"stats.slow_queries","params":{"min_ms":200,"limit":20}}'
 ```
 
 ---

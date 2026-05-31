@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible problem in SkeinDB
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include the version string from the
+        **Version** button in the SkeinAdmin topbar (or `system.version` output).
+  - type: input
+    id: version
+    attributes:
+      label: SkeinDB version
+      placeholder: "e.g. 0.3.18"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - SkeinQL JSON-RPC
+        - MySQL protocol
+        - PostgreSQL protocol
+        - SkeinAdmin console
+        - Storage engine
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands or RPC payloads that reproduce the issue.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 14, Ubuntu 24.04"
+    validations:
+      required: false

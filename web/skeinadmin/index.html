@@ -375,8 +375,8 @@
   </head>
   <body data-app="skeinadmin" data-mode="admin">
     <div class="toast-container" id="toastContainer"></div>
-    <div class="modal-overlay" id="modalOverlay"><div class="modal-dialog"><div class="modal-icon" id="modalIcon"></div><div class="modal-title" id="modalTitle"></div><div class="modal-body" id="modalBody"></div><div class="modal-actions" id="modalActions"></div></div></div>
-    <div class="cmd-palette-overlay" id="cmdPalette"><div class="cmd-palette"><input class="cmd-palette-input" id="cmdInput" placeholder="Search actions, panels, methods…" autocomplete="off" /><div class="cmd-palette-results" id="cmdResults"></div></div></div>
+    <div class="modal-overlay" id="modalOverlay" aria-hidden="true"><div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalBody"><div class="modal-icon" id="modalIcon" aria-hidden="true"></div><div class="modal-title" id="modalTitle"></div><div class="modal-body" id="modalBody"></div><div class="modal-actions" id="modalActions"></div></div></div>
+    <div class="cmd-palette-overlay" id="cmdPalette" aria-hidden="true"><div class="cmd-palette" role="dialog" aria-modal="true" aria-label="Command palette"><input class="cmd-palette-input" id="cmdInput" placeholder="Search actions, panels, methods…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="cmdResults" aria-autocomplete="list" /><div class="cmd-palette-results" id="cmdResults" role="listbox" aria-label="Command results"></div></div></div>
     <div class="app-shell">
       <aside class="sidebar">
         <div><div class="brand-title">SkeinAdmin</div><div class="brand-sub">SkeinDB control plane</div></div>

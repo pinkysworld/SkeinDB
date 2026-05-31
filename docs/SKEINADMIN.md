@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-16
+Last updated: 2026-05-29
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -13,6 +13,32 @@ SkeinDB now ships an embedded SkeinAdmin build at:
 - `/console` for SQL/workspace-first operation
 
 The same UI bundle powers both routes, with mode-aware navigation and controls.
+
+## Reliability & accessibility hardening (v0.3.18)
+
+The embedded console received a round of reliability and accessibility fixes:
+
+- **Confirmation modals are reliably visible.** The shared `skeinModal` dialog and
+  its CSS now agree on the `.open` state class, so destructive confirmations
+  (token revoke, CDC close, schema apply) actually render instead of staying
+  invisible.
+- **No inline event handlers.** SkeinAdmin ships as an ES module, so all actions —
+  including per-row token revoke — use delegated `data-*` handlers rather than
+  inline `onclick` attributes that cannot resolve in module scope.
+- **In-app confirmations only.** Easy-Viewer schema changes use the in-app modal
+  instead of the native browser confirm dialog, which is blocked in some embedded
+  hosting contexts.
+- **Unknown deep links degrade gracefully.** Navigating to an unrecognized
+  `#hash` falls back to the Overview (admin) or Workspace (console) panel instead
+  of leaving a blank screen.
+- **ARIA + focus management.** The modal and command palette expose
+  `role="dialog"`/`aria-modal`, the palette results use listbox/option semantics,
+  nav items advertise `aria-current`, focus is trapped/restored, and `Escape`
+  closes either overlay.
+
+These behaviors are covered by `crates/skeindb/tests/skeinadmin_assets.rs` and the
+Playwright glitch-sanity suite (`tests/playwright/specs/04-glitch-sanity.spec.cjs`).
+
 
 ## In-app Help Center (v0.3.8)
 
