@@ -20276,6 +20276,99 @@ fn eval_expr(
                         v: type_name.to_string(),
                     })
                 }
+                "pg_table_is_visible"
+                | "pg_type_is_visible"
+                | "pg_function_is_visible"
+                | "pg_opclass_is_visible"
+                | "pg_operator_is_visible"
+                | "pg_collation_is_visible"
+                | "pg_conversion_is_visible"
+                | "pg_ts_config_is_visible"
+                | "pg_ts_dict_is_visible"
+                | "pg_ts_parser_is_visible"
+                | "pg_ts_template_is_visible" => {
+                    // SkeinDB exposes a single schema on the search_path, so every
+                    // catalog object a driver probes for is visible.
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(value, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Bool { v: true })
+                }
+                "has_table_privilege"
+                | "has_column_privilege"
+                | "has_any_column_privilege"
+                | "has_schema_privilege"
+                | "has_database_privilege"
+                | "has_sequence_privilege"
+                | "has_function_privilege"
+                | "has_language_privilege"
+                | "has_tablespace_privilege"
+                | "has_server_privilege"
+                | "has_foreign_data_wrapper_privilege" => {
+                    // Single-tenant deployments run as an owner/superuser, so all
+                    // privilege probes succeed. Evaluate the args for side effects
+                    // and NULL propagation only.
+                    if fargs.is_empty() {
+                        anyhow::bail!("{name} requires at least 1 arg");
+                    }
+                    for arg in fargs.iter() {
+                        if matches!(eval_expr(arg, row, ctx, args)?, Lit::Null) {
+                            return Ok(Lit::Null);
+                        }
+                    }
+                    Ok(Lit::Bool { v: true })
+                }
+                "pg_get_userbyid" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("pg_get_userbyid requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(value, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Str {
+                        v: "skeindb".to_string(),
+                    })
+                }
+                "pg_encoding_to_char" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("pg_encoding_to_char requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(value, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    // SkeinDB always serves UTF-8 (PostgreSQL encoding id 6).
+                    Ok(Lit::Str {
+                        v: "UTF8".to_string(),
+                    })
+                }
+                "format_type" => {
+                    if fargs.is_empty() || fargs.len() > 2 {
+                        anyhow::bail!("format_type requires 1 or 2 args");
+                    }
+                    let oid_value = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(oid_value, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let Some(oid) = lit_to_i64(&oid_value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let typmod = match fargs.get(1) {
+                        Some(expr) => match eval_expr(expr, row, ctx, args)? {
+                            Lit::Null => -1,
+                            other => lit_to_i64(&other).unwrap_or(-1),
+                        },
+                        None => -1,
+                    };
+                    Ok(Lit::Str {
+                        v: pg_format_type_name(oid, typmod),
+                    })
+                }
                 "pg_format" if !fargs.is_empty() => {
                     let fmt = eval_expr(&fargs[0], row, ctx, args)?;
                     let Some(fmt_str) = lit_to_string_for_like(&fmt) else {
@@ -20822,6 +20915,62 @@ fn mysql_json_merge_preserve(a: serde_json::Value, b: serde_json::Value) -> serd
             serde_json::Value::Array(ab)
         }
         (a, b) => serde_json::Value::Array(vec![a, b]),
+    }
+}
+
+/// Render a PostgreSQL type name for `format_type(oid, typmod)`.
+///
+/// Covers the common base/array OIDs SkeinDB advertises, applying length and
+/// precision/scale modifiers the way upstream PostgreSQL does for the types
+/// that carry them. Unknown OIDs fall back to the numeric form so probes still
+/// receive a deterministic, non-error answer.
+fn pg_format_type_name(oid: i64, typmod: i64) -> String {
+    let base = match oid {
+        16 => "boolean",
+        17 => "bytea",
+        20 => "bigint",
+        21 => "smallint",
+        23 => "integer",
+        25 => "text",
+        26 => "oid",
+        114 => "json",
+        700 => "real",
+        701 => "double precision",
+        1042 => "character",
+        1043 => "character varying",
+        1082 => "date",
+        1083 => "time without time zone",
+        1114 => "timestamp without time zone",
+        1184 => "timestamp with time zone",
+        1700 => "numeric",
+        2950 => "uuid",
+        3802 => "jsonb",
+        1000 => "boolean[]",
+        1007 => "integer[]",
+        1009 => "text[]",
+        1015 => "character varying[]",
+        1016 => "bigint[]",
+        1021 => "real[]",
+        1022 => "double precision[]",
+        _ => return format!("???({oid})"),
+    };
+    if typmod < 0 {
+        return base.to_string();
+    }
+    match oid {
+        // varchar/bpchar store length as typmod-4.
+        1042 | 1043 => format!("{base}({})", typmod - 4),
+        // numeric packs precision/scale: ((precision << 16) | scale) + 4.
+        1700 => {
+            let packed = typmod - 4;
+            let precision = (packed >> 16) & 0xffff;
+            let scale = packed & 0xffff;
+            format!("numeric({precision},{scale})")
+        }
+        // time/timestamp store fractional-seconds precision directly.
+        1083 | 1114 => format!("{base}({typmod})"),
+        1184 => format!("timestamp({typmod}) with time zone"),
+        _ => base.to_string(),
     }
 }
 
@@ -50679,6 +50828,124 @@ mod tests {
             Lit::Str {
                 v: "boolean".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn pg_format_type_name_renders_common_types() {
+        assert_eq!(pg_format_type_name(23, -1), "integer");
+        assert_eq!(pg_format_type_name(20, -1), "bigint");
+        assert_eq!(pg_format_type_name(16, -1), "boolean");
+        assert_eq!(pg_format_type_name(25, -1), "text");
+        assert_eq!(pg_format_type_name(2950, -1), "uuid");
+        assert_eq!(pg_format_type_name(1009, -1), "text[]");
+        // varchar(n) stores length as typmod-4.
+        assert_eq!(pg_format_type_name(1043, 14), "character varying(10)");
+        // numeric(p,s) packs precision/scale.
+        assert_eq!(
+            pg_format_type_name(1700, ((10i64 << 16) | 2) + 4),
+            "numeric(10,2)"
+        );
+        // timestamptz keeps the precision before the time-zone suffix.
+        assert_eq!(pg_format_type_name(1184, 3), "timestamp(3) with time zone");
+        // Unknown OIDs degrade to a deterministic placeholder rather than erroring.
+        assert_eq!(pg_format_type_name(999999, -1), "???(999999)");
+    }
+
+    #[test]
+    fn eval_pg_driver_probe_functions_return_defaults() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let visible = Expr::Func {
+            name: "pg_table_is_visible".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::U64 { v: 12345 },
+            }],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&visible, &row, None, &args).unwrap(),
+            Lit::Bool { v: true }
+        );
+
+        let privilege = Expr::Func {
+            name: "has_table_privilege".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "public.users".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "SELECT".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&privilege, &row, None, &args).unwrap(),
+            Lit::Bool { v: true }
+        );
+
+        let userbyid = Expr::Func {
+            name: "pg_get_userbyid".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::U64 { v: 10 },
+            }],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&userbyid, &row, None, &args).unwrap(),
+            Lit::Str {
+                v: "skeindb".to_string()
+            }
+        );
+
+        let encoding = Expr::Func {
+            name: "pg_encoding_to_char".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::I64 { v: 6 },
+            }],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&encoding, &row, None, &args).unwrap(),
+            Lit::Str {
+                v: "UTF8".to_string()
+            }
+        );
+
+        let format = Expr::Func {
+            name: "format_type".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::I64 { v: 1043 },
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: 14 },
+                },
+            ],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&format, &row, None, &args).unwrap(),
+            Lit::Str {
+                v: "character varying(10)".to_string()
+            }
+        );
+
+        // NULL OID inputs propagate NULL rather than fabricating a value.
+        let null_visible = Expr::Func {
+            name: "pg_table_is_visible".to_string(),
+            args: vec![Expr::Lit { lit: Lit::Null }],
+            distinct: None,
+        };
+        assert_eq!(
+            eval_expr(&null_visible, &row, None, &args).unwrap(),
+            Lit::Null
         );
     }
 
