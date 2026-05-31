@@ -31173,6 +31173,58 @@ struct L0SegmentStats {
     bytes: u64,
 }
 
+/// Size-tiered classification of on-disk segment files used to drive
+/// multi-level compaction telemetry. Segments are bucketed by byte size
+/// relative to the configured L0 byte budget so operators can see how much
+/// space lives in small/hot (L0), medium (L1), and large/cold (L2) segments.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CompactionLevelStats {
+    l0_files: u64,
+    l0_bytes: u64,
+    l1_files: u64,
+    l1_bytes: u64,
+    l2_files: u64,
+    l2_bytes: u64,
+}
+
+/// Map a segment byte size to a compaction level: L0 for segments within the
+/// L0 byte budget, L1 for up to 8x that budget, and L2 for everything larger.
+fn compaction_segment_level(bytes: u64, l0_max_bytes: u64) -> u8 {
+    let l0 = l0_max_bytes.max(1);
+    if bytes <= l0 {
+        0
+    } else if bytes <= l0.saturating_mul(8) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Aggregate per-level segment statistics from a set of compaction tasks.
+fn classify_compaction_levels(
+    tasks: &[CompactionWorkerTask],
+    l0_max_bytes: u64,
+) -> CompactionLevelStats {
+    let mut stats = CompactionLevelStats::default();
+    for task in tasks {
+        match compaction_segment_level(task.bytes, l0_max_bytes) {
+            0 => {
+                stats.l0_files = stats.l0_files.saturating_add(1);
+                stats.l0_bytes = stats.l0_bytes.saturating_add(task.bytes);
+            }
+            1 => {
+                stats.l1_files = stats.l1_files.saturating_add(1);
+                stats.l1_bytes = stats.l1_bytes.saturating_add(task.bytes);
+            }
+            _ => {
+                stats.l2_files = stats.l2_files.saturating_add(1);
+                stats.l2_bytes = stats.l2_bytes.saturating_add(task.bytes);
+            }
+        }
+    }
+    stats
+}
+
 #[derive(Debug, Default, Clone)]
 struct WorkloadTelemetryBucket {
     ops: u64,
@@ -31368,6 +31420,7 @@ struct CompactionSchedulerConfig {
 struct CompactionRuntimeSnapshot {
     config: CompactionSchedulerConfig,
     l0: L0SegmentStats,
+    levels: CompactionLevelStats,
     soft_l0_files: u64,
     soft_l0_bytes: u64,
     l0_pressure_pct: f64,
@@ -31872,6 +31925,10 @@ fn collect_compaction_runtime(
     let settings = state.settings.lock().unwrap().clone();
     let config = compaction_scheduler_config(&settings);
     let l0 = collect_l0_segment_stats(&state.data_dir);
+    let levels = classify_compaction_levels(
+        &collect_compaction_worker_tasks(&state.data_dir),
+        config.max_l0_bytes,
+    );
     let soft_l0_files = (config.max_l0_files.saturating_mul(3) / 4).max(1);
     let soft_l0_bytes = (config.max_l0_bytes.saturating_mul(3) / 4).max(1);
     let file_pressure_pct = (l0.files as f64 / config.max_l0_files.max(1) as f64) * 100.0;
@@ -32150,6 +32207,7 @@ fn collect_compaction_runtime(
     CompactionRuntimeSnapshot {
         config,
         l0,
+        levels,
         soft_l0_files,
         soft_l0_bytes,
         l0_pressure_pct: round_metric(l0_pressure_pct),
@@ -32208,6 +32266,11 @@ fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
         "l0_files": snapshot.l0.files,
         "l0_bytes": snapshot.l0.bytes,
         "l0_pressure_pct": snapshot.l0_pressure_pct,
+        "levels": {
+            "l0": {"files": snapshot.levels.l0_files, "bytes": snapshot.levels.l0_bytes},
+            "l1": {"files": snapshot.levels.l1_files, "bytes": snapshot.levels.l1_bytes},
+            "l2": {"files": snapshot.levels.l2_files, "bytes": snapshot.levels.l2_bytes}
+        },
         "stall_rate": snapshot.stall_rate,
         "pressure_rate": snapshot.pressure_rate,
         "pressure": {
@@ -32901,6 +32964,45 @@ mod tests {
     use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse};
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn level_task(db: &str, table: &str, bytes: u64) -> CompactionWorkerTask {
+        CompactionWorkerTask {
+            db: db.to_string(),
+            table: table.to_string(),
+            path: PathBuf::from(format!("tables/{db}/{table}.rseg")),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn compaction_segment_level_buckets_by_l0_budget() {
+        // L0: within budget (inclusive), L1: up to 8x, L2: beyond 8x.
+        assert_eq!(compaction_segment_level(0, 1_000), 0);
+        assert_eq!(compaction_segment_level(1_000, 1_000), 0);
+        assert_eq!(compaction_segment_level(1_001, 1_000), 1);
+        assert_eq!(compaction_segment_level(8_000, 1_000), 1);
+        assert_eq!(compaction_segment_level(8_001, 1_000), 2);
+        // A zero budget is clamped to 1 to avoid divide/everything-L0 surprises.
+        assert_eq!(compaction_segment_level(1, 0), 0);
+        assert_eq!(compaction_segment_level(2, 0), 1);
+    }
+
+    #[test]
+    fn classify_compaction_levels_aggregates_files_and_bytes() {
+        let tasks = vec![
+            level_task("app", "small_a", 500),
+            level_task("app", "small_b", 1_000),
+            level_task("app", "medium", 4_000),
+            level_task("app", "large", 100_000),
+        ];
+        let stats = classify_compaction_levels(&tasks, 1_000);
+        assert_eq!(stats.l0_files, 2);
+        assert_eq!(stats.l0_bytes, 1_500);
+        assert_eq!(stats.l1_files, 1);
+        assert_eq!(stats.l1_bytes, 4_000);
+        assert_eq!(stats.l2_files, 1);
+        assert_eq!(stats.l2_bytes, 100_000);
+    }
 
     fn merge_sum_wasm_b64() -> String {
         let bytes = wat::parse_str(

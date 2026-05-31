@@ -47,6 +47,7 @@ Telemetry should be stored in a privacy-safe, bounded ring buffer.
 
 Current baseline:
 - `stats.snapshot` now exports a top-level `compaction` object with live `status`, `l0_files`, `l0_bytes`, `l0_pressure_pct`, `stall_rate`, `pressure_rate`, bounded pressure-event history, recent point/range/write rates, and read/write p50/p95/p99 latency percentiles.
+- `compaction.levels` reports a size-tiered, multi-level breakdown of live `.rseg` segments (`l0`/`l1`/`l2`, each with `files` and `bytes`). Segments are bucketed by byte size relative to `compaction.max_l0_bytes`: L0 within the budget, L1 up to 8x, L2 beyond. This surfaces how much space sits in small/hot vs. large/cold segments so operators can reason about multi-level compaction work.
 - L0 pressure is derived from live `.rseg` files under `tables/<db>/*.rseg`, and recent workload signals are derived from the existing bounded RPC/query telemetry ring buffer.
 - `stats.snapshot.compaction.scheduler` now reports the live policy, configured/effective budgets, active peak window, queued task summary, and priority/admission state derived from the same runtime telemetry.
 - `maintenance.compaction.status`, `maintenance.compaction.set_policy`, and `maintenance.compaction.pause` / `resume` persist policy state in `settings.json`, expose live scheduler decisions, and enforce safe-mode write backpressure for write-classified SkeinQL/HTTP mutations when hard L0 bounds are exceeded.
