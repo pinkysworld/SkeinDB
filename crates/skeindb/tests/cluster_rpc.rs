@@ -13181,33 +13181,71 @@ async fn pg_extended_query_copy_to_stdout_with_binary_format_roundtrip() -> anyh
 }
 
 #[tokio::test]
-async fn pg_simple_query_copy_from_stdin_with_binary_format_is_unsupported() -> anyhow::Result<()> {
+async fn pg_simple_query_copy_from_stdin_with_binary_format_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
-    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_binary_unsupported")?;
+    let server = HttpHarness::start_with_pg("pg_copy_from_stdin_binary")?;
     let mut stream = pg_connect_and_startup(server.pg_port()).await?;
 
     for sql in [
         "CREATE DATABASE app",
-        "CREATE TABLE app.pg_copy_binary_in (id BIGINT NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE app.pg_copy_binary_in (id BIGINT NOT NULL, name VARCHAR(255), PRIMARY KEY (id))",
     ] {
         let msgs = pg_simple_query(&mut stream, sql).await?;
         assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
     }
 
-    let msgs = pg_simple_query(
+    // Hand-build the documented binary COPY stream: 11-byte signature, a zero flags
+    // word, a zero-length header extension, two tuples, then the -1 trailer.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
+    payload.extend_from_slice(&0i32.to_be_bytes()); // flags
+    payload.extend_from_slice(&0i32.to_be_bytes()); // header extension length
+    let append_field = |buf: &mut Vec<u8>, bytes: Option<&[u8]>| match bytes {
+        Some(raw) => {
+            buf.extend_from_slice(&(raw.len() as i32).to_be_bytes());
+            buf.extend_from_slice(raw);
+        }
+        None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+    };
+    // Row 1: (1, "Ada")
+    payload.extend_from_slice(&2i16.to_be_bytes());
+    append_field(&mut payload, Some(&1i64.to_be_bytes()));
+    append_field(&mut payload, Some(b"Ada"));
+    // Row 2: (2, NULL)
+    payload.extend_from_slice(&2i16.to_be_bytes());
+    append_field(&mut payload, Some(&2i64.to_be_bytes()));
+    append_field(&mut payload, None);
+    payload.extend_from_slice(&(-1i16).to_be_bytes()); // trailer
+
+    let copy_msgs = pg_send_messages_until_ready(
         &mut stream,
-        "COPY app.pg_copy_binary_in FROM STDIN WITH (FORMAT binary)",
+        &[
+            (
+                b'Q',
+                pg_query_payload("COPY app.pg_copy_binary_in FROM STDIN WITH (FORMAT binary)"),
+            ),
+            (b'd', payload),
+            (b'c', Vec::new()),
+        ],
     )
     .await?;
 
-    assert_eq!(pg_message_tags(&msgs), vec![b'E', b'Z']);
-    let (code, message) = pg_error_response(&msgs)?;
-    assert_eq!(code, "0A000");
-    assert!(
-        message.contains("FORMAT binary"),
-        "unexpected message: {message}"
+    assert_eq!(pg_message_tags(&copy_msgs), vec![b'G', b'C', b'Z']);
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name FROM app.pg_copy_binary_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![Some("1".to_string()), Some("Ada".to_string())],
+            vec![Some("2".to_string()), None],
+        ]
     );
-    assert_eq!(pg_ready_status(&msgs)?, b'I');
 
     Ok(())
 }
