@@ -14,7 +14,7 @@ SkeinDB now ships an embedded SkeinAdmin build at:
 
 The same UI bundle powers both routes, with mode-aware navigation and controls.
 
-## Reliability & accessibility hardening (v0.3.18)
+## Reliability & accessibility hardening (v0.3.19)
 
 The embedded console received a round of reliability and accessibility fixes:
 

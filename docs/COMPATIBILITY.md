@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: v0.3.18 truth sync
-Last updated: 2026-05-11
+Status: v0.3.19 truth sync
+Last updated: 2026-06-01
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
@@ -211,7 +211,7 @@ The implementation is still partial but substantially deeper than the first brin
 - **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; SCRAM-SHA-256 when it is set
 - **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries, a `SELECT version()` compatibility response, and typed `RowDescription` metadata for the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline when the shared engine exposes those schema or literal types
 - **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, `pg_stat_activity`, and `pg_stat_database`
-- **PG dialect and DML:** `::` casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, array constructors, common `ON CONFLICT` rewrites, supported `RETURNING` extraction, and explicit unsupported-feature errors for `COPY`
+- **PG dialect and DML:** `::` casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, array constructors, common `ON CONFLICT` rewrites, supported `RETURNING` extraction, and text/csv/binary `COPY` coverage across the current tested option set
 - **Transaction handling:** PostgreSQL-style `ReadyForQuery` state (`I` / `T` / `E`), failed-transaction-block behavior, and undo-log-backed `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
 - **Extended query protocol:** `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, named statements + portals, `$1` placeholders, sync-based recovery after extended-query errors, typed `RowDescription` metadata, and binary result encoding for the current common scalar OID baseline
 - **PG regression corpus:** dedicated `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
@@ -231,7 +231,7 @@ HTTP  (8080) ──┘
 
 ### Still open
 - broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset
-- COPY protocol
+- broader COPY option matrix and remaining protocol edges
 - partial portal suspension for incremental `Execute` row draining
 - broader type/array/domain encoding beyond the current scalar and array OID baseline
 - broader driver/framework coverage and framework-specific bootstrap suites

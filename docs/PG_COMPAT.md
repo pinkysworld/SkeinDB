@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-05-28
+Last updated: 2026-06-01
 
 Status: Partial advanced baseline
 
@@ -99,7 +99,7 @@ For the current shared-engine subset, `RowDescription` now advertises common inf
 
 `COPY ... TO STDOUT` is now implemented in default/text/csv and binary formats for plain table exports and parenthesized `SELECT` queries. CSV exports additionally support `HEADER`, which emits a first `CopyData` frame with the selected column names before row data, and text/csv exports accept a single-byte `DELIMITER` override plus custom `NULL '...'` markers for row encoding. Supported CSV forms also accept single-byte `QUOTE` and `ESCAPE` overrides for export escaping and import parsing. Binary exports switch `CopyOutResponse` and column format codes to `1`, emit the PostgreSQL binary stream header, one binary-encoded row payload per `CopyData`, and the standard trailer before `CopyDone`. Binary `COPY ... FROM STDIN` is the mirror of this: `CopyInResponse` advertises overall and per-column binary format `1`, the buffered `CopyData` payload is validated against the `PGCOPY\n\xff\r\n\0` signature and flags (the OID bit is rejected), and each tuple's per-field length-prefixed values are decoded by column kind (big-endian integers and floats by width, `bool`, hyphenated `uuid`, and UTF-8 text) before being inserted through the normal write path.
 
-Default/text/csv `COPY table [ (col, ...) ] TO STDOUT`, `COPY table [ (col, ...) ] FROM STDIN`, `COPY (SELECT ...) TO STDOUT`, and binary `COPY ... TO STDOUT` are implemented over both simple-query and extended-query flows, with optional table-column lists on table targets and explicit `WITH (FORMAT text)`, `WITH (FORMAT csv)`, and `WITH (FORMAT binary)` plus PostgreSQL-style `WITH (TEXT)`, `WITH (CSV)`, and `WITH (BINARY)` aliases and legacy bare `WITH TEXT`, `WITH CSV`, and `WITH BINARY` forms accepted on supported shapes. `COPY FROM STDIN WITH (FORMAT csv, HEADER)` skips the first CSV row before row validation and insert assembly, `COPY FROM STDIN WITH (FORMAT csv, HEADER MATCH)` additionally rejects mismatched header names before inserts are built, and custom delimiters, quote markers, escape markers, plus `NULL` markers are threaded through both export and import parsing. The backend emits `CopyInResponse`, buffers incoming `CopyData` chunks, and commits them as one multi-row insert on `CopyDone`; extended-query completion still waits for `Sync` before `ReadyForQuery`. `COPY FROM STDIN WITH (FORMAT binary)` and most other COPY option coverage remain unsupported.
+Default/text/csv `COPY table [ (col, ...) ] TO STDOUT`, `COPY table [ (col, ...) ] FROM STDIN`, `COPY (SELECT ...) TO STDOUT`, and binary `COPY ... TO STDOUT` / `COPY ... FROM STDIN` are implemented over both simple-query and extended-query flows, with optional table-column lists on table targets and explicit `WITH (FORMAT text)`, `WITH (FORMAT csv)`, and `WITH (FORMAT binary)` plus PostgreSQL-style `WITH (TEXT)`, `WITH (CSV)`, and `WITH (BINARY)` aliases and legacy bare `WITH TEXT`, `WITH CSV`, and `WITH BINARY` forms accepted on supported shapes. `COPY FROM STDIN WITH (FORMAT csv, HEADER)` skips the first CSV row before row validation and insert assembly, `COPY FROM STDIN WITH (FORMAT csv, HEADER MATCH)` additionally rejects mismatched header names before inserts are built, and custom delimiters, quote markers, escape markers, plus `NULL` markers are threaded through both export and import parsing. The backend emits `CopyInResponse`, buffers incoming `CopyData` chunks, and commits them as one multi-row insert on `CopyDone`; extended-query completion still waits for `Sync` before `ReadyForQuery`.
 
 ### Extended query protocol
 
@@ -153,13 +153,14 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - simple-query `COPY ... TO/FROM STDOUT/STDIN WITH (FORMAT csv, NULL 'NULL')` round-trip covering literal `"NULL"`, unquoted nulls, and empty strings
 - simple-query `COPY ... FROM STDIN WITH (FORMAT csv, HEADER MATCH)` mismatch rejection before inserts are assembled
 - simple-query `COPY ... TO STDOUT WITH (FORMAT binary)` round-trip with binary `CopyOutResponse` and decoded row payloads
-- simple-query `COPY ... FROM STDIN WITH (FORMAT binary)` explicit `0A000` rejection
+- simple-query `COPY ... FROM STDIN WITH (FORMAT binary)` round-trip with binary stream decoding and row verification
 - extended-query `COPY table (col, ...) TO STDOUT WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
 - extended-query `COPY (SELECT ...) TO STDOUT WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
 - extended-query `COPY table FROM STDIN` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
 - extended-query `COPY table (col, ...) FROM STDIN WITH (FORMAT text)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
 - extended-query `COPY ... TO STDOUT WITH (FORMAT csv)` round-trip with `Parse` / `Bind` / `Execute` / `CopyOutResponse`
 - extended-query `COPY ... TO STDOUT WITH (FORMAT binary)` round-trip with `Parse` / `Bind` / `Execute` / binary `CopyOutResponse`
+- extended-query `COPY ... FROM STDIN WITH (FORMAT binary)` round-trip with `Parse` / `Bind` / `Execute` / binary `CopyInResponse` / `CopyDone` / `Sync`
 - extended-query `COPY ... FROM STDIN WITH (FORMAT csv)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
 - extended-query `COPY ... FROM STDIN WITH (FORMAT csv, HEADER)` round-trip with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `CopyDone` / `Sync`
 - extended-query `COPY ... FROM STDIN WITH (FORMAT csv, HEADER MATCH)` mismatch rejection with `Parse` / `Bind` / `Execute` / `CopyInResponse` / `Sync`
@@ -193,7 +194,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 ## Not implemented yet
 
 - broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset
-- binary `COPY ... FROM STDIN`, other COPY formats, and most COPY options beyond the current `FORMAT text` / `FORMAT csv` / `FORMAT binary`, parenthesized and legacy bare `TEXT` / `CSV` / `BINARY` aliases, text/csv `NULL`, CSV `HEADER`, CSV `HEADER MATCH`, and single-byte `DELIMITER` / `QUOTE` / `ESCAPE` support
+- most COPY options beyond the current `FORMAT text` / `FORMAT csv` / `FORMAT binary`, parenthesized and legacy bare `TEXT` / `CSV` / `BINARY` aliases, text/csv `NULL`, CSV `HEADER`, CSV `HEADER MATCH`, and single-byte `DELIMITER` / `QUOTE` / `ESCAPE` support
 - broader type/array/domain encoding beyond the current scalar and array OID baseline
 - broader portal suspension beyond prepared `SELECT` result sets
 - production-grade driver compatibility for Django, Rails, SQLAlchemy, `pgAdmin`, `DBeaver`, `psycopg`, and `node-postgres`

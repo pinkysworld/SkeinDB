@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="skeinadmin-standalone-management-console">SkeinAdmin (Standalone Management Console)<a class="headerlink" href="#skeinadmin-standalone-management-console" title="Permanent link">¶</a></h1>
 <p>Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-16</p>
+Last updated: 2026-05-29</p>
 <p>SkeinAdmin is a <strong>standalone</strong> management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
@@ -136,6 +136,29 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
 - <code>/admin</code> for full control-plane administration
 - <code>/console</code> for SQL/workspace-first operation</p>
 <p>The same UI bundle powers both routes, with mode-aware navigation and controls.</p>
+<h2 id="reliability-accessibility-hardening-v0319">Reliability &amp; accessibility hardening (v0.3.19)<a class="headerlink" href="#reliability-accessibility-hardening-v0319" title="Permanent link">¶</a></h2>
+<p>The embedded console received a round of reliability and accessibility fixes:</p>
+<ul>
+<li><strong>Confirmation modals are reliably visible.</strong> The shared <code>skeinModal</code> dialog and
+  its CSS now agree on the <code>.open</code> state class, so destructive confirmations
+  (token revoke, CDC close, schema apply) actually render instead of staying
+  invisible.</li>
+<li><strong>No inline event handlers.</strong> SkeinAdmin ships as an ES module, so all actions —
+  including per-row token revoke — use delegated <code>data-*</code> handlers rather than
+  inline <code>onclick</code> attributes that cannot resolve in module scope.</li>
+<li><strong>In-app confirmations only.</strong> Easy-Viewer schema changes use the in-app modal
+  instead of the native browser confirm dialog, which is blocked in some embedded
+  hosting contexts.</li>
+<li><strong>Unknown deep links degrade gracefully.</strong> Navigating to an unrecognized
+  <code>#hash</code> falls back to the Overview (admin) or Workspace (console) panel instead
+  of leaving a blank screen.</li>
+<li><strong>ARIA + focus management.</strong> The modal and command palette expose
+  <code>role="dialog"</code>/<code>aria-modal</code>, the palette results use listbox/option semantics,
+  nav items advertise <code>aria-current</code>, focus is trapped/restored, and <code>Escape</code>
+  closes either overlay.</li>
+</ul>
+<p>These behaviors are covered by <code>crates/skeindb/tests/skeinadmin_assets.rs</code> and the
+Playwright glitch-sanity suite (<code>tests/playwright/specs/04-glitch-sanity.spec.cjs</code>).</p>
 <h2 id="in-app-help-center-v038">In-app Help Center (v0.3.8)<a class="headerlink" href="#in-app-help-center-v038" title="Permanent link">¶</a></h2>
 <p>The console now includes a dedicated <strong>Help &amp; Docs</strong> panel reachable from the
 left nav, the top tab strip, the topbar <code>? Help</code> button, and the <code>?</code> keyboard
@@ -495,6 +518,7 @@ shortcut. The Help Center contains:</p>
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
+<li><a href="#reliability-accessibility-hardening-v0319">Reliability &amp; accessibility hardening (v0.3.19)</a></li>
 <li><a href="#in-app-help-center-v038">In-app Help Center (v0.3.8)</a></li>
 <li><a href="#1-design-goals">1) Design goals</a></li>
 <li><a href="#2-deployment-models">2) Deployment models</a><ul>

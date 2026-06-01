@@ -231,7 +231,7 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 - <code>scan</code> must be first and exactly once.
 - <code>project</code> must be last and exactly once.
 - <code>filter</code> is optional and must appear between scan and project.
-- <code>execution</code> is <code>generated_filter_project_v1</code> when the compiler can lower a fixed-width, non-null <code>u64</code>/<code>bool</code> filter/project plan into an embedded Wasm module.
+- <code>execution</code> is <code>generated_filter_project_v1</code> when the compiler can lower a fixed-width, non-null <code>u64</code>/<code>i64</code>/<code>bool</code> filter/project plan into an embedded Wasm module. Signed <code>i64</code> columns, params, and literals use signed Wasm opcodes (<code>i64.lt_s</code>/<code>le_s</code>/<code>gt_s</code>/<code>ge_s</code>, <code>i64.div_s</code>/<code>rem_s</code>); <code>u64</code> uses the unsigned variants. The two integer types share the 8-byte <code>i64.load</code>/<code>i64.store</code> layout and cannot be mixed in a single comparison/arithmetic operand pair.
 - <code>execution</code> falls back to <code>host_interpreted_v1</code> when the plan uses unsupported operators, nullable values, or non-fixed-width types.
 - <code>generated</code> is present only for compiled artifacts and records the generated module plus its input/output column metadata.</p>
 <hr />

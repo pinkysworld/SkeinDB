@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.19 - 2026-06-01
+
+- Ships a stabilization and operator-readiness release on top of v0.3.18, keeping compatibility claims conservative: MySQL remains corpus-backed but not complete, PostgreSQL remains a partial PG v3 baseline, and R18/R19 remain prototype implemented.
+- Completes PostgreSQL binary `COPY FROM STDIN` support for the current live PG path and fixes a panic regression so malformed binary COPY input returns a PostgreSQL error instead of terminating the connection worker.
+- Adds encryption re-sealing coverage with batch `EncryptedValueStore::reencrypt_values` and the `settings.encryption.reencrypt_table` RPC for rewriting encrypted table cells under the active key after rotation.
+- Adds CDC external file-sink draining, size-tiered compaction telemetry, alert escalation automation, and a reproducible transport benchmark report generator for operator workflows.
+- Adds stable-Rust wire-protocol fuzz coverage to CI and introduces Python, Node, and shell SkeinQL SDK examples with focused tests.
+- Extends generated Wasm filter/project plans to signed `i64` columns, extracts SkeinAdmin catalog data into a module, and corrects `system.capabilities` / docs to the current 147 advertised methods.
+- Validated during release prep with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings`, green `cargo test --workspace --all-features`, green Node/Python SDK example tests, green benchmark-report generator tests, and the 18-test SkeinAdmin Playwright live-UI suite.
+
 ## v0.3.18 - 2026-05-28
 
 - Adds encrypted-at-rest cell payloads for table rows, introducing on-disk format v4 with transparent encrypt-on-write / decrypt-on-read of cell values while keeping older v1-v3 segments readable.

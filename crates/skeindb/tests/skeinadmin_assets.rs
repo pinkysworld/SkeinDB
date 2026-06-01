@@ -718,9 +718,12 @@ fn skeinadmin_help_panel_exposes_comprehensive_documentation_center() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let html_path = repo_root.join("web/skeinadmin/index.html");
     let js_path = repo_root.join("web/skeinadmin/src/main.js");
+    let catalog_path = repo_root.join("web/skeinadmin/src/lib/catalog.js");
 
     let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
     let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+    let catalog =
+        fs::read_to_string(&catalog_path).expect("read web/skeinadmin/src/lib/catalog.js");
 
     for marker in [
         "data-panel=\"help\"",
@@ -749,7 +752,6 @@ fn skeinadmin_help_panel_exposes_comprehensive_documentation_center() {
         "if (panel === 'help') renderHelpPanel();",
         "helpPanelTable",
         "helpResearchTable",
-        "help:       { title: 'Help & Documentation'",
         "setActivePanel('help', true);",
     ] {
         assert!(
@@ -757,20 +759,26 @@ fn skeinadmin_help_panel_exposes_comprehensive_documentation_center() {
             "skeinadmin help js should contain {marker}"
         );
     }
+
+    assert!(
+        catalog.contains("help:       { title: 'Help & Documentation'"),
+        "skeinadmin catalog should contain help panel metadata"
+    );
 }
 
 #[test]
 fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let js_path = repo_root.join("web/skeinadmin/src/main.js");
-    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+    let catalog_path = repo_root.join("web/skeinadmin/src/lib/catalog.js");
+    let catalog =
+        fs::read_to_string(&catalog_path).expect("read web/skeinadmin/src/lib/catalog.js");
 
     for id in [
         "R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11", "R12", "R13",
         "R14", "R15", "R16", "R17", "R18", "R19", "R20",
     ] {
         assert!(
-            js.contains(&format!("id: '{id}'")),
+            catalog.contains(&format!("id: '{id}'")),
             "missing research track {id}"
         );
     }
@@ -796,7 +804,7 @@ fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
         "migration.report_export",
     ] {
         assert!(
-            js.contains(marker),
+            catalog.contains(marker),
             "research entry-point mapping should contain {marker}"
         );
     }

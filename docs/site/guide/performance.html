@@ -237,6 +237,26 @@ and prioritizes work to avoid stalls.</p>
 - fewer write stalls
 - lower p99 write latency
 - smoother throughput over time</p>
+<h2 id="reproducing-the-transport-benchmark">Reproducing the transport benchmark<a class="headerlink" href="#reproducing-the-transport-benchmark" title="Permanent link">¶</a></h2>
+<p>SkeinDB ships a built-in <code>transport-bench</code> subcommand that measures SkeinQL
+round-trip latency (p50/p95/p99) across the HTTP/2, QUIC, and MySQL transports
+under concurrent load, and emits a JSON report. <code>eval/benchmark_report.py</code>
+renders that JSON into a deterministic Markdown report annotated with the
+environment (git commit, rustc version, OS, CPU count) so runs are reproducible
+and comparable across commits.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># 1. Build and start a server.</span>
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>skeindb<span class="w"> </span>--release
+target/release/skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span><span class="p">&amp;</span>
+
+<span class="c1"># 2. Capture a JSON benchmark report.</span>
+target/release/skeindb<span class="w"> </span>transport-bench<span class="w"> </span>--json<span class="w"> </span>&gt;<span class="w"> </span>report.json
+
+<span class="c1"># 3. Render a reproducible Markdown report.</span>
+python<span class="w"> </span>eval/benchmark_report.py<span class="w"> </span>--from-json<span class="w"> </span>report.json<span class="w"> </span>-o<span class="w"> </span>BENCHMARK_REPORT.md
+</code></pre></div>
+
+<p>The report-formatting and summary logic is pure and unit-tested
+(<code>eval/test_benchmark_report.py</code>, run(<code>eval/test_benchmark_report.py</code>, run(<code>eval/test_benchmark_report.py</code>, run(<code>eval/test_benchmark_report.py</code>, run(<code>evalrver.(</code>eval/test_benchmark_report.py<code>, ruepro(</code>eval/test_benchmark_report.py<code>, run(</code>eval/test_benchmark_report.py`, ruful deltas.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/PERFORMANCE.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -276,6 +296,7 @@ and prioritizes work to avoid stalls.</p>
 <li><a href="#4-backlog">4) Backlog</a></li>
 <li><a href="#5-autoparameterization-plan-reuse-sql-clients">5) Autoparameterization + plan reuse (SQL clients)</a></li>
 <li><a href="#6-stall-aware-compaction-scheduling">6) Stall-aware compaction scheduling</a></li>
+<li><a href="#reproducing-the-transport-benchmark">Reproducing the transport benchmark</a></li>
 </ul>
 </div>
 

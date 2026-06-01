@@ -126,7 +126,7 @@
     </div>
     <article class="doc-article">
       <h1 id="observability-and-server-statistics">Observability and Server Statistics<a class="headerlink" href="#observability-and-server-statistics" title="Permanent link">¶</a></h1>
-<p>Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, and <code>stats.snapshot</code>-driven HTTP(S) webhook delivery landed; standalone escalation automation is still evolving
+<p>Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, <code>stats.snapshot</code>-driven HTTP(S) webhook delivery, and configurable escalation automation (cooldown re-fire + warning-&gt;critical severity ladder) landed; non-HTTP sinks and retry policies remain backlog
 Last updated: 2026-05-27</p>
 <p>This document defines the observability surface of SkeinDB:
 - server load and resource stats
@@ -333,7 +333,11 @@ while still integrating cleanly with standard monitoring stacks.</p>
 - per-alert matched route IDs/targets in <code>stats.snapshot.alerts.items[*].routes</code>
 - top-level route summary counters in <code>stats.snapshot.alerts.routing</code>
 - HTTP(S) route targets receive JSON <code>POST</code> delivery once per active alert while <code>stats.snapshot</code> is being evaluated
-- broader escalation policies, retries, and non-HTTP sinks remain backlog work</p>
+- escalation automation via <code>observability.alert_escalation</code>:
+  - <code>refire_after_secs</code> (default <code>0</code>, disabled): re-deliver an already-active alert once this many seconds have elapsed since its last delivery instead of suppressing it for the lifetime of the alert
+  - <code>escalate_after_secs</code> (default <code>0</code>, disabled): promote a <code>warning</code> alert to <code>critical</code> once it has been continuously active for this many seconds; escalated items gain <code>escalated: true</code> / <code>escalated_from</code>, re-match routes at the higher severity, and update the snapshot <code>summary</code>/<code>status</code>
+  - <code>stats.snapshot.alerts.routing.delivery.escalated</code> reports how many alerts were escalated in the current evaluation
+- non-HTTP sinks and per-target retry policies remain backlog work</p>
 <hr />
 <h2 id="6-backlog">6) Backlog<a class="headerlink" href="#6-backlog" title="Permanent link">¶</a></h2>
 <ul>

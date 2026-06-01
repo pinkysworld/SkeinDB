@@ -209,7 +209,12 @@ This document specifies a CDC subsystem that provides:</p>
   - replays from <code>?from_offset=&lt;seq&gt;</code> or <code>Last-Event-ID: &lt;seq&gt;</code>
   - drains the retained change log in bounded batches so reconnecting consumers can catch up inside the retained horizon
   - emits <code>backpressure</code> control frames when the subscription enters <code>pressure</code>, <code>throttle</code>, <code>paused</code>, or <code>resnapshot_required</code>
-  - emits a final <code>resnapshot</code> control frame with the same recovery metadata returned by <code>cdc.poll</code></p>
+  - emits a final <code>resnapshot</code> control frame with the same recovery metadata returned by <code>cdc.poll</code>
+- External sink connector: <code>cdc.sink_drain</code> (RPC)
+  - a subscription may declare <code>options.sink</code> to push delivery events to an external destination
+  - the first supported connector is a durable append-only <strong>file sink</strong> (<code>{"type": "file", "path": "..."}</code>) that writes one NDJSON-encoded delivery event per line, so downstream tools can tail the file
+  - the sink tracks its own per-subscription <code>sink_offset</code> cursor (independent of the consumer ACK cursor) so repeated drains never re-deliver rows
+  - the cursor is persisted in <code>cdc_subscriptions.json</code> and survives restarts; events honor the subscription's filters, projection, and <code>format</code></p>
 <p>Backpressure state model:
 - <code>healthy</code>: lag is below the warning threshold.
 - <code>pressure</code>: lag is at or above <code>warn_lag</code> (half the retained window, minimum 1 event).
@@ -240,6 +245,7 @@ This document specifies a CDC subsystem that provides:</p>
 - <code>cdc.subscribe_query</code>
 - <code>cdc.poll</code>
 - <code>cdc.ack</code>
+- <code>cdc.sink_drain</code>
 - <code>cdc.pause</code>
 - <code>cdc.resume</code>
 - <code>cdc.close</code></p>
