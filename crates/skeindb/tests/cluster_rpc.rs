@@ -2274,6 +2274,28 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_prepare(
         &mut stream,
+        "SELECT COALESCE(name, 'missing') AS display_name FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let coalesce_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(coalesce_stmt.param_count, 1);
+    assert_eq!(
+        coalesce_stmt.column_defs,
+        vec![("display_name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        coalesce_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let coalesce_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(coalesce_rows, vec![vec![Some("Grace".to_string())]]);
+    send_com_stmt_close(&mut stream, coalesce_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
         "SELECT id + 1 AS next_id, id / 2 AS half_id, id % 3 AS mod_id FROM wp_users WHERE id = ?",
     )
     .await?;
