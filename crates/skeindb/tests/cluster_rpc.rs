@@ -13251,6 +13251,94 @@ async fn pg_simple_query_copy_from_stdin_with_binary_format_roundtrip() -> anyho
 }
 
 #[tokio::test]
+async fn pg_extended_query_copy_from_stdin_with_binary_format_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_binary")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_copy_binary_in (id BIGINT NOT NULL, name VARCHAR(255), PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
+    payload.extend_from_slice(&0i32.to_be_bytes());
+    payload.extend_from_slice(&0i32.to_be_bytes());
+    let append_field = |buf: &mut Vec<u8>, bytes: Option<&[u8]>| match bytes {
+        Some(raw) => {
+            buf.extend_from_slice(&(raw.len() as i32).to_be_bytes());
+            buf.extend_from_slice(raw);
+        }
+        None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+    };
+    payload.extend_from_slice(&2i16.to_be_bytes());
+    append_field(&mut payload, Some(&10i64.to_be_bytes()));
+    append_field(&mut payload, Some(b"Ada"));
+    payload.extend_from_slice(&2i16.to_be_bytes());
+    append_field(&mut payload, Some(&11i64.to_be_bytes()));
+    append_field(&mut payload, None);
+    payload.extend_from_slice(&(-1i16).to_be_bytes());
+
+    let copy_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "copy_users_in_binary",
+                    "COPY app.pg_ext_copy_binary_in FROM STDIN WITH (FORMAT binary)",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("copy_users_in_binary_portal", "copy_users_in_binary", &[]),
+            ),
+            (b'E', pg_execute_payload("copy_users_in_binary_portal", 0)),
+            (b'd', payload),
+            (b'c', Vec::new()),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let copy_tags = pg_message_tags(&copy_msgs);
+    assert!(
+        copy_tags.contains(&b'1'),
+        "missing ParseComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'2'),
+        "missing BindComplete: {copy_tags:?}"
+    );
+    assert!(
+        copy_tags.contains(&b'G'),
+        "missing CopyInResponse: {copy_tags:?}"
+    );
+    assert_eq!(pg_command_complete_tag(&copy_msgs)?, "COPY 2");
+    assert_eq!(pg_ready_status(&copy_msgs)?, b'I');
+
+    let verify_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, name FROM app.pg_ext_copy_binary_in ORDER BY id",
+    )
+    .await?;
+    assert_eq!(
+        pg_all_data_row_cells(&verify_msgs)?,
+        vec![
+            vec![Some("10".to_string()), Some("Ada".to_string())],
+            vec![Some("11".to_string()), None],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_extended_query_copy_from_stdin_with_csv_format_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_extended_query_copy_from_stdin_csv")?;
