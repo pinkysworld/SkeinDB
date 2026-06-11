@@ -75,7 +75,7 @@ SkeinDB adoption strategy:
 - `KILL` command (no-op)
 
 ### MySQL wire protocol
-- Handshake + `mysql_native_password`
+- Handshake + `caching_sha2_password` (advertised default) with `mysql_native_password` fallback
 - COM_QUERY over the current SQL-translation subset
 - `COM_INIT_DB` (0x02) wire protocol command
 - `COM_STATISTICS` (0x09) wire protocol command

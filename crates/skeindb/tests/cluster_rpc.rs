@@ -1509,6 +1509,50 @@ async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn mysql_caching_sha2_password_auth_succeeds() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let password = "caching-sha2-secret-99";
+    let server = HttpHarness::start_with_mysql_and_env(
+        "mysql_caching_sha2_auth",
+        &[("SKEINDB_TOKEN", password)],
+    )?;
+    wait_for_tcp(server.mysql_port())?;
+
+    let mut stream = mysql_connect_caching_sha2(server.mysql_port(), "root", password).await?;
+
+    // The authenticated connection accepts queries.
+    let mut query = Vec::new();
+    query.push(0x03);
+    query.extend_from_slice(b"SELECT 1 AS one");
+    write_mysql_packet(&mut stream, 0, &query).await?;
+    let (_seq, column_count_payload) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(column_count_payload.first().copied(), Some(1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_caching_sha2_password_wrong_password_denied() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql_and_env(
+        "mysql_caching_sha2_wrong_pw",
+        &[("SKEINDB_TOKEN", "correct-secret")],
+    )?;
+    wait_for_tcp(server.mysql_port())?;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", server.mysql_port())).await?;
+    let (_seq, handshake) = read_mysql_packet(&mut stream).await?;
+    let seed = extract_mysql_handshake_seed(&handshake)?;
+    let scramble = mysql_caching_sha2_scramble("wrong-secret", &seed);
+    let response = mysql_caching_sha2_response_packet("root", &scramble);
+    write_mysql_packet(&mut stream, 1, &response).await?;
+
+    let (_seq, result) = read_mysql_packet(&mut stream).await?;
+    let err = decode_mysql_err_packet(&result).ok_or_else(|| anyhow!("expected error packet"))?;
+    assert!(err.contains("[28000]"), "unexpected error: {}", err);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_mysql("mysql_com_query_sql_exec_subset")?;
@@ -9026,6 +9070,11 @@ impl HttpHarness {
         Self::start_with_ports_and_env(label, mysql_port, 0, &[])
     }
 
+    fn start_with_mysql_and_env(label: &str, envs: &[(&str, &str)]) -> anyhow::Result<Self> {
+        let mysql_port = free_tcp_port();
+        Self::start_with_ports_and_env(label, mysql_port, 0, envs)
+    }
+
     fn start_with_pg(label: &str) -> anyhow::Result<Self> {
         let pg_port = free_tcp_port();
         Self::start_with_ports_and_env(label, 0, pg_port, &[])
@@ -9283,8 +9332,8 @@ async fn mysql_connect_and_auth(port: u16) -> anyhow::Result<TcpStream> {
     assert_eq!(seq, 0);
     assert_eq!(handshake.first().copied(), Some(0x0a));
     assert!(handshake
-        .windows(b"mysql_native_password".len())
-        .any(|w| w == b"mysql_native_password"));
+        .windows(b"caching_sha2_password".len())
+        .any(|w| w == b"caching_sha2_password"));
 
     let response = mysql_handshake_response_packet();
     write_mysql_packet(&mut stream, 1, &response).await?;
@@ -9949,6 +9998,113 @@ fn mysql_handshake_response_packet() -> Vec<u8> {
     payload.extend_from_slice(b"mysql_native_password");
     payload.push(0);
     payload
+}
+
+/// Extract the 20-byte authentication nonce (seed) from a server handshake
+/// packet so the test client can compute a scramble.
+fn extract_mysql_handshake_seed(handshake: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut pos = 1usize; // protocol version
+    while pos < handshake.len() && handshake[pos] != 0 {
+        pos += 1;
+    }
+    pos += 1; // NUL after server version
+    pos += 4; // connection id
+    if pos + 8 > handshake.len() {
+        return Err(anyhow!("handshake too short for seed part 1"));
+    }
+    let mut seed = handshake[pos..pos + 8].to_vec();
+    pos += 8;
+    pos += 1; // filler
+    pos += 2; // capability flags lower
+    pos += 1; // charset
+    pos += 2; // status flags
+    pos += 2; // capability flags upper
+    let auth_data_len = *handshake
+        .get(pos)
+        .ok_or_else(|| anyhow!("missing auth data length"))? as usize;
+    pos += 1;
+    pos += 10; // reserved
+    let part2_len = auth_data_len.saturating_sub(8).saturating_sub(1);
+    if pos + part2_len > handshake.len() {
+        return Err(anyhow!("handshake too short for seed part 2"));
+    }
+    seed.extend_from_slice(&handshake[pos..pos + part2_len]);
+    Ok(seed)
+}
+
+/// Client-side `caching_sha2_password` scramble:
+/// `SHA256(pwd) XOR SHA256(SHA256(SHA256(pwd)) || seed)`.
+fn mysql_caching_sha2_scramble(password: &str, seed: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    if password.is_empty() {
+        return Vec::new();
+    }
+    let stage1: [u8; 32] = Sha256::digest(password.as_bytes()).into();
+    let stage2: [u8; 32] = Sha256::digest(stage1).into();
+    let digest: [u8; 32] = {
+        let mut h = Sha256::new();
+        h.update(stage2);
+        h.update(seed);
+        h.finalize().into()
+    };
+    stage1
+        .iter()
+        .zip(digest.iter())
+        .map(|(a, b)| a ^ b)
+        .collect()
+}
+
+fn mysql_caching_sha2_response_packet(username: &str, scramble: &[u8]) -> Vec<u8> {
+    const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+
+    let flags =
+        CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.push(0x21);
+    payload.extend_from_slice(&[0u8; 23]);
+    payload.extend_from_slice(username.as_bytes());
+    payload.push(0);
+    payload.push(scramble.len() as u8);
+    payload.extend_from_slice(scramble);
+    payload.extend_from_slice(b"caching_sha2_password");
+    payload.push(0);
+    payload
+}
+
+async fn mysql_connect_caching_sha2(
+    port: u16,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<TcpStream> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .context("connect mysql port")?;
+    let (seq, handshake) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(seq, 0);
+    assert_eq!(handshake.first().copied(), Some(0x0a));
+    assert!(handshake
+        .windows(b"caching_sha2_password".len())
+        .any(|w| w == b"caching_sha2_password"));
+
+    let seed = extract_mysql_handshake_seed(&handshake)?;
+    let scramble = mysql_caching_sha2_scramble(password, &seed);
+    let response = mysql_caching_sha2_response_packet(username, &scramble);
+    write_mysql_packet(&mut stream, 1, &response).await?;
+
+    // Server confirms the cached credentials with AuthMoreData(fast-auth) + OK.
+    let (_seq, more) = read_mysql_packet(&mut stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&more) {
+        return Err(anyhow!("caching_sha2 auth failed: {}", err));
+    }
+    assert_eq!(more.as_slice(), &[0x01, 0x03]);
+    let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(ok.first().copied(), Some(0x00));
+    Ok(stream)
 }
 
 fn decode_mysql_ok_packet(payload: &[u8]) -> anyhow::Result<(u64, u64)> {

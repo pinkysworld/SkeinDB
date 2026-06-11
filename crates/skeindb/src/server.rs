@@ -103,7 +103,18 @@ const ADMIN_CATALOG_JS: &str = include_str!(concat!(
 ));
 const MYSQL_PROTOCOL_VERSION: u8 = 0x0a;
 const MYSQL_SERVER_VERSION: &str = "8.0.0-skeindb";
-const MYSQL_AUTH_PLUGIN: &str = "mysql_native_password";
+/// Default authentication plugin advertised in the initial handshake. Modern
+/// MySQL drivers (mysql2, Connector/J 8+, PHP mysqli, PyMySQL) default to
+/// `caching_sha2_password`; MySQL 8.4 disables `mysql_native_password` and 9.x
+/// removes it, so this must be the advertised default for out-of-the-box
+/// driver compatibility.
+const MYSQL_AUTH_PLUGIN: &str = "caching_sha2_password";
+/// Legacy plugin still accepted from clients that explicitly request it.
+const MYSQL_AUTH_PLUGIN_NATIVE: &str = "mysql_native_password";
+/// First byte of an AuthMoreData packet (caching_sha2_password handshake).
+const MYSQL_AUTH_MORE_DATA: u8 = 0x01;
+/// caching_sha2_password fast-auth-success marker sent inside AuthMoreData.
+const MYSQL_CACHING_SHA2_FAST_AUTH_SUCCESS: u8 = 0x03;
 const MYSQL_STATUS_AUTOCOMMIT: u16 = 0x0002;
 const MYSQL_STATUS_CURSOR_EXISTS: u16 = 0x0040;
 const MYSQL_STATUS_LAST_ROW_SENT: u16 = 0x0080;
@@ -834,6 +845,46 @@ fn mysql_validate_native_password(password: &str, seed: &[u8], auth_response: &[
         return auth_response.is_empty();
     }
     let expected = mysql_native_password_scramble(password, seed);
+    expected == auth_response
+}
+
+fn mysql_sha256(input: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(input);
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// Compute the `caching_sha2_password` scramble the client sends in its
+/// handshake response: `SHA256(pwd) XOR SHA256(SHA256(SHA256(pwd)) || seed)`.
+///
+/// Note the inner concatenation order is `stage2 || seed` — the opposite of
+/// `mysql_native_password`, which hashes `seed || stage2`.
+fn mysql_caching_sha2_password_scramble(password: &str, seed: &[u8]) -> Vec<u8> {
+    if password.is_empty() {
+        return Vec::new();
+    }
+    let stage1 = mysql_sha256(password.as_bytes());
+    let stage2 = mysql_sha256(&stage1);
+    let mut combined = Vec::with_capacity(stage2.len() + seed.len());
+    combined.extend_from_slice(&stage2);
+    combined.extend_from_slice(seed);
+    let digest = mysql_sha256(&combined);
+    let mut out = vec![0u8; stage1.len()];
+    for i in 0..stage1.len() {
+        out[i] = stage1[i] ^ digest[i];
+    }
+    out
+}
+
+fn mysql_validate_caching_sha2_password(password: &str, seed: &[u8], auth_response: &[u8]) -> bool {
+    if password.is_empty() {
+        return auth_response.is_empty();
+    }
+    let expected = mysql_caching_sha2_password_scramble(password, seed);
     expected == auth_response
 }
 
@@ -10889,6 +10940,19 @@ fn mysql_err_packet(code: u16, sql_state: &str, message: &str) -> Vec<u8> {
     payload
 }
 
+/// Build an AuthSwitchRequest packet (`0xfe` + plugin name + NUL + auth data +
+/// NUL). Sent when a client offers an auth plugin we cannot verify, asking it
+/// to retry with `mysql_native_password` using the supplied 20-byte nonce.
+fn mysql_auth_switch_request_packet(plugin: &str, seed: &[u8; 20]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(plugin.len() + seed.len() + 3);
+    payload.push(0xfe);
+    payload.extend_from_slice(plugin.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&seed[..]);
+    payload.push(0);
+    payload
+}
+
 async fn mysql_write_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow::anyhow!("mysql payload too large"));
@@ -11142,20 +11206,47 @@ async fn handle_mysql_connection(
         return Ok(());
     }
 
-    if let Some(plugin) = response.auth_plugin.as_deref() {
-        if plugin != MYSQL_AUTH_PLUGIN {
-            let packet = mysql_err_packet(1251, "08004", "unsupported auth plugin");
-            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
-            return Ok(());
-        }
+    // Determine which auth plugin the client used. Clients without PLUGIN_AUTH
+    // default to the legacy native plugin.
+    let mut client_plugin = response
+        .auth_plugin
+        .clone()
+        .unwrap_or_else(|| MYSQL_AUTH_PLUGIN_NATIVE.to_string());
+    let mut auth_response = response.auth_response.clone();
+    let mut next_seq = seq.wrapping_add(1);
+
+    // If the client offered a plugin we cannot verify, ask it to switch to
+    // mysql_native_password and read the fresh scramble (AuthSwitchResponse is
+    // the raw auth data with no length prefix).
+    if client_plugin != MYSQL_AUTH_PLUGIN && client_plugin != MYSQL_AUTH_PLUGIN_NATIVE {
+        let switch = mysql_auth_switch_request_packet(MYSQL_AUTH_PLUGIN_NATIVE, &seed);
+        mysql_write_packet(&mut stream, next_seq, &switch).await?;
+        let (switch_seq, switch_payload) = mysql_read_packet(&mut stream).await?;
+        auth_response = switch_payload;
+        client_plugin = MYSQL_AUTH_PLUGIN_NATIVE.to_string();
+        next_seq = switch_seq.wrapping_add(1);
     }
 
-    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
-        if !mysql_validate_native_password(&expected_password, &seed, &response.auth_response) {
-            let packet = mysql_err_packet(1045, "28000", "access denied");
-            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
-            return Ok(());
+    // Verify the password when a token is configured. With no token the server
+    // runs in trust mode and accepts any handshake. Because the server holds
+    // the cleartext token it can always confirm the caching_sha2 scramble
+    // directly (fast-auth path), so the RSA full-auth exchange — which would
+    // otherwise require TLS or a key pair — is never needed.
+    let uses_caching_sha2 = client_plugin == MYSQL_AUTH_PLUGIN;
+    let authenticated = match std::env::var("SKEINDB_TOKEN") {
+        Ok(expected_password) => {
+            if uses_caching_sha2 {
+                mysql_validate_caching_sha2_password(&expected_password, &seed, &auth_response)
+            } else {
+                mysql_validate_native_password(&expected_password, &seed, &auth_response)
+            }
         }
+        Err(_) => true,
+    };
+    if !authenticated {
+        let packet = mysql_err_packet(1045, "28000", "access denied");
+        mysql_write_packet(&mut stream, next_seq, &packet).await?;
+        return Ok(());
     }
 
     let username = response.username;
@@ -11163,8 +11254,13 @@ async fn handle_mysql_connection(
     session.username = username.clone();
     let mut prepared_statements = HashMap::<u32, MySqlPreparedStatement>::new();
     let mut next_statement_id = 1u32;
-    let ok = mysql_ok_packet();
-    mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
+    if uses_caching_sha2 {
+        // caching_sha2_password fast-auth success: AuthMoreData(0x03), then OK.
+        let more = [MYSQL_AUTH_MORE_DATA, MYSQL_CACHING_SHA2_FAST_AUTH_SUCCESS];
+        mysql_write_packet(&mut stream, next_seq, &more).await?;
+        next_seq = next_seq.wrapping_add(1);
+    }
+    mysql_write_packet(&mut stream, next_seq, &mysql_ok_packet()).await?;
 
     loop {
         let (cmd_seq, command_payload) = match mysql_read_packet(&mut stream).await {
@@ -39520,10 +39616,11 @@ mod tests {
     }
 
     #[test]
-    fn mysql_handshake_packet_advertises_native_auth() {
+    fn mysql_handshake_packet_advertises_caching_sha2_auth() {
         let seed = [42u8; 20];
         let packet = mysql_handshake_packet(7, &seed);
         assert_eq!(packet.first().copied(), Some(MYSQL_PROTOCOL_VERSION));
+        assert_eq!(MYSQL_AUTH_PLUGIN, "caching_sha2_password");
         assert!(packet
             .windows(MYSQL_AUTH_PLUGIN.len())
             .any(|w| w == MYSQL_AUTH_PLUGIN.as_bytes()));
@@ -39535,6 +39632,29 @@ mod tests {
         let scramble = mysql_native_password_scramble("secret", &seed);
         assert!(mysql_validate_native_password("secret", &seed, &scramble));
         assert!(!mysql_validate_native_password("wrong", &seed, &scramble));
+    }
+
+    #[test]
+    fn mysql_caching_sha2_password_validation_roundtrip() {
+        let seed = [9u8; 20];
+        let scramble = mysql_caching_sha2_password_scramble("secret", &seed);
+        assert_eq!(scramble.len(), 32);
+        assert!(mysql_validate_caching_sha2_password(
+            "secret", &seed, &scramble
+        ));
+        assert!(!mysql_validate_caching_sha2_password(
+            "wrong", &seed, &scramble
+        ));
+        // The caching_sha2 inner-hash order differs from native, so a native
+        // scramble must not validate as caching_sha2 for the same inputs.
+        let native = mysql_native_password_scramble("secret", &seed);
+        assert!(!mysql_validate_caching_sha2_password(
+            "secret", &seed, &native
+        ));
+        // Empty password yields an empty scramble and only matches empty data.
+        assert!(mysql_caching_sha2_password_scramble("", &seed).is_empty());
+        assert!(mysql_validate_caching_sha2_password("", &seed, &[]));
+        assert!(!mysql_validate_caching_sha2_password("secret", &seed, &[]));
     }
 
     #[test]

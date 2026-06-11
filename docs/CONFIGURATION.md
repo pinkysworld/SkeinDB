@@ -87,7 +87,7 @@ When enabled, the HTTP listener serves:
 When `--mysql` is non-zero, SkeinDB also starts a MySQL protocol listener.
 Current coverage:
 - connection handshake
-- `mysql_native_password` auth exchange
+- `caching_sha2_password` auth exchange (advertised default; modern driver default) with `mysql_native_password` accepted as fallback
 - `COM_QUERY` SQL translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE`)
 - `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` (prepared statements)
 - 678 semicolon-terminated compatibility SQL statements in `tests/compat/corpus.sql`

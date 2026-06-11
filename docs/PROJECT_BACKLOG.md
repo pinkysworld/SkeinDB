@@ -41,7 +41,7 @@ Phase 0 verification checklist:
 
 ## Phase 3 — MySQL protocol
 - Status: baseline protocol plus broad COM_QUERY / COM_STMT compatibility are implemented in runtime/tests; follow-up parity work now continues through corpus growth and later backlog phases rather than open Phase 3 checkboxes.
-- [x] T030: Handshake + mysql_native_password
+- [x] T030: Handshake + caching_sha2_password (advertised default) with mysql_native_password fallback
 - [x] T031: COM_QUERY SELECT literals
 - [x] T032: SQL translator (subset)
 - [x] T033: DDL/DML subset for corpus.sql
