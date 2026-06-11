@@ -9911,31 +9911,67 @@ fn pg_compat_corpus_statements() -> Vec<String> {
         cleaned.push('\n');
     }
 
+    let chars: Vec<char> = cleaned.chars().collect();
     let mut statements = Vec::new();
     let mut current = String::new();
-    let mut quote = None::<char>;
-    let mut chars = cleaned.chars().peekable();
-    while let Some(ch) = chars.next() {
-        current.push(ch);
+    let mut quote = None::<char>; // ' or "
+    let mut dollar_tag = None::<String>; // active $$ or $tag$ delimiter
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Inside a dollar-quoted string single quotes and semicolons are literal;
+        // copy verbatim until the matching closing tag.
+        if let Some(tag) = &dollar_tag {
+            let tag_chars: Vec<char> = tag.chars().collect();
+            if ch == '$' && chars[i..].starts_with(&tag_chars) {
+                current.push_str(tag);
+                i += tag_chars.len();
+                dollar_tag = None;
+            } else {
+                current.push(ch);
+                i += 1;
+            }
+            continue;
+        }
+
         match quote {
-            Some(q) if ch == q => {
-                if q == '\'' && chars.peek().copied() == Some('\'') {
-                    current.push('\'');
-                    chars.next();
-                } else {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    if q == '\'' && chars.get(i + 1).copied() == Some('\'') {
+                        current.push('\'');
+                        i += 2;
+                        continue;
+                    }
                     quote = None;
                 }
+                i += 1;
             }
-            Some(_) => {}
-            None if ch == '\'' || ch == '"' => quote = Some(ch),
-            None if ch == ';' => {
-                let stmt = current.trim().to_string();
-                if !stmt.is_empty() {
-                    statements.push(stmt);
+            None => {
+                if ch == '$' {
+                    if let Some(tag_len) = pg_dollar_quote_tag_len(&chars[i..]) {
+                        let tag: String = chars[i..i + tag_len].iter().collect();
+                        current.push_str(&tag);
+                        dollar_tag = Some(tag);
+                        i += tag_len;
+                        continue;
+                    }
                 }
-                current.clear();
+                current.push(ch);
+                match ch {
+                    '\'' | '"' => quote = Some(ch),
+                    ';' => {
+                        let stmt = current.trim().to_string();
+                        if !stmt.is_empty() {
+                            statements.push(stmt);
+                        }
+                        current.clear();
+                    }
+                    _ => {}
+                }
+                i += 1;
             }
-            None => {}
         }
     }
     let tail = current.trim();
@@ -9943,6 +9979,31 @@ fn pg_compat_corpus_statements() -> Vec<String> {
         statements.push(tail.to_string());
     }
     statements
+}
+
+/// Returns the length (in chars) of a PostgreSQL dollar-quote opening delimiter
+/// starting at `s[0] == '$'` — `$$` -> 2, `$tag$` -> tag length + 2 — or `None`
+/// when `s` does not begin a valid dollar-quote tag.
+fn pg_dollar_quote_tag_len(s: &[char]) -> Option<usize> {
+    if s.first() != Some(&'$') {
+        return None;
+    }
+    if s.get(1) == Some(&'$') {
+        return Some(2);
+    }
+    let mut j = 1;
+    if !matches!(s.get(j), Some(c) if c.is_ascii_alphabetic() || *c == '_') {
+        return None;
+    }
+    j += 1;
+    while matches!(s.get(j), Some(c) if c.is_ascii_alphanumeric() || *c == '_') {
+        j += 1;
+    }
+    if s.get(j) == Some(&'$') {
+        Some(j + 1)
+    } else {
+        None
+    }
 }
 
 async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
@@ -14467,8 +14528,88 @@ async fn pg_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 assert_eq!(pg_command_complete_tag(&msgs)?, "COMMIT");
                 assert_eq!(pg_ready_status(&msgs)?, b'I');
             }
-            other => anyhow::bail!("unhandled PG corpus statement: {other}"),
+            // ---- type casts (:: and CAST) ----
+            "select '42'::int" | "select '42'::integer" | "select cast('42' as integer)" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "42");
+            }
+            "select 3::bigint" => assert_eq!(pg_first_text_cell(&msgs)?, "3"),
+            "select '3.14'::numeric" => assert_eq!(pg_first_text_cell(&msgs)?, "3.14"),
+            "select 'hello'::text" => assert_eq!(pg_first_text_cell(&msgs)?, "hello"),
+            "select 1::text" => assert_eq!(pg_first_text_cell(&msgs)?, "1"),
+            "select '2024-01-15'::date" => assert_eq!(pg_first_text_cell(&msgs)?, "2024-01-15"),
+            "select 't'::bool" => assert_eq!(pg_first_text_cell(&msgs)?, "t"),
+            "select '550e8400-e29b-41d4-a716-446655440000'::uuid" => {
+                assert_eq!(
+                    pg_first_text_cell(&msgs)?,
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+            }
+            // ---- dollar-quoted literals ----
+            "select $$hello world$$" => assert_eq!(pg_first_text_cell(&msgs)?, "hello world"),
+            "select $$it's a test$$" => assert_eq!(pg_first_text_cell(&msgs)?, "it's a test"),
+            "select $tag$body with $$ inside$tag$" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "body with $$ inside");
+            }
+            // ---- ARRAY constructor / helpers ----
+            "select array[1, 2, 3]" => assert_eq!(pg_first_text_cell(&msgs)?, "{1, 2, 3}"),
+            "select array['a', 'b', 'c']" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "{'a', 'b', 'c'}")
+            }
+            "select array_length(array[1,2,3], 1)" => assert_eq!(pg_first_text_cell(&msgs)?, "3"),
+            "select string_to_array('a,b,c', ',')" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "{a,b,c}")
+            }
+            // ---- JSON / JSONB operators ----
+            "select '{\"a\": 1}'::json -> 'a'" | "select '{\"a\": 1}'::json ->> 'a'" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "1");
+            }
+            "select '{\"a\": {\"b\": 2}}'::jsonb -> 'a' ->> 'b'" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "2");
+            }
+            // ---- regex match on columns (~) ----
+            "select label from app.items where label ~ '^b' order by id" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "banana");
+            }
+            // ---- scalar string / math functions ----
+            "select concat('a', 'b', 'c')" => assert_eq!(pg_first_text_cell(&msgs)?, "abc"),
+            "select substring('hello', 2, 3)" => assert_eq!(pg_first_text_cell(&msgs)?, "ell"),
+            "select substring('hello', 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "ello"),
+            "select length('hello')" | "select char_length('hello')" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "5");
+            }
+            "select trim('  x  ')" => assert_eq!(pg_first_text_cell(&msgs)?, "x"),
+            "select replace('aaa', 'a', 'b')" => assert_eq!(pg_first_text_cell(&msgs)?, "bbb"),
+            "select left('hello', 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "he"),
+            "select right('hello', 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "lo"),
+            "select abs(-5)" => assert_eq!(pg_first_text_cell(&msgs)?, "5"),
+            "select round(3.14159, 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "3.14"),
+            "select ceil(1.2)" => assert_eq!(pg_first_text_cell(&msgs)?, "2"),
+            "select floor(1.8)" => assert_eq!(pg_first_text_cell(&msgs)?, "1"),
+            "select power(2, 3)" => assert_eq!(pg_first_text_cell(&msgs)?, "8.0"),
+            "select mod(10, 3)" | "select 10 % 3" => assert_eq!(pg_first_text_cell(&msgs)?, "1"),
+            "select greatest(1, 2, 3)" => assert_eq!(pg_first_text_cell(&msgs)?, "3"),
+            "select least(3, 1, 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "1"),
+            "select split_part('a,b,c', ',', 2)" => assert_eq!(pg_first_text_cell(&msgs)?, "b"),
+            "select starts_with('alphabet', 'alph')" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "t")
+            }
+            "select coalesce(null, 'fallback')" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "fallback")
+            }
+            "select pg_typeof(1)" => assert_eq!(pg_first_text_cell(&msgs)?, "bigint"),
+            "select 2 + 3 * 4" => assert_eq!(pg_first_text_cell(&msgs)?, "14"),
+            _ => {}
         }
+
+        // Every corpus statement must execute without an ErrorResponse. The arms
+        // above pin exact values/tags for the deterministic cases; this guards
+        // every remaining statement against regressions in the PG SQL surface.
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "PG corpus statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
     }
 
     Ok(())
