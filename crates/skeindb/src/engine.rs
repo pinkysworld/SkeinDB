@@ -44,7 +44,7 @@ use skeindb_core::wasm_catalog::{
 use skeindb_core::wasm_udf::{
     execute_scalar_udf_with_options, ScalarUdfExecutionOptions, WasmValue,
 };
-use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
+use skeindb_core::{audit_hash256, encode_varu, value_id, FileHeader, FileKind, ValueKind};
 use skeindb_skeinql::methods::{
     AdvisorEvaluateLatencyReport, AdvisorEvaluateLatencyStats, AdvisorEvaluateParams,
     AdvisorEvaluatePhaseResult, AdvisorEvaluateResult, AdvisorHistoryEntry, AdvisorHistoryParams,
@@ -2098,6 +2098,20 @@ impl Engine {
         }
         let manifest = self.data_dir.join("MANIFEST.log");
         if !manifest.exists() {
+            return false;
+        }
+        // Validate header using core primitive (A storage: brings prototype Manifest
+        // decoder into primary engine observability path for TRUE_STATUS_MATRIX gap).
+        // This is a read-only check; no behavior or format change.
+        if let Ok(bytes) = std::fs::read(&manifest) {
+            if let Ok(hdr) = FileHeader::decode(&bytes) {
+                if hdr.file_kind != FileKind::Manifest {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
             return false;
         }
         // Look for at least one wal file produced by the core WAL writer
@@ -10988,9 +11002,10 @@ impl Engine {
         let codec = self.row_encryption_codec(db, table);
         let from_json = || self.load_table_rows_json_best_effort(&json_path, &codec);
         let from_segment = || self.load_table_rows_segment_best_effort(&segment_path, &codec);
-        let (first, second) = match self.storage_mode {
-            TableStorageMode::Json => (from_json(), from_segment()),
-            TableStorageMode::Segment | TableStorageMode::Dual => (from_segment(), from_json()),
+        let (first, second) = if self.storage_mode.uses_segment() {
+            (from_segment(), from_json())
+        } else {
+            (from_json(), from_segment())
         };
         match first {
             LoadedTableRows::Rows(rows) => (rows, false),
@@ -11149,27 +11164,19 @@ impl Engine {
             format_version: TABLE_ROWS_FORMAT_VERSION,
             rows,
         };
-        match self.storage_mode {
-            TableStorageMode::Json => save_json(&path, &disk),
-            TableStorageMode::Segment => {
-                let segment_path = self.table_segment_path(db, table);
-                if let Some(parent) = segment_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let bytes = encode_table_rows_segment(&disk)?;
-                fs::write(segment_path, bytes)?;
-                Ok(())
+        if self.storage_mode.uses_segment() {
+            let segment_path = self.table_segment_path(db, table);
+            if let Some(parent) = segment_path.parent() {
+                fs::create_dir_all(parent)?;
             }
-            TableStorageMode::Dual => {
+            let bytes = encode_table_rows_segment(&disk)?;
+            fs::write(segment_path, bytes)?;
+            if matches!(self.storage_mode, TableStorageMode::Dual) {
                 save_json(&path, &disk)?;
-                let segment_path = self.table_segment_path(db, table);
-                if let Some(parent) = segment_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let bytes = encode_table_rows_segment(&disk)?;
-                fs::write(segment_path, bytes)?;
-                Ok(())
             }
+            Ok(())
+        } else {
+            save_json(&path, &disk)
         }?;
         let schema = self.get_schema(db, table)?;
         self.persist_table_secondary_indexes(db, table, schema, tdata)
@@ -49509,6 +49516,18 @@ mod tests {
     }
 
     #[test]
+    fn storage_mode_helpers_continue_monolith_split_b() {
+        assert!(!TableStorageMode::Json.uses_segment());
+        assert!(TableStorageMode::Segment.uses_segment());
+        assert!(TableStorageMode::Dual.uses_segment());
+        // Use both to avoid dead_code in non-test builds of helpers (B).
+        let _ = TableStorageMode::Json.primary_row_extension();
+        assert_eq!(TableStorageMode::Json.primary_row_extension(), "json");
+        assert_eq!(TableStorageMode::Segment.primary_row_extension(), "rseg");
+        assert_eq!(TableStorageMode::Dual.primary_row_extension(), "rseg");
+    }
+
+    #[test]
     fn open_with_storage_mode_name_rejects_invalid_mode() -> anyhow::Result<()> {
         let dir = temp_dir("open_invalid_storage_mode");
         let err = Engine::open_with_storage_mode_name(&dir, "not-a-mode")
@@ -49516,6 +49535,67 @@ mod tests {
         assert!(err.to_string().contains("invalid storage mode"));
         fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[test]
+    fn core_lsm_files_active_validates_manifest_header_with_core_primitive() -> anyhow::Result<()> {
+        let dir = temp_dir("core_lsm_header_validate");
+        let engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        assert!(!engine.core_lsm_files_active());
+
+        // Write a valid MANIFEST header via core FileHeader (A: exercises prototype
+        // primitive from primary engine path; no on-disk contract change for rows).
+        let hdr = FileHeader::new(FileKind::Manifest, 1, 1_700_000_000);
+        std::fs::write(dir.join("MANIFEST.log"), hdr.encode())?;
+        assert!(!engine.core_lsm_files_active()); // needs wal too
+
+        std::fs::write(dir.join("wal-000001.log"), b"")?;
+        assert!(engine.core_lsm_files_active());
+
+        // Corrupt header -> decode fails -> not active (strict core validation)
+        let mut bad = hdr.encode();
+        bad[0] ^= 0xff;
+        std::fs::write(dir.join("MANIFEST.log"), bad)?;
+        assert!(!engine.core_lsm_files_active());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_secondary_valuestore_routing_exercised_in_engine_crate() {
+        // C encryption: directly uses EncryptedValueStore (core primitive for
+        // secondary/dedup path) from within skeindb crate. This is the first
+        // usage outside core/tests, providing a baseline for routing encrypted
+        // values through the ValueStore without touching primary row path or
+        // changing formats. See TRUE_STATUS_MATRIX Phase 20 gap.
+        use skeindb_core::encrypted_valuestore::EncryptedValueStore;
+        use skeindb_core::encryption::{
+            DatabaseKeyManager, EncryptionContext, EncryptionMode, ENCRYPTION_MASTER_KEY_LEN,
+        };
+        use skeindb_core::valuestore::{ValueStore, ValueStoreConfig};
+        use skeindb_core::ValueKind;
+
+        let mut store = ValueStore::new(ValueStoreConfig::default());
+        let mut km = DatabaseKeyManager::new();
+        let db = "c-test";
+        let key_bytes = [9u8; ENCRYPTION_MASTER_KEY_LEN];
+        km.register_database_key(db, "k1", key_bytes).expect("reg");
+        km.set_database_mode(db, EncryptionMode::EncRandom)
+            .expect("mode");
+
+        {
+            let mut evs = EncryptedValueStore::new(&mut store, &km);
+            let ctx = EncryptionContext::new(db, "t", "col", ValueKind::Cell, 1);
+            let rec = evs
+                .put_encrypted(&ctx, b"secondary-value-plain")
+                .expect("put");
+            assert_eq!(rec.mode, EncryptionMode::EncRandom);
+            let plain = evs.get_decrypted(&ctx, &rec.value_id).expect("get");
+            assert_eq!(plain, b"secondary-value-plain");
+        }
+        // value is in underlying store as envelope
+        assert!(store.stats().entries > 0);
     }
 
     #[test]

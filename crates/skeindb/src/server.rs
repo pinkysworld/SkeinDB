@@ -29353,6 +29353,11 @@ fn pg_catalog_select_result(
         vec!["oid", "amname", "amhandler", "amtype"]
     } else if table.table.eq_ignore_ascii_case("pg_description") {
         vec!["objoid", "classoid", "objsubid", "description"]
+    } else if table.table.eq_ignore_ascii_case("pg_class") {
+        // D PG/CDC: one additional catalog table (empty but typed, like pg_description).
+        // Widens parity without new rows or behavior change; enables SELECT * FROM pg_catalog.pg_class
+        // over sql.exec + live PG listener. Small step per matrix gap.
+        vec!["oid", "relname", "relnamespace", "relkind", "relowner"]
     } else if table.table.eq_ignore_ascii_case("pg_tables") {
         for db in eng.list_databases() {
             let table_names = match eng.list_tables(&db) {
@@ -34968,6 +34973,30 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(description_rows.is_empty());
+
+        // D: pg_class added as empty typed catalog (wider parity micro)
+        let pgclass = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT oid, relname, relkind FROM pg_catalog.pg_class LIMIT 1"
+            }),
+        )
+        .await;
+        assert!(pgclass.ok);
+        let class_rows = pgclass
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            class_rows.is_empty(),
+            "pg_class should be empty but return typed columns"
+        );
 
         let pg_tables = call_sql_exec_http(
             &state,
