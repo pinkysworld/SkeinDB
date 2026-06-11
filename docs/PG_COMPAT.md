@@ -43,7 +43,7 @@ Notes:
 - `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT` wired to the current undo log
 - PostgreSQL SQLSTATE mapping for common shared-engine failures such as undefined tables, undefined columns, unique violations, syntax errors, and unsupported features
 - `Terminate` handling
-- extended query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, including named prepared statements, named portals, `$1`/`$2` placeholders, statement/portal `Describe`, text parameters, binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors
+- extended query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, including named prepared statements, named portals, `$1`/`$2` placeholders, statement/portal `Describe`, text **and binary** bind parameters for common scalar OIDs (`int2`/`int4`/`int8`, `float4`/`float8`, `bool`, `numeric`, `date`/`time`/`timestamp`/`timestamptz`, `uuid`, `bytea`, and `text`/`varchar`/`json`/`jsonb`), binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors
 - PG compatibility corpus at `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
 - PG-specific operators: `||` (string concatenation), `~` / `~*` (regex match), `->` / `->>` (JSON access)
 - PG-specific scalar functions: `gen_random_uuid()`, `date_trunc()`, `to_char()`, `pg_typeof()`, `string_to_array()`, `array_length()`, `array_upper()`, `array_lower()`, `clock_timestamp()`, `statement_timestamp()`, `transaction_timestamp()`
@@ -65,7 +65,7 @@ Notes:
 | `pg_auth.rs` | Inline implementation | SCRAM-SHA-256 lives in `pg_wire::scram` plus `server.rs` connection handling rather than a separate module |
 | `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, the current one- and two-argument `current_setting(...)` forms, and the `current_schema` (with optional parentheses) / `current_schemas(bool)` helpers use that session map, while startup-role bootstrap helpers preserve `current_user` / `current_role` / `session_user` / `user` from the connection username and map `current_catalog` to the current database |
 | `pg_parse.rs` | Inline implementation | PG SQL dialect rewriting layer (`pg_rewrite_sql` + helpers in `server.rs`): `::` type casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, `ARRAY[...]`, `ON CONFLICT`, and supported `RETURNING` extraction |
-| `pg_types.rs` | Inline implementation | Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in `pg_wire.rs` plus server-side inference helpers |
+| `pg_types.rs` | Inline implementation | Common PG type OIDs, array OIDs, text encoding, binary result encoding, and binary bind-parameter decoding live in `pg_wire.rs` plus server-side inference helpers |
 | `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_am`, `pg_description`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (basic metadata for `version`, `current_database`, `current_schema`, `current_schemas`, `current_setting` with both current arities, `date_trunc`, `pg_typeof`, `to_char`, `gen_random_uuid`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_to_array`, `split_part`, `array_length`, `array_upper`, `array_lower`, `string_agg`, `array_agg`, `lower`, `upper`, `length`, `char_length`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substring` with both 2-arg and 3-arg rows, and `replace`, including aggregate `prokind` rows), `pg_settings`, `pg_stat_activity`, and `pg_stat_database` |
 | `pg_functions.rs` | Partial | PG-specific scalar/aggregate functions now inline in `engine.rs` and `server.rs`: `||` concat, `~`/`~*` regex, `->` / `->>` JSON access, `gen_random_uuid`, `date_trunc`, `to_char`, `pg_typeof`, `string_to_array`, `split_part`, `array_length`, `array_upper`, `array_lower`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_agg`, `array_agg` |
 
@@ -106,14 +106,14 @@ Default/text/csv `COPY table [ (col, ...) ] TO STDOUT`, `COPY table [ (col, ...)
 The listener now supports the core extended-query lifecycle:
 
 - `Parse` stores named prepared statements and tracks declared parameter OIDs
-- `Bind` stores named portals with text-format bound parameters and requested result formats
+- `Bind` stores named portals with text- and binary-format bound parameters and requested result formats. Per-parameter format codes are honored, so drivers that mix text and binary parameters in one `Bind` work. Binary parameters are decoded by their declared OID: big-endian `int2`/`int4`/`int8`, IEEE-754 `float4`/`float8`, single-byte `bool`, base-10000 `numeric` (including `NaN`/`±Infinity`), `date`/`time`/`timestamp`/`timestamptz` against the PostgreSQL 2000-01-01 epoch, 16-byte `uuid`, raw `bytea`, and UTF-8 `text`/`varchar`/`json`/`jsonb` (the `jsonb` one-byte version header is validated and stripped). Malformed binary payloads are rejected with `22P03`.
 - `Describe` returns `ParameterDescription` plus statement/portal row metadata
 - `Execute` substitutes `$1`/`$2` placeholders and routes through the shared SQL execution engine; binary result-format requests are encoded for common scalar OIDs
 - `Close`, `Sync`, and `Flush` behave as PG lifecycle messages rather than compatibility stubs
 
 Current limits:
 
-- parameter formats are text-only
+- binary bind parameters cover the common scalar OID baseline above; unknown OIDs sent in binary are decoded as UTF-8 text, and other binary types are not yet interpreted
 - binary result encoding is limited to the current common scalar OID baseline
 - `Execute` with `max_rows > 0` now suspends and resumes prepared `SELECT` result sets via `PortalSuspended`; broader incremental row draining remains limited
 

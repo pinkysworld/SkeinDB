@@ -855,6 +855,7 @@ pub async fn write_parameter_description(
 pub mod oid {
     pub const BOOL: i32 = 16;
     pub const INT8: i32 = 20;
+    pub const INT2: i32 = 21;
     pub const INT4: i32 = 23;
     pub const TEXT: i32 = 25;
     pub const FLOAT4: i32 = 700;

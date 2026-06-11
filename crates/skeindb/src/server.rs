@@ -14290,6 +14290,268 @@ fn pg_decode_text_param_lit(text: &str, type_oid: i32) -> Lit {
     }
 }
 
+/// Decode an extended-query `Bind` parameter that was sent in binary format
+/// (format code `1`) into the engine's [`Lit`] representation, interpreting the
+/// wire bytes according to the declared parameter `type_oid`.
+///
+/// This mirrors [`pg_decode_text_param_lit`] for the text path and reuses the same
+/// big-endian, per-OID strategy as the binary `COPY FROM STDIN` reader. Real
+/// drivers — psycopg3, PgJDBC, and Npgsql — send integers, UUIDs, and timestamps
+/// in binary by default, so honoring this format is required for server-side
+/// prepared statements to work with them.
+fn pg_decode_binary_param_lit(bytes: &[u8], type_oid: i32) -> Result<Lit, String> {
+    let read_i16 = |b: &[u8]| -> Result<i64, String> {
+        match b.len() {
+            2 => Ok(i16::from_be_bytes([b[0], b[1]]) as i64),
+            other => Err(format!(
+                "binary int2 parameter must be 2 bytes, got {other}"
+            )),
+        }
+    };
+    let read_i32 = |b: &[u8]| -> Result<i64, String> {
+        match b.len() {
+            4 => Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64),
+            other => Err(format!(
+                "binary int4 parameter must be 4 bytes, got {other}"
+            )),
+        }
+    };
+    let read_i64 = |b: &[u8]| -> Result<i64, String> {
+        match b.len() {
+            8 => Ok(i64::from_be_bytes([
+                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+            ])),
+            other => Err(format!(
+                "binary int8 parameter must be 8 bytes, got {other}"
+            )),
+        }
+    };
+
+    match type_oid {
+        pg_wire::oid::BOOL => match bytes {
+            [0] => Ok(Lit::Bool { v: false }),
+            [_] => Ok(Lit::Bool { v: true }),
+            _ => Err("binary bool parameter must be exactly one byte".to_string()),
+        },
+        pg_wire::oid::INT2 => read_i16(bytes).map(|v| Lit::I64 { v }),
+        pg_wire::oid::INT4 => read_i32(bytes).map(|v| Lit::I64 { v }),
+        pg_wire::oid::INT8 => read_i64(bytes).map(|v| Lit::I64 { v }),
+        pg_wire::oid::FLOAT4 => match bytes {
+            [a, b, c, d] => Ok(Lit::F64 {
+                v: f32::from_be_bytes([*a, *b, *c, *d]) as f64,
+            }),
+            other => Err(format!(
+                "binary float4 parameter must be 4 bytes, got {}",
+                other.len()
+            )),
+        },
+        pg_wire::oid::FLOAT8 => match read_i64(bytes) {
+            Ok(_) => Ok(Lit::F64 {
+                v: f64::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]),
+            }),
+            Err(_) => Err(format!(
+                "binary float8 parameter must be 8 bytes, got {}",
+                bytes.len()
+            )),
+        },
+        pg_wire::oid::NUMERIC => pg_decode_binary_numeric(bytes).map(|v| Lit::Dec { v }),
+        pg_wire::oid::DATE => read_i32(bytes).map(|days| Lit::Date {
+            iso: pg_date_from_pg_days(days),
+        }),
+        pg_wire::oid::TIME => read_i64(bytes).map(|micros| Lit::Time {
+            iso: pg_time_of_day_from_micros(micros),
+        }),
+        pg_wire::oid::TIMESTAMP | pg_wire::oid::TIMESTAMPTZ => {
+            read_i64(bytes).map(|micros| Lit::Datetime {
+                iso: pg_timestamp_from_pg_micros(micros),
+            })
+        }
+        pg_wire::oid::UUID => {
+            if bytes.len() != 16 {
+                return Err(format!(
+                    "binary uuid parameter must be 16 bytes, got {}",
+                    bytes.len()
+                ));
+            }
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            Ok(Lit::Str {
+                v: format!(
+                    "{}-{}-{}-{}-{}",
+                    &hex[0..8],
+                    &hex[8..12],
+                    &hex[12..16],
+                    &hex[16..20],
+                    &hex[20..32]
+                ),
+            })
+        }
+        pg_wire::oid::BYTEA => {
+            use base64::Engine as _;
+            Ok(Lit::Bytes {
+                b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        }
+        pg_wire::oid::JSONB => {
+            // The JSONB binary format is a one-byte version header (currently always
+            // `1`) followed by the UTF-8 JSON text.
+            let (version, payload) = bytes
+                .split_first()
+                .ok_or_else(|| "binary jsonb parameter is empty".to_string())?;
+            if *version != 1 {
+                return Err(format!("unsupported binary jsonb version {version}"));
+            }
+            String::from_utf8(payload.to_vec())
+                .map(|v| Lit::Str { v })
+                .map_err(|_| "binary jsonb parameter is not valid UTF-8".to_string())
+        }
+        // TEXT, VARCHAR, JSON, and any other/unknown type: the binary wire form is
+        // the raw UTF-8 bytes, matching the text path's string handling.
+        _ => String::from_utf8(bytes.to_vec())
+            .map(|v| Lit::Str { v })
+            .map_err(|_| format!("binary parameter for type OID {type_oid} is not valid UTF-8")),
+    }
+}
+
+/// Days between the Unix epoch (1970-01-01) and the PostgreSQL epoch (2000-01-01),
+/// used to translate binary `DATE`/`TIMESTAMP` parameters into civil dates.
+const PG_EPOCH_UNIX_DAYS: i64 = 10_957;
+/// Microseconds in a 24-hour day.
+const PG_MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// Convert a day count relative to the PostgreSQL epoch (2000-01-01) into a civil
+/// `(year, month, day)` triple using Howard Hinnant's `civil_from_days` algorithm.
+fn pg_civil_from_pg_days(pg_days: i64) -> (i64, u32, u32) {
+    let z = pg_days + PG_EPOCH_UNIX_DAYS + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
+/// Format a binary `DATE` parameter (days since 2000-01-01) as `YYYY-MM-DD`.
+fn pg_date_from_pg_days(pg_days: i64) -> String {
+    let (year, month, day) = pg_civil_from_pg_days(pg_days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Format an intraday microsecond offset as `HH:MM:SS` or `HH:MM:SS.ffffff`.
+/// Also used directly for binary `TIME` parameters (microseconds since midnight).
+fn pg_time_of_day_from_micros(micros: i64) -> String {
+    let total_seconds = micros.div_euclid(1_000_000);
+    let frac = micros.rem_euclid(1_000_000);
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if frac > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}.{frac:06}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Format a binary `TIMESTAMP`/`TIMESTAMPTZ` parameter (microseconds since the
+/// PostgreSQL epoch 2000-01-01 00:00:00) as `YYYY-MM-DD HH:MM:SS[.ffffff]`.
+fn pg_timestamp_from_pg_micros(micros: i64) -> String {
+    let days = micros.div_euclid(PG_MICROS_PER_DAY);
+    let intraday = micros.rem_euclid(PG_MICROS_PER_DAY);
+    let (year, month, day) = pg_civil_from_pg_days(days);
+    let time = pg_time_of_day_from_micros(intraday);
+    format!("{year:04}-{month:02}-{day:02} {time}")
+}
+
+/// Decode a PostgreSQL binary `NUMERIC` parameter into its canonical decimal text.
+///
+/// The wire format is four `int16` header fields — base-10000 digit-group count,
+/// weight of the first group, sign, and display scale — followed by the digit
+/// groups themselves. Special sign codes encode `NaN` and `±Infinity`.
+fn pg_decode_binary_numeric(raw: &[u8]) -> Result<String, String> {
+    if raw.len() < 8 {
+        return Err("binary numeric parameter header is truncated".to_string());
+    }
+    let read_u16 = |i: usize| u16::from_be_bytes([raw[i], raw[i + 1]]);
+    let ndigits = read_u16(0) as usize;
+    let weight = i16::from_be_bytes([raw[2], raw[3]]) as i32;
+    let sign = read_u16(4);
+    let dscale = read_u16(6) as usize;
+
+    const NUMERIC_POS: u16 = 0x0000;
+    const NUMERIC_NEG: u16 = 0x4000;
+    const NUMERIC_NAN: u16 = 0xC000;
+    const NUMERIC_PINF: u16 = 0xD000;
+    const NUMERIC_NINF: u16 = 0xF000;
+
+    let negative = match sign {
+        NUMERIC_POS => false,
+        NUMERIC_NEG => true,
+        NUMERIC_NAN => return Ok("NaN".to_string()),
+        NUMERIC_PINF => return Ok("Infinity".to_string()),
+        NUMERIC_NINF => return Ok("-Infinity".to_string()),
+        _ => return Err("binary numeric parameter has an invalid sign".to_string()),
+    };
+
+    if raw.len() < 8 + ndigits * 2 {
+        return Err("binary numeric parameter digits are truncated".to_string());
+    }
+    let mut digits = Vec::with_capacity(ndigits);
+    for i in 0..ndigits {
+        let group = read_u16(8 + i * 2);
+        if group > 9999 {
+            return Err("binary numeric digit group is out of range".to_string());
+        }
+        digits.push(group);
+    }
+
+    let digit_at = |position: i32| -> u16 {
+        let idx = weight - position;
+        if idx >= 0 && (idx as usize) < digits.len() {
+            digits[idx as usize]
+        } else {
+            0
+        }
+    };
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+
+    // Integer part: base-10000 groups at positions weight..=0.
+    if weight < 0 {
+        out.push('0');
+    } else {
+        for position in (0..=weight).rev() {
+            let group = digit_at(position);
+            if position == weight {
+                out.push_str(&group.to_string());
+            } else {
+                out.push_str(&format!("{group:04}"));
+            }
+        }
+    }
+
+    // Fractional part: pad/truncate base-10000 groups to exactly `dscale` digits.
+    if dscale > 0 {
+        let mut frac = String::with_capacity(dscale + 4);
+        let mut position = -1i32;
+        while frac.len() < dscale {
+            frac.push_str(&format!("{:04}", digit_at(position)));
+            position -= 1;
+        }
+        frac.truncate(dscale);
+        out.push('.');
+        out.push_str(&frac);
+    }
+
+    Ok(out)
+}
+
 fn pg_substitute_stmt_sql(sql: &str, params: &[Lit]) -> Result<String, String> {
     let bytes = sql.as_bytes();
     let mut quote = 0u8;
@@ -15876,14 +16138,6 @@ async fn handle_pg_connection(
                         ));
                         break;
                     }
-                    let format_code = pg_format_code_at(&param_formats, idx);
-                    if format_code != 0 {
-                        bind_error = Some((
-                            "binary parameter formats are not supported yet".to_string(),
-                            "0A000",
-                        ));
-                        break;
-                    }
                     let end = offset.saturating_add(value_len as usize);
                     let Some(bytes) = msg.payload.get(offset..end) else {
                         bind_error = Some((
@@ -15893,9 +16147,28 @@ async fn handle_pg_connection(
                         break;
                     };
                     offset = end;
-                    let text = String::from_utf8_lossy(bytes).into_owned();
                     let type_oid = statement.param_types.get(idx).copied().unwrap_or(0);
-                    params.push(pg_decode_text_param_lit(&text, type_oid));
+                    let format_code = pg_format_code_at(&param_formats, idx);
+                    match format_code {
+                        0 => {
+                            let text = String::from_utf8_lossy(bytes).into_owned();
+                            params.push(pg_decode_text_param_lit(&text, type_oid));
+                        }
+                        1 => match pg_decode_binary_param_lit(bytes, type_oid) {
+                            Ok(lit) => params.push(lit),
+                            Err(message) => {
+                                bind_error = Some((message, "22P03"));
+                                break;
+                            }
+                        },
+                        other => {
+                            bind_error = Some((
+                                format!("invalid parameter format code {other} in Bind message"),
+                                "08P01",
+                            ));
+                            break;
+                        }
+                    }
                 }
 
                 let result_format_count =
@@ -48334,6 +48607,204 @@ mod tests {
             Lit::Str {
                 v: "Ada".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn pg_decode_binary_param_lit_handles_scalar_types() {
+        // Integers of every width decode big-endian into Lit::I64.
+        assert_eq!(
+            pg_decode_binary_param_lit(&[0x00, 0x2a], pg_wire::oid::INT2),
+            Ok(Lit::I64 { v: 42 })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&(-1234i32).to_be_bytes(), pg_wire::oid::INT4),
+            Ok(Lit::I64 { v: -1234 })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&9_000_000_000i64.to_be_bytes(), pg_wire::oid::INT8),
+            Ok(Lit::I64 { v: 9_000_000_000 })
+        );
+
+        // Floats decode big-endian IEEE-754.
+        assert_eq!(
+            pg_decode_binary_param_lit(&1.5f32.to_be_bytes(), pg_wire::oid::FLOAT4),
+            Ok(Lit::F64 { v: 1.5 })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&(-2.25f64).to_be_bytes(), pg_wire::oid::FLOAT8),
+            Ok(Lit::F64 { v: -2.25 })
+        );
+
+        // Bool is a single byte.
+        assert_eq!(
+            pg_decode_binary_param_lit(&[0x00], pg_wire::oid::BOOL),
+            Ok(Lit::Bool { v: false })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&[0x01], pg_wire::oid::BOOL),
+            Ok(Lit::Bool { v: true })
+        );
+
+        // Text / varchar / json are raw UTF-8 bytes.
+        assert_eq!(
+            pg_decode_binary_param_lit(b"hello", pg_wire::oid::TEXT),
+            Ok(Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+        // Unknown OIDs fall back to UTF-8 string decoding.
+        assert_eq!(
+            pg_decode_binary_param_lit(b"name", 19),
+            Ok(Lit::Str {
+                v: "name".to_string()
+            })
+        );
+
+        // JSONB carries a one-byte version header that must be stripped.
+        assert_eq!(
+            pg_decode_binary_param_lit(b"\x01{\"a\":1}", pg_wire::oid::JSONB),
+            Ok(Lit::Str {
+                v: "{\"a\":1}".to_string()
+            })
+        );
+        assert!(pg_decode_binary_param_lit(b"\x02{}", pg_wire::oid::JSONB).is_err());
+
+        // BYTEA is stored base64-encoded.
+        assert_eq!(
+            pg_decode_binary_param_lit(&[0x00, 0x01, 0x02, 0x03], pg_wire::oid::BYTEA),
+            Ok(Lit::Bytes {
+                b64: "AAECAw==".to_string()
+            })
+        );
+
+        // UUID is 16 raw bytes rendered as the canonical hyphenated string.
+        let uuid_bytes: [u8; 16] = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        assert_eq!(
+            pg_decode_binary_param_lit(&uuid_bytes, pg_wire::oid::UUID),
+            Ok(Lit::Str {
+                v: "550e8400-e29b-41d4-a716-446655440000".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn pg_decode_binary_param_lit_rejects_bad_widths() {
+        assert!(pg_decode_binary_param_lit(&[0x00], pg_wire::oid::INT4).is_err());
+        assert!(pg_decode_binary_param_lit(&[0x00, 0x00, 0x00], pg_wire::oid::FLOAT4).is_err());
+        assert!(pg_decode_binary_param_lit(&[0x00; 8], pg_wire::oid::UUID).is_err());
+        assert!(pg_decode_binary_param_lit(&[], pg_wire::oid::BOOL).is_err());
+    }
+
+    #[test]
+    fn pg_decode_binary_temporal_params_match_iso_text() {
+        // DATE: days since the PostgreSQL epoch (2000-01-01).
+        assert_eq!(
+            pg_decode_binary_param_lit(&0i32.to_be_bytes(), pg_wire::oid::DATE),
+            Ok(Lit::Date {
+                iso: "2000-01-01".to_string()
+            })
+        );
+        // 2000 is a leap year, so day 60 is 2000-03-01.
+        assert_eq!(
+            pg_decode_binary_param_lit(&60i32.to_be_bytes(), pg_wire::oid::DATE),
+            Ok(Lit::Date {
+                iso: "2000-03-01".to_string()
+            })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&(-1i32).to_be_bytes(), pg_wire::oid::DATE),
+            Ok(Lit::Date {
+                iso: "1999-12-31".to_string()
+            })
+        );
+
+        // TIME: microseconds since midnight.
+        let micros_of_day: i64 = (12 * 3_600 + 34 * 60 + 56) * 1_000_000 + 789_000;
+        assert_eq!(
+            pg_decode_binary_param_lit(&micros_of_day.to_be_bytes(), pg_wire::oid::TIME),
+            Ok(Lit::Time {
+                iso: "12:34:56.789000".to_string()
+            })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&0i64.to_be_bytes(), pg_wire::oid::TIME),
+            Ok(Lit::Time {
+                iso: "00:00:00".to_string()
+            })
+        );
+
+        // TIMESTAMP: microseconds since 2000-01-01 00:00:00.
+        let ts_micros = 60 * PG_MICROS_PER_DAY + micros_of_day;
+        assert_eq!(
+            pg_decode_binary_param_lit(&ts_micros.to_be_bytes(), pg_wire::oid::TIMESTAMP),
+            Ok(Lit::Datetime {
+                iso: "2000-03-01 12:34:56.789000".to_string()
+            })
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(&0i64.to_be_bytes(), pg_wire::oid::TIMESTAMPTZ),
+            Ok(Lit::Datetime {
+                iso: "2000-01-01 00:00:00".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn pg_decode_binary_numeric_reconstructs_decimals() {
+        let numeric = |ndigits: u16, weight: i16, sign: u16, dscale: u16, digits: &[u16]| {
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&ndigits.to_be_bytes());
+            raw.extend_from_slice(&weight.to_be_bytes());
+            raw.extend_from_slice(&sign.to_be_bytes());
+            raw.extend_from_slice(&dscale.to_be_bytes());
+            for d in digits {
+                raw.extend_from_slice(&d.to_be_bytes());
+            }
+            raw
+        };
+
+        // 1234.5678 → two base-10000 groups, weight 0, scale 4.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(2, 0, 0x0000, 4, &[1234, 5678])),
+            Ok("1234.5678".to_string())
+        );
+        // Zero.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(0, 0, 0x0000, 0, &[])),
+            Ok("0".to_string())
+        );
+        // Negative integer.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(1, 0, 0x4000, 0, &[42])),
+            Ok("-42".to_string())
+        );
+        // Trailing integer zero group: 12 at weight 1 → 120000.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(1, 1, 0x0000, 0, &[12])),
+            Ok("120000".to_string())
+        );
+        // Fraction smaller than one base-10000 group: 0.00001234.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(1, -2, 0x0000, 8, &[1234])),
+            Ok("0.00001234".to_string())
+        );
+        // Special sign codes.
+        assert_eq!(
+            pg_decode_binary_numeric(&numeric(0, 0, 0xC000, 0, &[])),
+            Ok("NaN".to_string())
+        );
+        assert_eq!(
+            pg_decode_binary_param_lit(
+                &numeric(2, 0, 0x0000, 4, &[1234, 5678]),
+                pg_wire::oid::NUMERIC
+            ),
+            Ok(Lit::Dec {
+                v: "1234.5678".to_string()
+            })
         );
     }
 

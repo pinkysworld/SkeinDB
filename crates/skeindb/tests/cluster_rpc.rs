@@ -10422,6 +10422,36 @@ fn pg_bind_binary_result_payload(
     payload
 }
 
+/// Build a Bind payload that sends every parameter in binary format (format code
+/// `1`) using the supplied raw wire bytes; `None` encodes a SQL NULL (length -1).
+/// Result columns are requested in text format.
+fn pg_bind_binary_params_payload(
+    portal_name: &str,
+    statement_name: &str,
+    params: &[Option<Vec<u8>>],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(portal_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(statement_name.as_bytes());
+    payload.push(0);
+    // One parameter format code (1 = binary), broadcast to all parameters.
+    payload.extend_from_slice(&1i16.to_be_bytes());
+    payload.extend_from_slice(&1i16.to_be_bytes());
+    payload.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for param in params {
+        match param {
+            Some(bytes) => {
+                payload.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                payload.extend_from_slice(bytes);
+            }
+            None => payload.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    payload.extend_from_slice(&0i16.to_be_bytes()); // result columns: all text
+    payload
+}
+
 fn pg_describe_payload(target_kind: u8, name: &str) -> Vec<u8> {
     let mut payload = vec![target_kind];
     payload.extend_from_slice(name.as_bytes());
@@ -12721,6 +12751,130 @@ async fn pg_extended_query_parse_bind_describe_execute_roundtrip() -> anyhow::Re
     assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
     assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
     assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_binary_int_param_filters_rows() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_binary_int_param")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_bin_filter (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_bin_filter (id, name) VALUES (1, 'Ada')",
+        "INSERT INTO app.pg_bin_filter (id, name) VALUES (2, 'Grace')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    // psycopg3/JDBC/Npgsql send INT8 parameters in binary by default; the WHERE
+    // value here arrives as 8 big-endian bytes rather than ASCII text.
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "sel_bin_user",
+                    "SELECT name FROM app.pg_bin_filter WHERE id = $1",
+                    &[20],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_binary_params_payload(
+                    "bin_user_portal",
+                    "sel_bin_user",
+                    &[Some(2i64.to_be_bytes().to_vec())],
+                ),
+            ),
+            (b'E', pg_execute_payload("bin_user_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert!(tags.contains(&b'2'), "missing BindComplete: {tags:?}");
+    assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_binary_params_insert_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_binary_insert")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_bin_insert (id BIGINT NOT NULL, score INT NOT NULL, ratio DOUBLE NOT NULL, label VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    // INSERT with every value supplied as a binary Bind parameter: INT8, INT4,
+    // FLOAT8, and TEXT. This exercises the full decode -> SQL literal -> engine path.
+    let insert_msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "ins_bin_row",
+                    "INSERT INTO app.pg_bin_insert (id, score, ratio, label) VALUES ($1, $2, $3, $4)",
+                    &[20, 23, 701, 1043],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_binary_params_payload(
+                    "ins_bin_portal",
+                    "ins_bin_row",
+                    &[
+                        Some(7i64.to_be_bytes().to_vec()),
+                        Some((-13i32).to_be_bytes().to_vec()),
+                        Some(2.5f64.to_be_bytes().to_vec()),
+                        Some(b"binary-label".to_vec()),
+                    ],
+                ),
+            ),
+            (b'E', pg_execute_payload("ins_bin_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+    assert!(
+        pg_message_tags(&insert_msgs).contains(&b'2'),
+        "missing BindComplete on insert"
+    );
+    assert_eq!(pg_command_complete_tag(&insert_msgs)?, "INSERT 0 1");
+    assert_eq!(pg_ready_status(&insert_msgs)?, b'I');
+
+    let select_msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, score, ratio, label FROM app.pg_bin_insert WHERE id = 7",
+    )
+    .await?;
+    let rows = pg_all_data_row_cells(&select_msgs)?;
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some("7".to_string()),
+            Some("-13".to_string()),
+            Some("2.5".to_string()),
+            Some("binary-label".to_string()),
+        ]]
+    );
+    assert_eq!(pg_ready_status(&select_msgs)?, b'I');
 
     Ok(())
 }
