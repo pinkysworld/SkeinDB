@@ -12205,6 +12205,10 @@ struct PgPortal {
     result_columns: Vec<MySqlStmtPrepareColumn>,
     result_formats: Vec<i16>,
     pending_result: Option<PgPortalResultSet>,
+    // Whether the client issued a Describe for this portal. When it did, the
+    // RowDescription was already sent and the extended-protocol Execute must not
+    // repeat it (PostgreSQL's Execute only emits DataRows + CommandComplete).
+    described: bool,
 }
 
 fn pg_stmt_column_oid_and_size(column_type: MySqlStmtColumnType) -> (i32, i16) {
@@ -12594,6 +12598,7 @@ async fn pg_drain_portal_rows(
     tx_status: &mut pg_wire::TxStatus,
     portal: &mut PgPortal,
     max_rows: i32,
+    emit_row_description: bool,
 ) -> anyhow::Result<()> {
     let mut command_complete_tag = None;
     let mut suspended = false;
@@ -12610,7 +12615,9 @@ async fn pg_drain_portal_rows(
             remaining.min(max_rows as usize)
         };
 
-        pg_wire::write_row_description(stream, &pending.columns).await?;
+        if emit_row_description {
+            pg_wire::write_row_description(stream, &pending.columns).await?;
+        }
         pg_write_data_rows(
             stream,
             &pending.columns,
@@ -12647,8 +12654,22 @@ async fn pg_execute_portal(
     portal: &mut PgPortal,
     max_rows: i32,
 ) -> anyhow::Result<bool> {
+    // In the extended protocol a client learns the result shape from Describe.
+    // When the portal was already described (and a real RowDescription, not
+    // NoData, was returned) the Execute response must contain only DataRows +
+    // CommandComplete, matching PostgreSQL. Re-sending RowDescription confuses
+    // strict clients such as psycopg3.
+    let emit_row_description = !portal.described || portal.result_columns.is_empty();
     if portal.pending_result.is_some() {
-        pg_drain_portal_rows(stream, session, tx_status, portal, max_rows).await?;
+        pg_drain_portal_rows(
+            stream,
+            session,
+            tx_status,
+            portal,
+            max_rows,
+            emit_row_description,
+        )
+        .await?;
         return Ok(false);
     }
 
@@ -12677,6 +12698,7 @@ async fn pg_execute_portal(
             &exec_sql,
             Some(&portal.result_columns),
             &portal.result_formats,
+            emit_row_description,
         )
         .await;
     }
@@ -12704,7 +12726,15 @@ async fn pg_execute_portal(
                 next_row: 0,
                 command_tag: format!("SELECT {}", row_count),
             });
-            pg_drain_portal_rows(stream, session, tx_status, portal, max_rows).await?;
+            pg_drain_portal_rows(
+                stream,
+                session,
+                tx_status,
+                portal,
+                max_rows,
+                emit_row_description,
+            )
+            .await?;
             Ok(false)
         }
         Ok(MySqlQueryOutcome::Ok { .. }) => {
@@ -12717,6 +12747,7 @@ async fn pg_execute_portal(
                 &exec_sql,
                 Some(&portal.result_columns),
                 &portal.result_formats,
+                emit_row_description,
             )
             .await
         }
@@ -15379,6 +15410,7 @@ async fn pg_dispatch_sql(
     sql_raw: &str,
     described_columns: Option<&[MySqlStmtPrepareColumn]>,
     result_formats: &[i16],
+    emit_row_description: bool,
 ) -> anyhow::Result<bool> {
     use crate::pg_wire::TxStatus;
 
@@ -15651,7 +15683,9 @@ async fn pg_dispatch_sql(
             for (idx, col) in pg_columns.iter_mut().enumerate() {
                 col.format = pg_format_code_at(result_formats, idx);
             }
-            pg_wire::write_row_description(stream, &pg_columns).await?;
+            if emit_row_description {
+                pg_wire::write_row_description(stream, &pg_columns).await?;
+            }
             for row in &rows {
                 let encoded_values: Vec<Option<Vec<u8>>> = row
                     .iter()
@@ -15719,7 +15753,9 @@ async fn pg_dispatch_sql(
                             for (idx, col) in pg_columns.iter_mut().enumerate() {
                                 col.format = pg_format_code_at(result_formats, idx);
                             }
-                            pg_wire::write_row_description(stream, &pg_columns).await?;
+                            if emit_row_description {
+                                pg_wire::write_row_description(stream, &pg_columns).await?;
+                            }
                             for row in &rows {
                                 let encoded_values: Vec<Option<Vec<u8>>> = row
                                     .iter()
@@ -16067,6 +16103,7 @@ async fn handle_pg_connection(
                     &sql_raw,
                     None,
                     &[],
+                    true,
                 )
                 .await?;
                 pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
@@ -16309,6 +16346,7 @@ async fn handle_pg_connection(
                         result_columns: statement.result_columns,
                         result_formats,
                         pending_result: None,
+                        described: false,
                     },
                 );
                 pg_wire::write_bind_complete(&mut stream).await?;
@@ -16345,7 +16383,7 @@ async fn handle_pg_connection(
                             .await?;
                     }
                     b'P' => {
-                        let Some(portal) = portals.get(&name) else {
+                        let Some(portal) = portals.get_mut(&name) else {
                             pg_wire::write_error_response(
                                 &mut stream,
                                 "ERROR",
@@ -16356,8 +16394,23 @@ async fn handle_pg_connection(
                             skip_until_sync = true;
                             continue;
                         };
-                        pg_write_prepare_row_description(&mut stream, &portal.result_columns)
-                            .await?;
+                        // Emit the RowDescription reflecting the result format codes
+                        // requested in Bind, then remember that the portal has been
+                        // described so the matching Execute omits a duplicate one.
+                        if portal.result_columns.is_empty() {
+                            pg_wire::write_no_data(&mut stream).await?;
+                        } else {
+                            let mut pg_columns: Vec<pg_wire::PgColumn> = portal
+                                .result_columns
+                                .iter()
+                                .map(pg_prepare_column_to_pg)
+                                .collect();
+                            for (idx, col) in pg_columns.iter_mut().enumerate() {
+                                col.format = pg_format_code_at(&portal.result_formats, idx);
+                            }
+                            pg_wire::write_row_description(&mut stream, &pg_columns).await?;
+                        }
+                        portal.described = true;
                     }
                     _ => {
                         pg_wire::write_error_response(
@@ -49888,6 +49941,7 @@ mod tests {
             result_columns: vec![],
             result_formats: vec![0, 1],
             pending_result: None,
+            described: false,
         };
         assert_eq!(portal.result_formats, vec![0, 1]);
     }

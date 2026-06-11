@@ -12896,14 +12896,84 @@ async fn pg_extended_query_parse_bind_describe_execute_roundtrip() -> anyhow::Re
         tags.contains(&b't'),
         "missing ParameterDescription: {tags:?}"
     );
+    // The statement Describe and the portal Describe each emit one RowDescription.
+    // Execute must NOT emit a third one: in the extended protocol the row layout
+    // is reported by Describe, and a duplicate RowDescription on Execute breaks
+    // strict clients (e.g. psycopg3).
     assert_eq!(
         tags.iter().filter(|tag| **tag == b'T').count(),
-        3,
-        "expected statement describe, portal describe, and execute RowDescription"
+        2,
+        "expected statement describe and portal describe RowDescriptions only"
     );
     assert_eq!(pg_parameter_description_oids(&msgs)?, vec![20]);
     assert_eq!(pg_row_description_names(&msgs)?, vec!["name".to_string()]);
     assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25]);
+    assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+/// Regression test for the psycopg3 failure mode the real-driver smoke matrix
+/// surfaced: a parameterized SELECT issued as Parse + Bind + Describe(portal) +
+/// Execute must return exactly ONE RowDescription (from the portal Describe),
+/// followed by the data rows. Emitting a second RowDescription during Execute
+/// made psycopg3 abort with "server sent data ('D') without prior row
+/// description ('T')".
+#[tokio::test]
+async fn pg_extended_query_describe_portal_then_execute_emits_single_row_description(
+) -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_single_row_description")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_single_rd (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_single_rd (id, name) VALUES (1, 'Ada')",
+        "INSERT INTO app.pg_single_rd (id, name) VALUES (2, 'Grace')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    // psycopg3's flow: Parse, Bind, Describe(portal), Execute, Sync — no
+    // statement Describe.
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "psy_stmt",
+                    "SELECT name FROM app.pg_single_rd WHERE id = $1",
+                    &[20],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("psy_portal", "psy_stmt", &[Some("2")]),
+            ),
+            (b'D', pg_describe_payload(b'P', "psy_portal")),
+            (b'E', pg_execute_payload("psy_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'T').count(),
+        1,
+        "expected exactly one RowDescription (from the portal Describe): {tags:?}"
+    );
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'D').count(),
+        1,
+        "expected exactly one DataRow: {tags:?}"
+    );
+    assert_eq!(pg_row_description_names(&msgs)?, vec!["name".to_string()]);
     assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
     assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
     assert_eq!(pg_ready_status(&msgs)?, b'I');
