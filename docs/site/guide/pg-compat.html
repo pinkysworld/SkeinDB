@@ -126,7 +126,7 @@
     </div>
     <article class="doc-article">
       <h1 id="postgresql-compatibility">PostgreSQL Compatibility<a class="headerlink" href="#postgresql-compatibility" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-05-28</p>
+<p>Last updated: 2026-06-01</p>
 <p>Status: Partial advanced baseline</p>
 <p>SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
 The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.</p>
@@ -141,10 +141,16 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <span class="nv">PGPASSWORD</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$SKEINDB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-c<span class="w"> </span><span class="s2">&quot;SELECT version()&quot;</span>
+
+<span class="c1"># Enable TLS on the MySQL + PostgreSQL listeners with a PEM cert/key pair.</span>
+<span class="c1"># psql then negotiates SSL over the standard SSLRequest preamble:</span>
+cargo<span class="w"> </span>run<span class="w"> </span>--<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--pg<span class="w"> </span><span class="m">5432</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tls-cert<span class="w"> </span>server.pem<span class="w"> </span>--tls-key<span class="w"> </span>server.key
+psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user=skein dbname=app sslmode=require&quot;</span><span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT 1&quot;</span>
 </code></pre></div>
 
 <p>Notes:
-- <code>sslmode=disable</code> is recommended for now because the listener explicitly rejects PostgreSQL SSL negotiation with <code>N</code>.
+- TLS is opt-in: pass <code>--tls-cert</code> and <code>--tls-key</code> (PEM) to enable it on both the PostgreSQL and MySQL listeners. Without them the listener keeps answering the <code>SSLRequest</code> preamble with <code>N</code>, so <code>sslmode=disable</code> is required.
 - The PG listener shares the same underlying execution engine as MySQL and SkeinQL.</p>
 <h2 id="implemented-today">Implemented today<a class="headerlink" href="#implemented-today" title="Permanent link">¶</a></h2>
 <ul>
@@ -153,7 +159,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li>startup response batch: <code>AuthenticationOk</code> / <code>ParameterStatus</code> / <code>BackendKeyData</code> / <code>ReadyForQuery</code></li>
 <li>trust auth when <code>SKEINDB_TOKEN</code> is unset</li>
 <li>SCRAM-SHA-256 auth path when <code>SKEINDB_TOKEN</code> is set</li>
-<li>SSL negotiation rejection (<code>'N'</code>)</li>
+<li>opt-in TLS: with <code>--tls-cert</code>/<code>--tls-key</code> the listener answers <code>SSLRequest</code> with <code>S</code> and completes a rustls handshake before startup; without them it rejects with <code>N</code></li>
 <li>PG session settings for common <code>SET</code> / <code>SET ... TO</code> / <code>RESET</code> / <code>RESET ALL</code>, with <code>SHOW</code>, <code>current_setting(name)</code>, <code>current_setting(name, missing_ok)</code>, <code>current_schema</code> (with optional parentheses), and <code>current_schemas(bool)</code> reading the effective <code>search_path</code></li>
 <li>simple query protocol delegated to the shared SQL execution engine</li>
 <li>special-case startup/bootstrap query responses for <code>SELECT version()</code>, <code>current_database()</code>, <code>current_catalog</code>, <code>current_schema</code> (with optional parentheses), <code>current_schemas(bool)</code>, <code>current_user</code>, <code>current_role</code>, <code>session_user</code>, <code>user</code>, <code>SHOW server_version</code> / <code>server_version_num</code> / <code>standard_conforming_strings</code> / <code>max_identifier_length</code>, <code>SHOW transaction isolation level</code>, and <code>SELECT current_setting(...)</code> including the <code>missing_ok</code> form</li>
@@ -163,8 +169,9 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li><code>SAVEPOINT</code>, <code>RELEASE SAVEPOINT</code>, and <code>ROLLBACK TO SAVEPOINT</code> wired to the current undo log</li>
 <li>PostgreSQL SQLSTATE mapping for common shared-engine failures such as undefined tables, undefined columns, unique violations, syntax errors, and unsupported features</li>
 <li><code>Terminate</code> handling</li>
-<li>extended query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, including named prepared statements, named portals, <code>$1</code>/<code>$2</code> placeholders, statement/portal <code>Describe</code>, text parameters, binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors</li>
-<li>PG compatibility corpus at <code>tests/compat/pg_corpus.sql</code> executed end-to-end over the live PG listener</li>
+<li>extended query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, including named prepared statements, named portals, <code>$1</code>/<code>$2</code> placeholders, statement/portal <code>Describe</code>, text <strong>and binary</strong> bind parameters for common scalar OIDs (<code>int2</code>/<code>int4</code>/<code>int8</code>, <code>float4</code>/<code>float8</code>, <code>bool</code>, <code>numeric</code>, <code>date</code>/<code>time</code>/<code>timestamp</code>/<code>timestamptz</code>, <code>uuid</code>, <code>bytea</code>, and <code>text</code>/<code>varchar</code>/<code>json</code>/<code>jsonb</code>), binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors</li>
+<li>PG compatibility corpus at <code>tests/compat/pg_corpus.sql</code> executed end-to-end over the live PG listener; every statement must complete without an <code>ErrorResponse</code>, and a curated subset of deterministic literal/scalar expressions is checked for exact values. Coverage spans startup probes, savepoints, <code>::</code>/<code>CAST</code> type casts, dollar-quoted literals (<code>$$…$$</code>, <code>$tag$…$tag$</code>), <code>ARRAY[…]</code> constructors, JSON/JSONB <code>-&gt;</code>/<code>-&gt;&gt;</code>, column-side regex <code>~</code>/<code>~*</code>, <code>FETCH FIRST</code>, aggregates (<code>COUNT</code>/<code>SUM</code>/<code>AVG</code>/<code>string_agg</code>/<code>array_agg</code>), <code>GROUP BY</code>/<code>HAVING</code>, joins, <code>CASE</code>/<code>COALESCE</code>/<code>NULLIF</code>, subqueries/CTEs/<code>UNION</code>, scalar string/math functions, and DML with <code>RETURNING</code> and <code>ON CONFLICT … DO UPDATE</code></li>
+<li>real-driver smoke matrix at <code>tests/smoke/</code> that boots <code>skeindb serve</code> and round-trips through <code>psql</code>, psycopg3, and node-postgres (alongside the MySQL drivers), gated as the <code>driver-smoke</code> CI job</li>
 <li>PG-specific operators: <code>||</code> (string concatenation), <code>~</code> / <code>~*</code> (regex match), <code>-&gt;</code> / <code>-&gt;&gt;</code> (JSON access)</li>
 <li>PG-specific scalar functions: <code>gen_random_uuid()</code>, <code>date_trunc()</code>, <code>to_char()</code>, <code>pg_typeof()</code>, <code>string_to_array()</code>, <code>array_length()</code>, <code>array_upper()</code>, <code>array_lower()</code>, <code>clock_timestamp()</code>, <code>statement_timestamp()</code>, <code>transaction_timestamp()</code></li>
 <li>driver-introspection helpers that return deterministic single-tenant answers: <code>format_type(oid, typmod)</code> for common base/array types (with <code>varchar(n)</code>, <code>numeric(p,s)</code>, and time/timestamp precision modifiers), the <code>pg_*_is_visible(oid)</code> visibility probes (<code>pg_table_is_visible</code>, <code>pg_type_is_visible</code>, <code>pg_function_is_visible</code>, and the text-search/operator/opclass/collation/conversion variants), the <code>has_*_privilege(...)</code> probes (<code>has_table_privilege</code>, <code>has_column_privilege</code>, <code>has_schema_privilege</code>, <code>has_database_privilege</code>, <code>has_sequence_privilege</code>, <code>has_function_privilege</code>, and friends) which always succeed for the owner role, <code>pg_get_userbyid(oid)</code> returning the bootstrap role, and <code>pg_encoding_to_char(int)</code> returning <code>UTF8</code></li>
@@ -194,7 +201,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <tr>
 <td><code>server.rs</code> (PG section)</td>
 <td>Implemented</td>
-<td>PG listener, startup/auth flow, SSL rejection, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch</td>
+<td>PG listener, startup/auth flow, opt-in TLS upgrade after <code>SSLRequest</code>, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch</td>
 </tr>
 <tr>
 <td><code>pg_auth.rs</code></td>
@@ -214,7 +221,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <tr>
 <td><code>pg_types.rs</code></td>
 <td>Inline implementation</td>
-<td>Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in <code>pg_wire.rs</code> plus server-side inference helpers</td>
+<td>Common PG type OIDs, array OIDs, text encoding, binary result encoding, and binary bind-parameter decoding live in <code>pg_wire.rs</code> plus server-side inference helpers</td>
 </tr>
 <tr>
 <td><code>pg_catalog.rs</code></td>
@@ -259,9 +266,9 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <td>Prefer SCRAM</td>
 </tr>
 <tr>
-<td>TLS client certs</td>
-<td>Not implemented</td>
-<td>SSL negotiation is currently rejected</td>
+<td>TLS</td>
+<td>Opt-in (server)</td>
+<td><code>--tls-cert</code>/<code>--tls-key</code> enable a rustls TLS handshake after <code>SSLRequest</code>; client-certificate auth is not implemented</td>
 </tr>
 </tbody>
 </table>
@@ -279,19 +286,19 @@ For the common shared SQL subset, responses are encoded as:</p>
 <p><code>bytes</code> cells continue to flow through the shared engine as base64 in the internal JSON result surface, but the PG listener now normalizes them to PostgreSQL <code>bytea</code> text format (<code>\\x...</code>) on the wire.</p>
 <p><code>SELECT version()</code> plus the common startup/bootstrap probes above are handled explicitly so PG clients can complete early compatibility checks before falling through to the shared engine.</p>
 <p><code>COPY ... TO STDOUT</code> is now implemented in default/text/csv and binary formats for plain table exports and parenthesized <code>SELECT</code> queries. CSV exports additionally support <code>HEADER</code>, which emits a first <code>CopyData</code> frame with the selected column names before row data, and text/csv exports accept a single-byte <code>DELIMITER</code> override plus custom <code>NULL '...'</code> markers for row encoding. Supported CSV forms also accept single-byte <code>QUOTE</code> and <code>ESCAPE</code> overrides for export escaping and import parsing. Binary exports switch <code>CopyOutResponse</code> and column format codes to <code>1</code>, emit the PostgreSQL binary stream header, one binary-encoded row payload per <code>CopyData</code>, and the standard trailer before <code>CopyDone</code>. Binary <code>COPY ... FROM STDIN</code> is the mirror of this: <code>CopyInResponse</code> advertises overall and per-column binary format <code>1</code>, the buffered <code>CopyData</code> payload is validated against the <code>PGCOPY\n\xff\r\n\0</code> signature and flags (the OID bit is rejected), and each tuple's per-field length-prefixed values are decoded by column kind (big-endian integers and floats by width, <code>bool</code>, hyphenated <code>uuid</code>, and UTF-8 text) before being inserted through the normal write path.</p>
-<p>Default/text/csv <code>COPY table [ (col, ...) ] TO STDOUT</code>, <code>COPY table [ (col, ...) ] FROM STDIN</code>, <code>COPY (SELECT ...) TO STDOUT</code>, and binary <code>COPY ... TO STDOUT</code> are implemented over both simple-query and extended-query flows, with optional table-column lists on table targets and explicit <code>WITH (FORMAT text)</code>, <code>WITH (FORMAT csv)</code>, and <code>WITH (FORMAT binary)</code> plus PostgreSQL-style <code>WITH (TEXT)</code>, <code>WITH (CSV)</code>, and <code>WITH (BINARY)</code> aliases and legacy bare <code>WITH TEXT</code>, <code>WITH CSV</code>, and <code>WITH BINARY</code> forms accepted on supported shapes. <code>COPY FROM STDIN WITH (FORMAT csv, HEADER)</code> skips the first CSV row before row validation and insert assembly, <code>COPY FROM STDIN WITH (FORMAT csv, HEADER MATCH)</code> additionally rejects mismatched header names before inserts are built, and custom delimiters, quote markers, escape markers, plus <code>NULL</code> markers are threaded through both export and import parsing. The backend emits <code>CopyInResponse</code>, buffers incoming <code>CopyData</code> chunks, and commits them as one multi-row insert on <code>CopyDone</code>; extended-query completion still waits for <code>Sync</code> before <code>ReadyForQuery</code>. <code>COPY FROM STDIN WITH (FORMAT binary)</code> and most other COPY option coverage remain unsupported.</p>
+<p>Default/text/csv <code>COPY table [ (col, ...) ] TO STDOUT</code>, <code>COPY table [ (col, ...) ] FROM STDIN</code>, <code>COPY (SELECT ...) TO STDOUT</code>, and binary <code>COPY ... TO STDOUT</code> / <code>COPY ... FROM STDIN</code> are implemented over both simple-query and extended-query flows, with optional table-column lists on table targets and explicit <code>WITH (FORMAT text)</code>, <code>WITH (FORMAT csv)</code>, and <code>WITH (FORMAT binary)</code> plus PostgreSQL-style <code>WITH (TEXT)</code>, <code>WITH (CSV)</code>, and <code>WITH (BINARY)</code> aliases and legacy bare <code>WITH TEXT</code>, <code>WITH CSV</code>, and <code>WITH BINARY</code> forms accepted on supported shapes. <code>COPY FROM STDIN WITH (FORMAT csv, HEADER)</code> skips the first CSV row before row validation and insert assembly, <code>COPY FROM STDIN WITH (FORMAT csv, HEADER MATCH)</code> additionally rejects mismatched header names before inserts are built, and custom delimiters, quote markers, escape markers, plus <code>NULL</code> markers are threaded through both export and import parsing. The backend emits <code>CopyInResponse</code>, buffers incoming <code>CopyData</code> chunks, and commits them as one multi-row insert on <code>CopyDone</code>; extended-query completion still waits for <code>Sync</code> before <code>ReadyForQuery</code>.</p>
 <h3 id="extended-query-protocol">Extended query protocol<a class="headerlink" href="#extended-query-protocol" title="Permanent link">¶</a></h3>
 <p>The listener now supports the core extended-query lifecycle:</p>
 <ul>
 <li><code>Parse</code> stores named prepared statements and tracks declared parameter OIDs</li>
-<li><code>Bind</code> stores named portals with text-format bound parameters and requested result formats</li>
-<li><code>Describe</code> returns <code>ParameterDescription</code> plus statement/portal row metadata</li>
-<li><code>Execute</code> substitutes <code>$1</code>/<code>$2</code> placeholders and routes through the shared SQL execution engine; binary result-format requests are encoded for common scalar OIDs</li>
+<li><code>Bind</code> stores named portals with text- and binary-format bound parameters and requested result formats. Per-parameter format codes are honored, so drivers that mix text and binary parameters in one <code>Bind</code> work. Binary parameters are decoded by their declared OID: big-endian <code>int2</code>/<code>int4</code>/<code>int8</code>, IEEE-754 <code>float4</code>/<code>float8</code>, single-byte <code>bool</code>, base-10000 <code>numeric</code> (including <code>NaN</code>/<code>±Infinity</code>), <code>date</code>/<code>time</code>/<code>timestamp</code>/<code>timestamptz</code> against the PostgreSQL 2000-01-01 epoch, 16-byte <code>uuid</code>, raw <code>bytea</code>, and UTF-8 <code>text</code>/<code>varchar</code>/<code>json</code>/<code>jsonb</code> (the <code>jsonb</code> one-byte version header is validated and stripped). Malformed binary payloads are rejected with <code>22P03</code>.</li>
+<li><code>Describe</code> returns <code>ParameterDescription</code> plus statement/portal row metadata; a portal <code>Describe</code> reflects the result-format codes requested in <code>Bind</code>, so binary result columns are advertised correctly</li>
+<li><code>Execute</code> substitutes <code>$1</code>/<code>$2</code> placeholders and routes through the shared SQL execution engine; binary result-format requests are encoded for common scalar OIDs. When the portal was already described, <code>Execute</code> does <strong>not</strong> repeat the <code>RowDescription</code> (matching PostgreSQL, where the row layout is reported once by <code>Describe</code>). This fixes strict drivers such as psycopg3, which abort if a <code>DataRow</code> arrives without exactly one preceding <code>RowDescription</code>.</li>
 <li><code>Close</code>, <code>Sync</code>, and <code>Flush</code> behave as PG lifecycle messages rather than compatibility stubs</li>
 </ul>
 <p>Current limits:</p>
 <ul>
-<li>parameter formats are text-only</li>
+<li>binary bind parameters cover the common scalar OID baseline above; unknown OIDs sent in binary are decoded as UTF-8 text, and other binary types are not yet interpreted</li>
 <li>binary result encoding is limited to the current common scalar OID baseline</li>
 <li><code>Execute</code> with <code>max_rows &gt; 0</code> now suspends and resumes prepared <code>SELECT</code> result sets via <code>PortalSuspended</code>; broader incremental row draining remains limited</li>
 </ul>
@@ -328,13 +335,14 @@ For the common shared SQL subset, responses are encoded as:</p>
 <li>simple-query <code>COPY ... TO/FROM STDOUT/STDIN WITH (FORMAT csv, NULL 'NULL')</code> round-trip covering literal <code>"NULL"</code>, unquoted nulls, and empty strings</li>
 <li>simple-query <code>COPY ... FROM STDIN WITH (FORMAT csv, HEADER MATCH)</code> mismatch rejection before inserts are assembled</li>
 <li>simple-query <code>COPY ... TO STDOUT WITH (FORMAT binary)</code> round-trip with binary <code>CopyOutResponse</code> and decoded row payloads</li>
-<li>simple-query <code>COPY ... FROM STDIN WITH (FORMAT binary)</code> explicit <code>0A000</code> rejection</li>
+<li>simple-query <code>COPY ... FROM STDIN WITH (FORMAT binary)</code> round-trip with binary stream decoding and row verification</li>
 <li>extended-query <code>COPY table (col, ...) TO STDOUT WITH (FORMAT text)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyOutResponse</code></li>
 <li>extended-query <code>COPY (SELECT ...) TO STDOUT WITH (FORMAT text)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyOutResponse</code></li>
 <li>extended-query <code>COPY table FROM STDIN</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyInResponse</code> / <code>CopyDone</code> / <code>Sync</code></li>
 <li>extended-query <code>COPY table (col, ...) FROM STDIN WITH (FORMAT text)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyInResponse</code> / <code>CopyDone</code> / <code>Sync</code></li>
 <li>extended-query <code>COPY ... TO STDOUT WITH (FORMAT csv)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyOutResponse</code></li>
 <li>extended-query <code>COPY ... TO STDOUT WITH (FORMAT binary)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / binary <code>CopyOutResponse</code></li>
+<li>extended-query <code>COPY ... FROM STDIN WITH (FORMAT binary)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / binary <code>CopyInResponse</code> / <code>CopyDone</code> / <code>Sync</code></li>
 <li>extended-query <code>COPY ... FROM STDIN WITH (FORMAT csv)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyInResponse</code> / <code>CopyDone</code> / <code>Sync</code></li>
 <li>extended-query <code>COPY ... FROM STDIN WITH (FORMAT csv, HEADER)</code> round-trip with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyInResponse</code> / <code>CopyDone</code> / <code>Sync</code></li>
 <li>extended-query <code>COPY ... FROM STDIN WITH (FORMAT csv, HEADER MATCH)</code> mismatch rejection with <code>Parse</code> / <code>Bind</code> / <code>Execute</code> / <code>CopyInResponse</code> / <code>Sync</code></li>
@@ -367,7 +375,7 @@ For the common shared SQL subset, responses are encoded as:</p>
 <h2 id="not-implemented-yet">Not implemented yet<a class="headerlink" href="#not-implemented-yet" title="Permanent link">¶</a></h2>
 <ul>
 <li>broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset</li>
-<li>binary <code>COPY ... FROM STDIN</code>, other COPY formats, and most COPY options beyond the current <code>FORMAT text</code> / <code>FORMAT csv</code> / <code>FORMAT binary</code>, parenthesized and legacy bare <code>TEXT</code> / <code>CSV</code> / <code>BINARY</code> aliases, text/csv <code>NULL</code>, CSV <code>HEADER</code>, CSV <code>HEADER MATCH</code>, and single-byte <code>DELIMITER</code> / <code>QUOTE</code> / <code>ESCAPE</code> support</li>
+<li>most COPY options beyond the current <code>FORMAT text</code> / <code>FORMAT csv</code> / <code>FORMAT binary</code>, parenthesized and legacy bare <code>TEXT</code> / <code>CSV</code> / <code>BINARY</code> aliases, text/csv <code>NULL</code>, CSV <code>HEADER</code>, CSV <code>HEADER MATCH</code>, and single-byte <code>DELIMITER</code> / <code>QUOTE</code> / <code>ESCAPE</code> support</li>
 <li>broader type/array/domain encoding beyond the current scalar and array OID baseline</li>
 <li>broader portal suspension beyond prepared <code>SELECT</code> result sets</li>
 <li>production-grade driver compatibility for Django, Rails, SQLAlchemy, <code>pgAdmin</code>, <code>DBeaver</code>, <code>psycopg</code>, and <code>node-postgres</code></li>
