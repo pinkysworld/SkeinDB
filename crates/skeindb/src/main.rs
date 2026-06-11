@@ -14,6 +14,7 @@ mod nl_eval;
 mod pg_wire;
 mod quic;
 mod server;
+mod storage_mode;
 mod tls;
 mod transport_bench;
 

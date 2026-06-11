@@ -32,6 +32,7 @@ use wasmtime::{
     Engine as WasmRuntimeEngine, Instance as WasmInstance, Module as WasmModule, Store as WasmStore,
 };
 
+use crate::storage_mode::TableStorageMode;
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
@@ -186,7 +187,6 @@ const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
 const ENCRYPTION_STATE_FORMAT_VERSION: u32 = 1;
-const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableRowsDisk {
@@ -269,37 +269,6 @@ pub struct TableData {
 struct TableKey {
     db: String,
     table: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TableStorageMode {
-    Json,
-    Segment,
-    Dual,
-}
-
-impl TableStorageMode {
-    fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "segment" => Some(Self::Segment),
-            "dual" | "hybrid" => Some(Self::Dual),
-            "json" => Some(Self::Json),
-            _ => None,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Segment => "segment",
-            Self::Dual => "hybrid",
-        }
-    }
-
-    fn from_env() -> Self {
-        let raw = std::env::var(STORAGE_MODE_ENV).unwrap_or_default();
-        Self::parse(&raw).unwrap_or(Self::Dual)
-    }
 }
 
 // -----------------------------

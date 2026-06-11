@@ -58,7 +58,7 @@ This is the short truth surface. It is intentionally not a changelog. Use it to 
 | Phase | Current status | Short truth |
 |---|---|---|
 | Phase 0 Repo setup | Implemented | Primitive file/record/value-id building blocks have runtime tests. |
-| Phase 1 Storage core | Partial | Prototype persistence exists; full production storage pipeline is not complete. |
+| Phase 1 Storage core | Partial | Prototype persistence exists; full production storage pipeline is not complete. Monolith split progress: TableStorageMode extracted to storage_mode.rs (first step toward maintainable pipeline hardening). |
 | Phase 2 SQL + metadata | Partial | Catalog, DDL/DML subset, and compatibility metadata exist. |
 | Phase 3 MySQL protocol | Implemented baseline | MySQL listener and broad SQL compatibility corpus pass; not full MySQL. |
 | Phase 4 Web console | Partial advanced | SkeinAdmin is embedded with broad live panels; console remains evolving. |
