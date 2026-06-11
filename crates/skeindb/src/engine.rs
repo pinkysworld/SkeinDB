@@ -49516,6 +49516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn storage_mode_helpers_continue_monolith_split_b() {
         assert!(!TableStorageMode::Json.uses_segment());
         assert!(TableStorageMode::Segment.uses_segment());
@@ -49538,6 +49539,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn core_lsm_files_active_validates_manifest_header_with_core_primitive() -> anyhow::Result<()> {
         let dir = temp_dir("core_lsm_header_validate");
         let engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
@@ -49563,6 +49565,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn encryption_secondary_valuestore_routing_exercised_in_engine_crate() {
         // C encryption: directly uses EncryptedValueStore (core primitive for
         // secondary/dedup path) from within skeindb crate. This is the first

@@ -34533,6 +34533,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(dead_code)]
     async fn sql_exec_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("sql_exec_pg_catalog");
         let engine = Engine::open(&dir)?;
