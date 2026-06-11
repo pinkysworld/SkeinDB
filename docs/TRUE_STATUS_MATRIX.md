@@ -1,6 +1,6 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-06-01
+Last updated: 2026-06-11
 
 This is the short truth surface. It is intentionally not a changelog. Use it to answer: what is real today, what is partial, and what should not be claimed yet.
 
@@ -23,7 +23,7 @@ This is the short truth surface. It is intentionally not a changelog. Use it to 
 
 | Area | Truth today | Remaining gap |
 |---|---|---|
-| Storage core | JSON/segment prototype paths, MVCC helpers, row/value segment primitives, snapshots, and ValueStore pieces exist. | Full production MANIFEST/WAL/LSM pipeline remains partial. |
+| Storage core | JSON/segment prototype paths + exercised core primitives (Manifest with typed replay, WAL with committed recovery + torn-tail truncation, RowSeg/RV1 + FilePtr MVCC chains, ValueStore + DELTA + learned indexes, Run/LSM blocks, rowdir, encryption envelopes, Wasm catalog/UDF sandbox) with extensive unit + integration + checkpoint + replay + restart tests exist. | Full production MANIFEST/WAL/LSM pipeline as the primary always-on row persistence path (current engine still relies on hybrid/segment snapshotting) remains partial. |
 | PostgreSQL compatibility | PG listener, startup/auth, many SQL rewrites, catalog probes, COPY text/csv/binary with `NULL` / `HEADER` / `HEADER MATCH` / `DELIMITER` / `QUOTE` / `ESCAPE`, parenthesized and legacy bare `WITH CSV|TEXT|BINARY` format aliases, extended query, SQLSTATE mapping, and corpus coverage exist. | Not full PostgreSQL; broader COPY option coverage beyond the current formats and aliases, wider catalog parity, and driver matrices remain. |
 | CDC/changefeeds | Local table/query subscriptions work with polling, SSE, WebSocket, durable cursors, row images, `objects_json`/`plain_json`, op/pk/range/column filters, pause/resume, backpressure, and resnapshot signaling. | Broader predicates, binary/columnar encodings, external sink connectors, and cluster-wide fanout remain. |
 | Compaction scheduler | Live policy/status controls, safe-mode write backpressure, and a pressure-driven worker exist. | Deeper multi-level/file-count compaction across many live tables remains future storage-engine work. |
@@ -33,6 +33,7 @@ This is the short truth surface. It is intentionally not a changelog. Use it to 
 
 ## Recent Verified Changes
 
+- **2026-06-11:** Full workspace verification (`cargo test --all --all-features`) confirmed broad exercising of storage core primitives: Manifest replay, WAL committed recovery + torn-tail, RowSeg/FilePtr MVCC chains, ValueStore + DELTA + learned indexes, Run/LSM, encryption envelopes, Wasm UDFs, checkpoint/replay/restart paths, and segment/hybrid persistence. Coverage includes core unit tests (manifest, wal, valuestore, rowseg, run, mvcc, encryption, wasm_*), engine integration (checkpoint_for_shutdown_persists_core_files, t183_replay_bundle_*, history_gc_*, encryption persist, advisor, cdc), and cross-crate restart/replay scenarios. Matrix Storage core / Phase 1 truth updated with this evidence.
 - **2026-05-28:** PostgreSQL CSV `COPY` now honors single-byte `ESCAPE` markers on supported CSV forms, allowing custom quote and escape characters to round-trip values containing both characters over `COPY ... TO STDOUT` and `COPY ... FROM STDIN`. Coverage: `server::tests::pg_copy_csv_encode_and_parse_rows_handle_custom_escape_marker`, `server::tests::pg_parse_copy_to_stdout_recognizes_table_and_query_sources`, `server::tests::pg_parse_copy_from_stdin_and_decode_rows`, `cluster_rpc.rs::pg_simple_query_copy_to_stdout_with_csv_escape_roundtrip`, `cluster_rpc.rs::pg_simple_query_copy_from_stdin_with_csv_escape_roundtrip`.
 - **2026-05-28:** PostgreSQL catalog parity now includes `pg_catalog.pg_description` as an empty but correctly typed virtual table, so `SELECT * FROM pg_catalog.pg_description` returns PostgreSQL-shaped row descriptions and zero rows over both `sql.exec` and the live PG listener. Coverage: `server::tests::sql_exec_pg_catalog_virtual_tables_roundtrip`, `cluster_rpc.rs::pg_simple_query_pg_catalog_virtual_tables_roundtrip`.
 - **2026-05-28:** PostgreSQL CSV `COPY` now honors single-byte `QUOTE` markers across export and import on supported CSV forms, including round-tripping quoted delimiters, empty strings, and doubled custom quote characters. Coverage: `server::tests::pg_copy_csv_encode_and_parse_rows_handle_custom_quote_marker`, `server::tests::pg_parse_copy_to_stdout_recognizes_table_and_query_sources`, `server::tests::pg_parse_copy_from_stdin_and_decode_rows`, `cluster_rpc.rs::pg_simple_query_copy_to_stdout_with_csv_quote_roundtrip`, `cluster_rpc.rs::pg_simple_query_copy_from_stdin_with_csv_quote_roundtrip`.
