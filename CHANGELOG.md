@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.20 - 2026-06-11
+
+- Adds **opt-in TLS** on the MySQL and PostgreSQL wire listeners via `serve --tls-cert <pem> --tls-key <pem>`: the PostgreSQL listener answers `SSLRequest` with `S` and completes a rustls handshake before startup, and the MySQL listener advertises `CLIENT_SSL` and upgrades after the short SSLRequest packet. Without a configured certificate both listeners stay plaintext (PG replies `N`; MySQL omits `CLIENT_SSL` and rejects an SSL request). The wire handlers now operate over a `MaybeTlsStream` so the full protocol surface works identically over plaintext and TLS.
+- Adds a **real-driver smoke matrix** (`tests/smoke/`) that boots `skeindb serve` and round-trips DDL/DML/SELECT through `psql`, psycopg3, node-postgres, the `mysql` CLI, mysql2, and PyMySQL, gated as a strict `driver-smoke` CI job. It validates PostgreSQL SCRAM-SHA-256 and MySQL caching_sha2_password fast-auth end-to-end.
+- Fixes a PostgreSQL extended-protocol bug the smoke matrix surfaced: `Execute` emitted a duplicate `RowDescription` after a portal `Describe`, which strict drivers such as psycopg3 reject. `Execute` now suppresses the redundant `RowDescription` (matching PostgreSQL), and portal `Describe` reflects the `Bind` result-format codes.
+- Expands the PostgreSQL wire-compatibility corpus (`tests/compat/pg_corpus.sql`) from 14 to 124 statements covering `::`/`CAST` casts, dollar-quoted literals, `ARRAY[…]`, JSON/JSONB operators, column-side regex, `FETCH FIRST`, aggregates, `GROUP BY`/`HAVING`, joins, subqueries/CTEs/`UNION`, scalar functions, and DML with `RETURNING` and `ON CONFLICT … DO UPDATE`.
+- Adds PostgreSQL extended-protocol binary `Bind` parameter decoding for the common scalar OID baseline and advertises MySQL `caching_sha2_password` with a `mysql_native_password` fallback.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --all-targets --all-features -- -D warnings`, and a green `cargo test -p skeindb` suite including new PG/MySQL TLS round-trip integration tests.
+
 ## v0.3.19 - 2026-06-01
 
 - Ships a stabilization and operator-readiness release on top of v0.3.18, keeping compatibility claims conservative: MySQL remains corpus-backed but not complete, PostgreSQL remains a partial PG v3 baseline, and R18/R19 remain prototype implemented.

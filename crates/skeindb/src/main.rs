@@ -14,6 +14,7 @@ mod nl_eval;
 mod pg_wire;
 mod quic;
 mod server;
+mod tls;
 mod transport_bench;
 
 #[derive(Debug)]
@@ -861,6 +862,15 @@ enum Commands {
         /// QUIC TLS private key (PEM). Required when --quic is set.
         #[arg(long)]
         quic_key: Option<PathBuf>,
+
+        /// TLS certificate chain (PEM) enabling encryption on the MySQL and
+        /// PostgreSQL listeners. Must be paired with --tls-key.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key (PEM) paired with --tls-cert.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
 
     /// Print current format versions
@@ -1071,6 +1081,8 @@ async fn main() -> anyhow::Result<()> {
             quic,
             quic_cert,
             quic_key,
+            tls_cert,
+            tls_key,
         } => {
             server::serve(server::ServeOpts {
                 data_dir: data,
@@ -1083,6 +1095,8 @@ async fn main() -> anyhow::Result<()> {
                 quic_port: quic,
                 quic_cert,
                 quic_key,
+                tls_cert,
+                tls_key,
             })
             .await
         }

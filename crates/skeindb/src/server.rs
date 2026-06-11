@@ -71,9 +71,10 @@ use crate::engine::{
 };
 use crate::pg_wire;
 use crate::quic;
+use crate::tls::MaybeTlsStream;
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     sync::{watch, RwLock},
 };
@@ -160,6 +161,11 @@ pub struct ServeOpts {
     pub quic_port: Option<u16>,
     pub quic_cert: Option<PathBuf>,
     pub quic_key: Option<PathBuf>,
+    /// PEM certificate-chain file enabling TLS on the PostgreSQL and MySQL
+    /// listeners. Requires `tls_key`; `None` leaves both listeners plaintext.
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private-key file paired with `tls_cert`.
+    pub tls_key: Option<PathBuf>,
 }
 
 fn print_startup_banner(opts: &ServeOpts) {
@@ -236,6 +242,10 @@ pub(crate) struct AppState {
     shutdown_tx: watch::Sender<bool>,
     etag_notify: Arc<tokio::sync::broadcast::Sender<String>>,
     alert_delivery: Arc<Mutex<StatsAlertDeliveryState>>,
+    /// TLS acceptor shared by the PostgreSQL and MySQL listeners. `None` keeps
+    /// both listeners plaintext (PG answers `SSLRequest` with `N`, MySQL does
+    /// not advertise `CLIENT_SSL`).
+    sql_tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 #[derive(Debug, Clone)]
@@ -636,6 +646,10 @@ impl QueryCoalescer {
 
 #[derive(Debug)]
 struct MySqlHandshakeResponse {
+    /// Negotiated client capability flags. Retained for protocol completeness;
+    /// TLS negotiation is detected from the raw SSLRequest preamble before the
+    /// full response is parsed.
+    #[allow(dead_code)]
     capabilities: u32,
     username: String,
     auth_response: Vec<u8>,
@@ -10888,7 +10902,12 @@ async fn mysql_execute_sql(
         .map_err(|msg| (1105, "HY000", msg))
 }
 
-fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
+fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20], tls_available: bool) -> Vec<u8> {
+    let capabilities = if tls_available {
+        MYSQL_SERVER_CAPABILITIES | MYSQL_CAP_SSL
+    } else {
+        MYSQL_SERVER_CAPABILITIES
+    };
     let mut payload = Vec::with_capacity(96);
     payload.push(MYSQL_PROTOCOL_VERSION);
     payload.extend_from_slice(MYSQL_SERVER_VERSION.as_bytes());
@@ -10896,10 +10915,10 @@ fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
     payload.extend_from_slice(&connection_id.to_le_bytes());
     payload.extend_from_slice(&seed[..8]);
     payload.push(0);
-    payload.extend_from_slice(&(MYSQL_SERVER_CAPABILITIES as u16).to_le_bytes());
+    payload.extend_from_slice(&(capabilities as u16).to_le_bytes());
     payload.push(0x21);
     payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
-    payload.extend_from_slice(&((MYSQL_SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
+    payload.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
     payload.push((seed.len() + 1) as u8);
     payload.extend_from_slice(&[0u8; 10]);
     let mut part2 = seed[8..].to_vec();
@@ -10953,7 +10972,11 @@ fn mysql_auth_switch_request_packet(plugin: &str, seed: &[u8; 20]) -> Vec<u8> {
     payload
 }
 
-async fn mysql_write_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
+async fn mysql_write_packet<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    seq: u8,
+    payload: &[u8],
+) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow::anyhow!("mysql payload too large"));
     }
@@ -10970,7 +10993,9 @@ async fn mysql_write_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> 
     Ok(())
 }
 
-async fn mysql_read_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+async fn mysql_read_packet<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await?;
     let len = (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
@@ -10980,8 +11005,8 @@ async fn mysql_read_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8
     Ok((seq, payload))
 }
 
-async fn mysql_send_text_result(
-    stream: &mut TcpStream,
+async fn mysql_send_text_result<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     start_seq: u8,
     columns: &[String],
     rows: &[Vec<Option<String>>],
@@ -11020,8 +11045,8 @@ fn mysql_prepare_ok_packet(statement_id: u32, column_count: u16, param_count: u1
     payload
 }
 
-async fn mysql_send_prepare_ok(
-    stream: &mut TcpStream,
+async fn mysql_send_prepare_ok<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     start_seq: u8,
     statement_id: u32,
     param_count: u16,
@@ -11068,8 +11093,8 @@ async fn mysql_send_prepare_ok(
     Ok(())
 }
 
-async fn mysql_send_binary_result(
-    stream: &mut TcpStream,
+async fn mysql_send_binary_result<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     start_seq: u8,
     columns: &[String],
     rows: &[Vec<Option<String>>],
@@ -11120,8 +11145,8 @@ fn mysql_binary_result_column_types(
     column_types
 }
 
-async fn mysql_send_binary_result_header(
-    stream: &mut TcpStream,
+async fn mysql_send_binary_result_header<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     start_seq: u8,
     columns: &[String],
     rows: &[Vec<Option<String>>],
@@ -11163,8 +11188,8 @@ async fn mysql_send_binary_result_header(
     Ok(seq.wrapping_add(1))
 }
 
-async fn mysql_send_binary_result_rows_only(
-    stream: &mut TcpStream,
+async fn mysql_send_binary_result_rows_only<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     start_seq: u8,
     rows: &[Vec<Option<String>>],
     column_types: &[MySqlStmtColumnType],
@@ -11183,14 +11208,46 @@ async fn mysql_send_binary_result_rows_only(
 
 async fn handle_mysql_connection(
     state: AppState,
-    mut stream: TcpStream,
+    stream: TcpStream,
     connection_id: u32,
 ) -> anyhow::Result<()> {
+    let mut stream = MaybeTlsStream::new(stream);
     let seed = mysql_seed(connection_id);
-    let handshake = mysql_handshake_packet(connection_id, &seed);
+    let tls_available = state.sql_tls.is_some();
+    let handshake = mysql_handshake_packet(connection_id, &seed, tls_available);
     mysql_write_packet(&mut stream, 0, &handshake).await?;
 
-    let (seq, response_payload) = mysql_read_packet(&mut stream).await?;
+    let (mut seq, mut response_payload) = mysql_read_packet(&mut stream).await?;
+
+    // When the client sets CLIENT_SSL the first packet is a short SSLRequest
+    // (capabilities + max-packet + charset + filler, no username). Upgrade the
+    // socket to TLS, then read the real HandshakeResponse41 over the encrypted
+    // channel (the sequence id continues across the upgrade).
+    let client_requested_ssl = response_payload.len() >= 4
+        && u32::from_le_bytes([
+            response_payload[0],
+            response_payload[1],
+            response_payload[2],
+            response_payload[3],
+        ]) & MYSQL_CAP_SSL
+            != 0;
+    if client_requested_ssl {
+        match &state.sql_tls {
+            Some(acceptor) => {
+                stream.upgrade_to_tls(acceptor).await?;
+                let (next_seq, next_payload) = mysql_read_packet(&mut stream).await?;
+                seq = next_seq;
+                response_payload = next_payload;
+            }
+            None => {
+                let packet =
+                    mysql_err_packet(1047, "08S01", "TLS is not supported on this listener");
+                mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+                return Ok(());
+            }
+        }
+    }
+
     let response = match parse_mysql_handshake_response(&response_payload) {
         Ok(parsed) => parsed,
         Err(reason) => {
@@ -11199,12 +11256,6 @@ async fn handle_mysql_connection(
             return Ok(());
         }
     };
-
-    if response.capabilities & MYSQL_CAP_SSL != 0 {
-        let packet = mysql_err_packet(1047, "08S01", "TLS is not supported on this listener");
-        mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
-        return Ok(());
-    }
 
     // Determine which auth plugin the client used. Clients without PLUGIN_AUTH
     // default to the legacy native plugin.
@@ -11864,8 +11915,8 @@ fn pg_parse_current_schemas_include_implicit(sql_lower: &str) -> Option<bool> {
     }
 }
 
-async fn pg_write_single_text_result(
-    stream: &mut TcpStream,
+async fn pg_write_single_text_result<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     column_name: &str,
     value: &str,
     command_tag: &str,
@@ -11873,8 +11924,8 @@ async fn pg_write_single_text_result(
     pg_write_single_optional_text_result(stream, column_name, Some(value), command_tag).await
 }
 
-async fn pg_write_single_optional_text_result(
-    stream: &mut TcpStream,
+async fn pg_write_single_optional_text_result<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     column_name: &str,
     value: Option<&str>,
     command_tag: &str,
@@ -11890,8 +11941,8 @@ async fn pg_write_single_optional_text_result(
     .await
 }
 
-async fn pg_write_single_optional_typed_result(
-    stream: &mut TcpStream,
+async fn pg_write_single_optional_typed_result<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     column_name: &str,
     type_oid: i32,
     type_size: i16,
@@ -11905,8 +11956,8 @@ async fn pg_write_single_optional_typed_result(
     Ok(())
 }
 
-async fn pg_try_handle_bootstrap_query(
-    stream: &mut TcpStream,
+async fn pg_try_handle_bootstrap_query<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     sql: &str,
     default_db: Option<&str>,
     session: Option<&MySqlSessionState>,
@@ -12572,8 +12623,8 @@ fn pg_encode_data_row_values(
         .collect()
 }
 
-async fn pg_write_data_rows(
-    stream: &mut TcpStream,
+async fn pg_write_data_rows<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     pg_columns: &[pg_wire::PgColumn],
     rows: &[Vec<Option<String>>],
 ) -> anyhow::Result<()> {
@@ -12592,8 +12643,8 @@ fn pg_sql_supports_portal_suspension(sql: &str) -> bool {
     sql.trim_start().to_ascii_lowercase().starts_with("select")
 }
 
-async fn pg_drain_portal_rows(
-    stream: &mut TcpStream,
+async fn pg_drain_portal_rows<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     session: &MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     portal: &mut PgPortal,
@@ -12644,9 +12695,9 @@ async fn pg_drain_portal_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn pg_execute_portal(
+async fn pg_execute_portal<S: AsyncRead + AsyncWrite + Unpin>(
     state: &AppState,
-    stream: &mut TcpStream,
+    stream: &mut S,
     session: &mut MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     savepoints: &mut Vec<PgSavepoint>,
@@ -13730,9 +13781,9 @@ fn pg_copy_parse_binary_rows(
     Ok(rows)
 }
 
-async fn pg_start_copy_from_stdin(
+async fn pg_start_copy_from_stdin<S: AsyncRead + AsyncWrite + Unpin>(
     state: &AppState,
-    stream: &mut TcpStream,
+    stream: &mut S,
     session: &MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     target: &PgCopyTableTarget,
@@ -13848,9 +13899,9 @@ async fn pg_start_copy_from_stdin(
     }))
 }
 
-async fn pg_finish_copy_from_stdin(
+async fn pg_finish_copy_from_stdin<S: AsyncRead + AsyncWrite + Unpin>(
     state: &AppState,
-    stream: &mut TcpStream,
+    stream: &mut S,
     session: &mut MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     copy_in: PgCopyInState,
@@ -13992,9 +14043,9 @@ async fn pg_finish_copy_from_stdin(
     }
 }
 
-async fn pg_write_copy_to_stdout(
+async fn pg_write_copy_to_stdout<S: AsyncRead + AsyncWrite + Unpin>(
     state: &AppState,
-    stream: &mut TcpStream,
+    stream: &mut S,
     session: &mut MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     source: PgCopyToStdoutSource,
@@ -14250,8 +14301,8 @@ async fn pg_result_columns_to_pg(
     pg_infer_result_columns_to_pg(sql, columns, rows)
 }
 
-async fn pg_write_prepare_row_description(
-    stream: &mut TcpStream,
+async fn pg_write_prepare_row_description<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     columns: &[MySqlStmtPrepareColumn],
 ) -> anyhow::Result<()> {
     if columns.is_empty() {
@@ -15401,9 +15452,9 @@ fn pg_rewrite_is_distinct_from(sql: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn pg_dispatch_sql(
+async fn pg_dispatch_sql<S: AsyncRead + AsyncWrite + Unpin>(
     state: &AppState,
-    stream: &mut TcpStream,
+    stream: &mut S,
     session: &mut MySqlSessionState,
     tx_status: &mut pg_wire::TxStatus,
     savepoints: &mut Vec<PgSavepoint>,
@@ -15822,20 +15873,30 @@ async fn pg_dispatch_sql(
 
 async fn handle_pg_connection(
     state: AppState,
-    mut stream: TcpStream,
+    stream: TcpStream,
     connection_id: u32,
 ) -> anyhow::Result<()> {
     use crate::pg_wire::{self, frontend, TxStatus};
 
-    // SSL negotiation loop: reject SSL and wait for real startup.
+    let mut stream = MaybeTlsStream::new(stream);
+
+    // SSL negotiation loop: upgrade to TLS when a cert is configured, otherwise
+    // reject the SSLRequest with 'N' and continue in plaintext (libpq retries).
     let startup = loop {
         match pg_wire::read_startup_message(&mut stream).await? {
             Some(msg) => break msg,
-            None => {
-                // SSLRequest — reject with 'N'.
-                stream.write_u8(b'N').await?;
-                stream.flush().await?;
-            }
+            None => match &state.sql_tls {
+                Some(acceptor) if !stream.is_tls() => {
+                    stream.write_u8(b'S').await?;
+                    stream.flush().await?;
+                    stream.upgrade_to_tls(acceptor).await?;
+                }
+                _ => {
+                    // TLS not configured (or already negotiated): reject with 'N'.
+                    stream.write_u8(b'N').await?;
+                    stream.flush().await?;
+                }
+            },
         }
     };
 
@@ -16644,6 +16705,23 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (etag_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
+    // Build the shared TLS acceptor for the SQL listeners when a cert/key pair
+    // is configured. Both files must be supplied together.
+    let sql_tls = match (&opts.tls_cert, &opts.tls_key) {
+        (Some(cert), Some(key)) => {
+            let acceptor = crate::tls::load_tls_acceptor(cert, key)?;
+            tracing::info!(
+                cert = %cert.display(),
+                "TLS enabled for the PostgreSQL and MySQL listeners"
+            );
+            Some(acceptor)
+        }
+        (None, None) => None,
+        _ => {
+            anyhow::bail!("--tls-cert and --tls-key must be provided together");
+        }
+    };
+
     let subs = engine.load_cdc_subscriptions_best_effort();
     let state = AppState {
         started: Instant::now(),
@@ -16664,6 +16742,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         shutdown_tx,
         etag_notify: Arc::new(etag_tx),
         alert_delivery: Arc::new(Mutex::new(StatsAlertDeliveryState::default())),
+        sql_tls,
     };
 
     // Load persisted settings if present.
@@ -33822,6 +33901,7 @@ mod tests {
             shutdown_tx,
             etag_notify: Arc::new(etag_tx),
             alert_delivery: Arc::new(Mutex::new(StatsAlertDeliveryState::default())),
+            sql_tls: None,
         }
     }
 
@@ -39671,12 +39751,33 @@ mod tests {
     #[test]
     fn mysql_handshake_packet_advertises_caching_sha2_auth() {
         let seed = [42u8; 20];
-        let packet = mysql_handshake_packet(7, &seed);
+        let packet = mysql_handshake_packet(7, &seed, false);
         assert_eq!(packet.first().copied(), Some(MYSQL_PROTOCOL_VERSION));
         assert_eq!(MYSQL_AUTH_PLUGIN, "caching_sha2_password");
         assert!(packet
             .windows(MYSQL_AUTH_PLUGIN.len())
             .any(|w| w == MYSQL_AUTH_PLUGIN.as_bytes()));
+        // Without a configured cert the listener must not advertise CLIENT_SSL.
+        assert_eq!(mysql_handshake_capabilities(&packet) & MYSQL_CAP_SSL, 0);
+    }
+
+    #[test]
+    fn mysql_handshake_packet_advertises_ssl_when_tls_available() {
+        let seed = [42u8; 20];
+        let packet = mysql_handshake_packet(7, &seed, true);
+        assert_ne!(mysql_handshake_capabilities(&packet) & MYSQL_CAP_SSL, 0);
+    }
+
+    /// Decode the 32-bit capability flags from a server handshake packet,
+    /// accounting for the variable-length server version string.
+    fn mysql_handshake_capabilities(packet: &[u8]) -> u32 {
+        // [proto(1)][version + NUL][conn_id(4)][seed8(8)][filler(1)]
+        // [cap_lo(2)][charset(1)][status(2)][cap_hi(2)]...
+        let conn_id = 2 + MYSQL_SERVER_VERSION.len();
+        let cap_lo = conn_id + 13;
+        let cap_hi = conn_id + 18;
+        u16::from_le_bytes([packet[cap_lo], packet[cap_lo + 1]]) as u32
+            | ((u16::from_le_bytes([packet[cap_hi], packet[cap_hi + 1]]) as u32) << 16)
     }
 
     #[test]

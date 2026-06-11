@@ -21,7 +21,7 @@ use skeindb_skeinql::types::{
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 
@@ -9085,6 +9085,44 @@ impl HttpHarness {
         Self::start_with_ports_and_env(label, 0, pg_port, envs)
     }
 
+    fn start_with_pg_tls(label: &str) -> anyhow::Result<Self> {
+        let pg_port = free_tcp_port();
+        Self::start_with_ports_tls(label, 0, pg_port)
+    }
+
+    fn start_with_mysql_tls(label: &str) -> anyhow::Result<Self> {
+        let mysql_port = free_tcp_port();
+        Self::start_with_ports_tls(label, mysql_port, 0)
+    }
+
+    /// Start a server with TLS enabled on the SQL listeners using a freshly
+    /// generated self-signed certificate written into the data directory.
+    fn start_with_ports_tls(label: &str, mysql_port: u16, pg_port: u16) -> anyhow::Result<Self> {
+        let dir = temp_dir(label);
+        let http_port = free_tcp_port();
+        let cluster_port = free_tcp_port();
+        let (cert_path, key_path) = write_test_tls_cert(&dir)?;
+        let log_path = dir.join("server.log");
+        let child = spawn_server_with_tls(
+            &dir,
+            &log_path,
+            http_port,
+            cluster_port,
+            mysql_port,
+            pg_port,
+            &cert_path,
+            &key_path,
+        )?;
+        let mut _guard = ChildGuard::new(child, log_path);
+        wait_for_health(http_port, &mut _guard)?;
+        Ok(Self {
+            _guard,
+            http_port,
+            mysql_port,
+            pg_port,
+        })
+    }
+
     #[allow(dead_code)]
     fn start_with_mysql_port(label: &str, mysql_port: u16) -> anyhow::Result<Self> {
         Self::start_with_ports_and_env(label, mysql_port, 0, &[])
@@ -9314,7 +9352,9 @@ fn wait_for_tcp(port: u16) -> anyhow::Result<()> {
     Err(anyhow!("tcp listener did not open on {}", port))
 }
 
-async fn read_mysql_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+async fn read_mysql_packet<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await?;
     let len = (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
@@ -9343,7 +9383,10 @@ async fn mysql_connect_and_auth(port: u16) -> anyhow::Result<TcpStream> {
     Ok(stream)
 }
 
-async fn send_com_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<()> {
+async fn send_com_query<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    sql: &str,
+) -> anyhow::Result<()> {
     let mut payload = Vec::with_capacity(sql.len() + 1);
     payload.push(0x03);
     payload.extend_from_slice(sql.as_bytes());
@@ -9414,8 +9457,8 @@ enum MysqlResponse {
     Rows(Vec<Vec<Option<String>>>),
 }
 
-async fn read_mysql_text_result_rows_after_first_packet(
-    stream: &mut TcpStream,
+async fn read_mysql_text_result_rows_after_first_packet<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     column_count_payload: Vec<u8>,
 ) -> anyhow::Result<Vec<Vec<Option<String>>>> {
     let mut cur = 0usize;
@@ -9437,7 +9480,9 @@ async fn read_mysql_text_result_rows_after_first_packet(
     Ok(rows)
 }
 
-async fn read_mysql_response(stream: &mut TcpStream) -> anyhow::Result<MysqlResponse> {
+async fn read_mysql_response<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<MysqlResponse> {
     let (_seq, first_payload) = read_mysql_packet(stream).await?;
     if let Some(err) = decode_mysql_err_packet(&first_payload) {
         return Err(anyhow!("mysql error packet: {}", err));
@@ -10006,7 +10051,11 @@ fn pg_dollar_quote_tag_len(s: &[char]) -> Option<usize> {
     }
 }
 
-async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
+async fn write_mysql_packet<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    seq: u8,
+    payload: &[u8],
+) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow!("payload too large"));
     }
@@ -10345,6 +10394,59 @@ fn spawn_server_with_pg_env(
     command.spawn().context("spawn skeindb server")
 }
 
+/// Spawn a server with TLS enabled on the MySQL and PostgreSQL listeners.
+#[allow(clippy::too_many_arguments)]
+fn spawn_server_with_tls(
+    dir: &PathBuf,
+    log_path: &PathBuf,
+    http_port: u16,
+    cluster_port: u16,
+    mysql_port: u16,
+    pg_port: u16,
+    tls_cert: &Path,
+    tls_key: &Path,
+) -> anyhow::Result<Child> {
+    let bin = local_server_bin()?;
+    let stdout = File::create(log_path).context("create server log file")?;
+    let stderr = stdout
+        .try_clone()
+        .context("clone server log handle for stderr")?;
+    let mut command = Command::new(&bin);
+    command
+        .arg("serve")
+        .arg("--data")
+        .arg(dir)
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--http")
+        .arg(http_port.to_string())
+        .arg("--mysql")
+        .arg(mysql_port.to_string())
+        .arg("--pg")
+        .arg(pg_port.to_string())
+        .arg("--cluster-port")
+        .arg(cluster_port.to_string())
+        .arg("--tls-cert")
+        .arg(tls_cert)
+        .arg("--tls-key")
+        .arg(tls_key)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    command.spawn().context("spawn skeindb server with TLS")
+}
+
+/// Generate a self-signed certificate/key pair for `localhost` and write them
+/// as PEM files into `dir`, returning their paths.
+fn write_test_tls_cert(dir: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .context("generate test TLS cert")?;
+    let cert_path = dir.join("tls_cert.pem");
+    let key_path = dir.join("tls_key.pem");
+    std::fs::write(&cert_path, cert.cert.pem()).context("write test cert pem")?;
+    std::fs::write(&key_path, cert.signing_key.serialize_pem()).context("write test key pem")?;
+    Ok((cert_path, key_path))
+}
+
 fn local_server_bin() -> anyhow::Result<PathBuf> {
     if let Some(path) = CLUSTER_TEST_SERVER_BIN.get() {
         return Ok(path.clone());
@@ -10455,7 +10557,9 @@ fn build_pg_startup(user: &str, database: &str) -> Vec<u8> {
 }
 
 /// Read a PG backend message: tag(1) + length(4) + payload.
-async fn read_pg_message(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+async fn read_pg_message<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<(u8, Vec<u8>)> {
     let tag = stream.read_u8().await?;
     let len = stream.read_i32().await? as usize;
     let payload_len = len.saturating_sub(4);
@@ -10507,7 +10611,10 @@ async fn pg_connect_and_startup(port: u16) -> anyhow::Result<TcpStream> {
 
 /// Send a simple Query message and return the (tag, payload) pairs until
 /// ReadyForQuery.
-async fn pg_simple_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<Vec<(u8, Vec<u8>)>> {
+async fn pg_simple_query<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    sql: &str,
+) -> anyhow::Result<Vec<(u8, Vec<u8>)>> {
     // Build Query message: 'Q' + len + sql\0
     let mut payload = Vec::new();
     payload.extend_from_slice(sql.as_bytes());
@@ -14834,6 +14941,217 @@ async fn pg_ssl_negotiation_is_rejected() -> anyhow::Result<()> {
             break;
         }
     }
+
+    Ok(())
+}
+
+/// A rustls certificate verifier that accepts any server certificate. Used only
+/// by the in-repo TLS integration tests against self-signed certificates.
+#[derive(Debug)]
+struct AcceptAnyServerCert(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Wrap an established TCP connection in a TLS client session (trusting any
+/// server certificate — test only).
+async fn tls_connect_client(
+    tcp: TcpStream,
+) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .context("build client TLS config")?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)))
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let domain = rustls::pki_types::ServerName::try_from("localhost")?;
+    connector
+        .connect(domain, tcp)
+        .await
+        .context("client TLS handshake")
+}
+
+/// Build a MySQL short SSLRequest packet (HandshakeResponse41 prefix with the
+/// `CLIENT_SSL` flag set and no username/auth data).
+fn mysql_ssl_request_packet() -> Vec<u8> {
+    const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+    const CLIENT_SSL: u32 = 0x0000_0800;
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+    let flags = CLIENT_LONG_PASSWORD
+        | CLIENT_SSL
+        | CLIENT_PROTOCOL_41
+        | CLIENT_SECURE_CONNECTION
+        | CLIENT_PLUGIN_AUTH;
+    let mut payload = Vec::with_capacity(32);
+    payload.extend_from_slice(&flags.to_le_bytes()); // capability flags (4)
+    payload.extend_from_slice(&0u32.to_le_bytes()); // max packet size (4)
+    payload.push(0x21); // charset (1)
+    payload.extend_from_slice(&[0u8; 23]); // filler (23)
+    payload
+}
+
+#[tokio::test]
+async fn pg_tls_handshake_and_query_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg_tls("pg_tls_roundtrip")?;
+    wait_for_tcp(server.pg_port())?;
+    let mut tcp = TcpStream::connect(("127.0.0.1", server.pg_port())).await?;
+
+    // SSLRequest: length=8, code=80877103. With TLS configured the server
+    // accepts with 'S' instead of rejecting with 'N'.
+    tcp.write_i32(8).await?;
+    tcp.write_i32(80877103).await?;
+    tcp.flush().await?;
+    let response = tcp.read_u8().await?;
+    assert_eq!(
+        response, b'S',
+        "server must accept SSLRequest when TLS is configured"
+    );
+
+    // Complete the TLS handshake, then run the PG startup + a query over it.
+    let mut stream = tls_connect_client(tcp).await?;
+    let startup = build_pg_startup("skein", "testdb");
+    stream.write_all(&startup).await?;
+    stream.flush().await?;
+    loop {
+        let (tag, payload) = read_pg_message(&mut stream).await?;
+        if tag == b'Z' {
+            assert_eq!(payload[0], b'I', "expected idle transaction status");
+            break;
+        }
+    }
+
+    let msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    assert_eq!(pg_first_text_cell(&msgs)?, "1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_tls_handshake_and_query_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql_tls("mysql_tls_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut tcp = TcpStream::connect(("127.0.0.1", server.mysql_port())).await?;
+
+    // Server handshake (seq 0): must advertise CLIENT_SSL (0x0800).
+    let (seq, handshake) = read_mysql_packet(&mut tcp).await?;
+    assert_eq!(seq, 0);
+    let version_end = handshake
+        .iter()
+        .position(|&b| b == 0)
+        .context("handshake missing server-version terminator")?;
+    // [version\0][conn_id(4)][seed8(8)][filler(1)][cap_lo(2)]...
+    let cap_lo = version_end + 1 + 4 + 8 + 1;
+    let capabilities_low = u16::from_le_bytes([handshake[cap_lo], handshake[cap_lo + 1]]);
+    assert_ne!(
+        capabilities_low & 0x0800,
+        0,
+        "server should advertise CLIENT_SSL when TLS is configured"
+    );
+
+    // SSLRequest (seq 1), then upgrade and send the real HandshakeResponse41
+    // (seq 2) over the encrypted channel.
+    write_mysql_packet(&mut tcp, 1, &mysql_ssl_request_packet()).await?;
+    let mut stream = tls_connect_client(tcp).await?;
+    write_mysql_packet(&mut stream, 2, &mysql_handshake_response_packet()).await?;
+    let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(
+        ok.first().copied(),
+        Some(0x00),
+        "expected OK packet after TLS auth"
+    );
+
+    send_com_query(&mut stream, "SELECT 1").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+        }
+        other => panic!("expected result set over TLS, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_ssl_request_without_tls_is_rejected() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_ssl_reject")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut tcp = TcpStream::connect(("127.0.0.1", server.mysql_port())).await?;
+
+    let (seq, handshake) = read_mysql_packet(&mut tcp).await?;
+    assert_eq!(seq, 0);
+    // A plaintext listener must not advertise CLIENT_SSL.
+    let version_end = handshake
+        .iter()
+        .position(|&b| b == 0)
+        .context("handshake missing server-version terminator")?;
+    let cap_lo = version_end + 1 + 4 + 8 + 1;
+    let capabilities_low = u16::from_le_bytes([handshake[cap_lo], handshake[cap_lo + 1]]);
+    assert_eq!(
+        capabilities_low & 0x0800,
+        0,
+        "plaintext listener must not advertise CLIENT_SSL"
+    );
+
+    // A client that requests SSL anyway receives an ERR packet rather than a
+    // half-open TLS handshake.
+    write_mysql_packet(&mut tcp, 1, &mysql_ssl_request_packet()).await?;
+    let (_seq, payload) = read_mysql_packet(&mut tcp).await?;
+    assert_eq!(
+        payload.first().copied(),
+        Some(0xff),
+        "expected ERR packet when SSL requested without TLS configured"
+    );
 
     Ok(())
 }

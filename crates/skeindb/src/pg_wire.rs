@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(test)]
 use tokio::net::TcpStream;
 
 // ---------------------------------------------------------------------------
@@ -449,8 +450,8 @@ impl StartupMessage {
 ///
 /// Returns `Ok(None)` when the client sends an SSLRequest (the caller should
 /// respond with `b'N'` and then call this again for the real startup message).
-pub async fn read_startup_message(
-    stream: &mut TcpStream,
+pub async fn read_startup_message<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
 ) -> anyhow::Result<Option<StartupMessage>> {
     // First 4 bytes: message length (includes self).
     let len = stream.read_i32().await? as usize;
@@ -504,7 +505,9 @@ pub struct FrontendMessage {
 }
 
 /// Read a single frontend message (tag + length-prefixed body).
-pub async fn read_message(stream: &mut TcpStream) -> anyhow::Result<FrontendMessage> {
+pub async fn read_message<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<FrontendMessage> {
     let tag = stream.read_u8().await?;
     let len = stream.read_i32().await? as usize;
     if len < 4 {
@@ -533,7 +536,11 @@ pub fn parse_query(payload: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Write a tagged backend message.
-pub async fn write_message(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> anyhow::Result<()> {
+pub async fn write_message<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    tag: u8,
+    payload: &[u8],
+) -> anyhow::Result<()> {
     let len = (payload.len() + 4) as i32;
     stream.write_u8(tag).await?;
     stream.write_i32(len).await?;
@@ -545,7 +552,9 @@ pub async fn write_message(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> a
 }
 
 /// Build and write an AuthenticationOk message.
-pub async fn write_auth_ok(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_auth_ok<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4);
     buf.extend_from_slice(&auth::OK.to_be_bytes());
     write_message(stream, backend::AUTHENTICATION, &buf).await
@@ -553,13 +562,18 @@ pub async fn write_auth_ok(stream: &mut TcpStream) -> anyhow::Result<()> {
 
 /// Build and write an AuthenticationCleartextPassword request.
 #[allow(dead_code)]
-pub async fn write_auth_cleartext_password(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_auth_cleartext_password<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     let buf = auth::CLEARTEXT_PASSWORD.to_be_bytes();
     write_message(stream, backend::AUTHENTICATION, &buf).await
 }
 
 /// Build and write an AuthenticationSASL message listing available mechanisms.
-pub async fn write_auth_sasl(stream: &mut TcpStream, mechanisms: &[&str]) -> anyhow::Result<()> {
+pub async fn write_auth_sasl<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    mechanisms: &[&str],
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(64);
     buf.extend_from_slice(&auth::SASL.to_be_bytes());
     for mech in mechanisms {
@@ -571,7 +585,10 @@ pub async fn write_auth_sasl(stream: &mut TcpStream, mechanisms: &[&str]) -> any
 }
 
 /// Build and write an AuthenticationSASLContinue message.
-pub async fn write_auth_sasl_continue(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
+pub async fn write_auth_sasl_continue<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    data: &str,
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4 + data.len());
     buf.extend_from_slice(&auth::SASL_CONTINUE.to_be_bytes());
     buf.extend_from_slice(data.as_bytes());
@@ -579,7 +596,10 @@ pub async fn write_auth_sasl_continue(stream: &mut TcpStream, data: &str) -> any
 }
 
 /// Build and write an AuthenticationSASLFinal message.
-pub async fn write_auth_sasl_final(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
+pub async fn write_auth_sasl_final<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    data: &str,
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4 + data.len());
     buf.extend_from_slice(&auth::SASL_FINAL.to_be_bytes());
     buf.extend_from_slice(data.as_bytes());
@@ -618,8 +638,8 @@ pub fn parse_sasl_response(payload: &[u8]) -> String {
 }
 
 /// Build and write a ParameterStatus message.
-pub async fn write_parameter_status(
-    stream: &mut TcpStream,
+pub async fn write_parameter_status<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     name: &str,
     value: &str,
 ) -> anyhow::Result<()> {
@@ -632,8 +652,8 @@ pub async fn write_parameter_status(
 }
 
 /// Build and write a BackendKeyData message (process ID + secret key for cancellation).
-pub async fn write_backend_key_data(
-    stream: &mut TcpStream,
+pub async fn write_backend_key_data<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     pid: i32,
     secret: i32,
 ) -> anyhow::Result<()> {
@@ -644,7 +664,10 @@ pub async fn write_backend_key_data(
 }
 
 /// Build and write a ReadyForQuery message.
-pub async fn write_ready_for_query(stream: &mut TcpStream, status: TxStatus) -> anyhow::Result<()> {
+pub async fn write_ready_for_query<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: TxStatus,
+) -> anyhow::Result<()> {
     write_message(stream, backend::READY_FOR_QUERY, &[status.as_byte()]).await
 }
 
@@ -682,8 +705,8 @@ impl PgColumn {
 }
 
 /// Build and write a RowDescription message.
-pub async fn write_row_description(
-    stream: &mut TcpStream,
+pub async fn write_row_description<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     columns: &[PgColumn],
 ) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(64);
@@ -703,8 +726,8 @@ pub async fn write_row_description(
 
 /// Build and write a DataRow message. Each value is `None` for SQL NULL or
 /// `Some(bytes)` for a text-encoded value.
-pub async fn write_data_row(
-    stream: &mut TcpStream,
+pub async fn write_data_row<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     values: &[Option<&[u8]>],
 ) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(64);
@@ -724,8 +747,8 @@ pub async fn write_data_row(
 }
 
 /// Build and write a CopyOutResponse message.
-pub async fn write_copy_out_response(
-    stream: &mut TcpStream,
+pub async fn write_copy_out_response<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     overall_format: u8,
     column_formats: &[i16],
 ) -> anyhow::Result<()> {
@@ -739,8 +762,8 @@ pub async fn write_copy_out_response(
 }
 
 /// Build and write a CopyInResponse message.
-pub async fn write_copy_in_response(
-    stream: &mut TcpStream,
+pub async fn write_copy_in_response<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     overall_format: u8,
     column_formats: &[i16],
 ) -> anyhow::Result<()> {
@@ -754,22 +777,32 @@ pub async fn write_copy_in_response(
 }
 
 /// Build and write a CopyData message.
-pub async fn write_copy_data(stream: &mut TcpStream, data: &[u8]) -> anyhow::Result<()> {
+pub async fn write_copy_data<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    data: &[u8],
+) -> anyhow::Result<()> {
     write_message(stream, backend::COPY_DATA, data).await
 }
 
 /// Build and write a CopyDone message.
-pub async fn write_copy_done(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_copy_done<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::COPY_DONE, &[]).await
 }
 
 /// Build and write a PortalSuspended message.
-pub async fn write_portal_suspended(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_portal_suspended<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::PORTAL_SUSPENDED, &[]).await
 }
 
 /// Build and write a CommandComplete message.
-pub async fn write_command_complete(stream: &mut TcpStream, tag: &str) -> anyhow::Result<()> {
+pub async fn write_command_complete<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    tag: &str,
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(tag.len() + 1);
     buf.extend_from_slice(tag.as_bytes());
     buf.push(0);
@@ -780,8 +813,8 @@ pub async fn write_command_complete(stream: &mut TcpStream, tag: &str) -> anyhow
 ///
 /// Fields: S = severity, V = severity (non-localized), C = SQLSTATE code,
 /// M = message.
-pub async fn write_error_response(
-    stream: &mut TcpStream,
+pub async fn write_error_response<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     severity: &str,
     code: &str,
     message: &str,
@@ -809,34 +842,44 @@ pub async fn write_error_response(
 }
 
 /// Build and write an EmptyQueryResponse message.
-pub async fn write_empty_query_response(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_empty_query_response<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::EMPTY_QUERY_RESPONSE, &[]).await
 }
 
 /// Build and write ParseComplete.
-pub async fn write_parse_complete(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_parse_complete<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::PARSE_COMPLETE, &[]).await
 }
 
 /// Build and write BindComplete.
-pub async fn write_bind_complete(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_bind_complete<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::BIND_COMPLETE, &[]).await
 }
 
 /// Build and write CloseComplete.
-pub async fn write_close_complete(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_close_complete<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::CLOSE_COMPLETE, &[]).await
 }
 
 /// Build and write a NoData message (response to Describe on a statement
 /// that produces no rows).
-pub async fn write_no_data(stream: &mut TcpStream) -> anyhow::Result<()> {
+pub async fn write_no_data<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<()> {
     write_message(stream, backend::NO_DATA, &[]).await
 }
 
 /// Build and write a ParameterDescription message.
-pub async fn write_parameter_description(
-    stream: &mut TcpStream,
+pub async fn write_parameter_description<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     type_oids: &[i32],
 ) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(2 + (type_oids.len() * 4));

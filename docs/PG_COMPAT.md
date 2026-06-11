@@ -20,10 +20,16 @@ psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" -c "SELECT
 PGPASSWORD="$SKEINDB_TOKEN" \
   psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" \
   -c "SELECT version()"
+
+# Enable TLS on the MySQL + PostgreSQL listeners with a PEM cert/key pair.
+# psql then negotiates SSL over the standard SSLRequest preamble:
+cargo run -- serve --data ./data --pg 5432 \
+  --tls-cert server.pem --tls-key server.key
+psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=require" -c "SELECT 1"
 ```
 
 Notes:
-- `sslmode=disable` is recommended for now because the listener explicitly rejects PostgreSQL SSL negotiation with `N`.
+- TLS is opt-in: pass `--tls-cert` and `--tls-key` (PEM) to enable it on both the PostgreSQL and MySQL listeners. Without them the listener keeps answering the `SSLRequest` preamble with `N`, so `sslmode=disable` is required.
 - The PG listener shares the same underlying execution engine as MySQL and SkeinQL.
 
 ## Implemented today
@@ -33,7 +39,7 @@ Notes:
 - startup response batch: `AuthenticationOk` / `ParameterStatus` / `BackendKeyData` / `ReadyForQuery`
 - trust auth when `SKEINDB_TOKEN` is unset
 - SCRAM-SHA-256 auth path when `SKEINDB_TOKEN` is set
-- SSL negotiation rejection (`'N'`)
+- opt-in TLS: with `--tls-cert`/`--tls-key` the listener answers `SSLRequest` with `S` and completes a rustls handshake before startup; without them it rejects with `N`
 - PG session settings for common `SET` / `SET ... TO` / `RESET` / `RESET ALL`, with `SHOW`, `current_setting(name)`, `current_setting(name, missing_ok)`, `current_schema` (with optional parentheses), and `current_schemas(bool)` reading the effective `search_path`
 - simple query protocol delegated to the shared SQL execution engine
 - special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_catalog`, `current_schema` (with optional parentheses), `current_schemas(bool)`, `current_user`, `current_role`, `session_user`, `user`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)` including the `missing_ok` form
@@ -62,7 +68,7 @@ Notes:
 | File | Status | Purpose |
 |------|--------|---------|
 | `pg_wire.rs` | Implemented | PG v3 message framing, startup parsing, backend message encode/write helpers, common PG type OIDs, unit tests |
-| `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, SSL rejection, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch |
+| `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, opt-in TLS upgrade after `SSLRequest`, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch |
 | `pg_auth.rs` | Inline implementation | SCRAM-SHA-256 lives in `pg_wire::scram` plus `server.rs` connection handling rather than a separate module |
 | `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, the current one- and two-argument `current_setting(...)` forms, and the `current_schema` (with optional parentheses) / `current_schemas(bool)` helpers use that session map, while startup-role bootstrap helpers preserve `current_user` / `current_role` / `session_user` / `user` from the connection username and map `current_catalog` to the current database |
 | `pg_parse.rs` | Inline implementation | PG SQL dialect rewriting layer (`pg_rewrite_sql` + helpers in `server.rs`): `::` type casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, `ARRAY[...]`, `ON CONFLICT`, and supported `RETURNING` extraction |
@@ -78,7 +84,7 @@ Notes:
 | SCRAM-SHA-256 | Supported | Used when `SKEINDB_TOKEN` is set; the token value is the PostgreSQL password |
 | cleartext password | Legacy helper only | Wire helper exists, but the live listener now prefers SCRAM for token-protected PG sessions |
 | md5 | Not planned | Prefer SCRAM |
-| TLS client certs | Not implemented | SSL negotiation is currently rejected |
+| TLS | Opt-in (server) | `--tls-cert`/`--tls-key` enable a rustls TLS handshake after `SSLRequest`; client-certificate auth is not implemented |
 
 ## Protocol surface
 
