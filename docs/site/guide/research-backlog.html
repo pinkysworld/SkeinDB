@@ -162,7 +162,12 @@
 </table>
 <h2 id="recent-verified-closures">Recent verified closures<a class="headerlink" href="#recent-verified-closures" title="Permanent link">¶</a></h2>
 <ul>
-<li><strong>2026-06-11:</strong> R18 micro-slice (timing injection + fidelity): <code>inject_replay_timing</code> (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.</li>
+<li>
+<p><strong>2026-06-11:</strong> R19 host fallback micro (see TRUE_STATUS for details).</p>
+</li>
+<li>
+<p><strong>2026-06-11:</strong> R18 micro-slice (timing injection + fidelity): <code>inject_replay_timing</code> (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.</p>
+</li>
 <li><strong>2026-06-11:</strong> R19 micro hardening (T085/T086 surfaces): added explicit host fallback <code>wasm_plan_inspect</code> + <code>wasm_plan_run</code> + result parity assertions inside existing fallback test (exercises the host dispatch in engine.rs:wasm_plan_run for non-generated artifacts). Evidence locked to <code>engine::tests::wasm_plan_compile_falls_back_for_unsupported_types</code>. Matrix + this backlog updated. Followed full AGENTS process (fmt/clippy/test/review/site rebuild/commit ref R19/matrix).</li>
 <li><strong>2026-05-17:</strong> R02 adaptive row/column hardening was finished across T103-T106, covering live-row-count cost modeling, hot-projection tracking, dependency-driven snapshot invalidation, and adaptive replacement decisions.</li>
 <li><strong>2026-05-17:</strong> R14 bounded-staleness bundle windows were closed with retained coverage-gap detection in <code>edge.bundle.status</code>.</li>
