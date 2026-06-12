@@ -14240,7 +14240,9 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "convalidated"
         | "conislocal"
         | "connoinherit" => (pg_wire::oid::BOOL, 1),
-        "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
+        "setting" | "boot_val" | "reset_val" | "relkind" | "relpersistence" | "relreplident" => {
+            (pg_wire::oid::TEXT, -1)
+        }
         "rolconnlimit" | "numbackends" | "avg_width" | "relnatts" | "relchecks" | "attlen"
         | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "objsubid" | "indnatts"
         | "indnkeyatts" | "coninhcount" | "pronargs" | "pronargdefaults" => (pg_wire::oid::INT4, 4),

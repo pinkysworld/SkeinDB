@@ -34,6 +34,7 @@ use wasmtime::{
 
 use crate::storage_mode::TableStorageMode;
 use skeindb_core::decode_varu;
+use skeindb_core::manifest::ManifestReader;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
 };
@@ -2093,25 +2094,15 @@ impl Engine {
     /// MANIFEST/WAL/LSM pipeline" gap (see TRUE_STATUS_MATRIX Storage core / Phase 1).
     /// For segment/hybrid modes we expect these core files to be active alongside .rseg.
     pub fn core_lsm_files_active(&self) -> bool {
-        if matches!(self.storage_mode, TableStorageMode::Json) {
+        if !self.storage_mode.expects_core_lsm_files() {
             return false;
         }
-        let manifest = self.data_dir.join("MANIFEST.log");
-        if !manifest.exists() {
-            return false;
-        }
-        // Validate header using core primitive (A storage: brings prototype Manifest
-        // decoder into primary engine observability path for TRUE_STATUS_MATRIX gap).
-        // This is a read-only check; no behavior or format change.
-        if let Ok(bytes) = std::fs::read(&manifest) {
-            if let Ok(hdr) = FileHeader::decode(&bytes) {
-                if hdr.file_kind != FileKind::Manifest {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        } else {
+        let manifest_path = self.data_dir.join("MANIFEST.log");
+        // Use full core ManifestReader (A: exercises typed Manifest pipeline + header
+        // validation from skeindb-core in the engine's primary open/stats path).
+        // Stronger than raw FileHeader peek; read-only; no row format or behavior change.
+        // Complements storage_mode helper (B monolith split: decision lives in mode).
+        if ManifestReader::open(&manifest_path).is_err() {
             return false;
         }
         // Look for at least one wal file produced by the core WAL writer
@@ -49628,10 +49619,15 @@ mod tests {
         let engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
         assert!(!engine.core_lsm_files_active());
 
-        // Write a valid MANIFEST header via core FileHeader (A: exercises prototype
-        // primitive from primary engine path; no on-disk contract change for rows).
-        let hdr = FileHeader::new(FileKind::Manifest, 1, 1_700_000_000);
-        std::fs::write(dir.join("MANIFEST.log"), hdr.encode())?;
+        // Create manifest using full core ManifestWriter (A storage micro: exercises
+        // typed ManifestWriter + ManifestReader path end-to-end from engine test;
+        // stronger validation of core LSM pipeline in observability used by
+        // storage_stats_snapshot on open/restart. No row data or format change).
+        // (B: also exercises the new expects_core_lsm_files helper from storage_mode.)
+        {
+            // Writer open creates header; we don't append records here (read-only check).
+            let _w = skeindb_core::manifest::ManifestWriter::open(dir.join("MANIFEST.log"))?;
+        }
         assert!(!engine.core_lsm_files_active()); // needs wal too
 
         std::fs::write(dir.join("wal-000001.log"), b"")?;
@@ -49641,10 +49637,13 @@ mod tests {
         let stats = engine.storage_stats_snapshot();
         assert_eq!(stats.core_lsm_active, engine.core_lsm_files_active());
 
-        // Corrupt header -> decode fails -> not active (strict core validation)
-        let mut bad = hdr.encode();
-        bad[0] ^= 0xff;
-        std::fs::write(dir.join("MANIFEST.log"), bad)?;
+        // Corrupt header -> ManifestReader open fails -> not active (strict core validation)
+        let manifest_path = dir.join("MANIFEST.log");
+        let mut bad = std::fs::read(&manifest_path)?;
+        if bad.len() > 0 {
+            bad[0] ^= 0xff;
+        }
+        std::fs::write(&manifest_path, bad)?;
         assert!(!engine.core_lsm_files_active());
 
         fs::remove_dir_all(&dir).ok();

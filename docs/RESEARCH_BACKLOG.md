@@ -23,6 +23,8 @@ This file is the research task inventory. It is not the best place to read curre
 | R19 Wasm query operators | `wasm.plan.compile/run/inspect/perf_report/edge_package` exists with generated fixed-width artifacts and host fallback. | Production SIMD-lowered codegen and broader hardened operator coverage are not yet claimed. 2026-06-11 micro: hardened host fallback surface coverage (wasm_plan_run dispatch + inspect exercised on host_interpreted_v1 in engine::tests::wasm_plan_compile_falls_back_for_unsupported_types with data roundtrip). See TRUE_STATUS_MATRIX. |
 
 ## Recent verified closures
+- **2026-06-11:** R19 host fallback micro (see TRUE_STATUS for details).
+
 
 - **2026-06-11:** R18 micro-slice (timing injection + fidelity): `inject_replay_timing` (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test `engine::tests::replay_timing_injection_simulates_deterministic_pacing` + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.
 - **2026-06-11:** R19 micro hardening (T085/T086 surfaces): added explicit host fallback `wasm_plan_inspect` + `wasm_plan_run` + result parity assertions inside existing fallback test (exercises the host dispatch in engine.rs:wasm_plan_run for non-generated artifacts). Evidence locked to `engine::tests::wasm_plan_compile_falls_back_for_unsupported_types`. Matrix + this backlog updated. Followed full AGENTS process (fmt/clippy/test/review/site rebuild/commit ref R19/matrix).

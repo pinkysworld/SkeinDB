@@ -109,7 +109,7 @@ This is the short truth surface. It is intentionally not a changelog. Use it to 
 | R16 Auto index synthesis | Hardened | `advisor.*` synthesize/apply/retire/evaluate/history/dismiss. |
 | R17 Intent inference | Hardened | `migration.intent_report`, `migration.rewrite_preview`, and `migration.report_export`. |
 | R18 Perf regression replay | Prototype implemented (micro progress) | Performance profiles, variance reports, cache-hint rehydrate, timing injection primitive (inject_replay_timing + dedicated test), LSM stats fidelity re-compute in replay run exist; see recent verified + engine replay tests. CI distribution harness (compare) pre-exists. |
-| R19 Wasm query operators | Prototype implemented | Wasm plan compile/inspect/run/perf/edge-package exists; production SIMD-lowered codegen and hardened operator breadth remain open. 2026-06-11 micro: host fallback run/inspect exercised in engine test (see Recent Verified + partial areas). |
+| R19 Wasm query operators | Prototype implemented | Wasm plan compile/inspect/run/perf/edge-package exists; production SIMD-lowered codegen and hardened operator breadth remain open. 2026-06-11 micro: host fallback run/inspect exercised in engine test (see Recent Verified + partial areas).  |
 | R20 Energy-aware compaction | Hardened | Energy-aware compaction policy, external energy signals, status/stats, and eval harness. |
 
 ## Compatibility Guardrail

@@ -180,18 +180,20 @@
 </tr>
 <tr>
 <td>R18 performance replay</td>
-<td>Replay bundles can carry performance profiles and run variance checks.</td>
-<td>Timing injection, cache/LSM reconstruction fidelity, and CI distribution gates remain open.</td>
+<td>Replay bundles carry performance profiles, deterministic replay rehydrates cache hints + runs variance, timing injection primitive + exercised in replay run + cache/LSM stats re-compute on rehydrate now implemented. Evidence: <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> (new unit), <code>engine::tests::replay_bundle_run_rehydrates_cache_hints</code> (enhanced), <code>engine::tests::replay_bundle_export_import_run_roundtrip</code>, <code>server::tests::maintenance_replay_run_rehydrates_cache_hints</code>, cluster_rpc t183/t188.</td>
+<td>Timing injection now has concrete deterministic sim (inject_replay_timing exercised in maintenance_replay_run); stronger LSM fidelity via post-rehydrate stats; CI compare harness + thresholds pre-exist in main.rs/CLI (replay compare). Full pacing in runner + .github CI workflow gates remain open.</td>
 </tr>
 <tr>
 <td>R19 Wasm query operators</td>
 <td>Compile/inspect/run/perf/edge-package surfaces exist with generated fixed-width Wasm artifacts and host fallback.</td>
-<td>Production SIMD-lowered codegen and hardened operator breadth are not claimed.</td>
+<td>Production SIMD-lowered codegen and hardened operator breadth are not claimed. Micro (2026-06-11): engine test now explicitly exercises wasm_plan_inspect + wasm_plan_run (host dispatch to execute_select) + row result parity for host_interpreted_v1 fallback artifact (str projection over inserted data). Evidence: <code>engine::tests::wasm_plan_compile_falls_back_for_unsupported_types</code> (expanded).</td>
 </tr>
 </tbody>
 </table>
 <h2 id="recent-verified-changes">Recent Verified Changes<a class="headerlink" href="#recent-verified-changes" title="Permanent link">¶</a></h2>
 <ul>
+<li><strong>2026-06-11:</strong> R18 Performance Replay micro-slice (timing injection + fidelity): added <code>inject_replay_timing</code> primitive (deterministic delay sim from profile p50/p95/p99 for pacing/variance) + exercised unconditionally in <code>maintenance_replay_run</code> (plus storage_stats_snapshot post-rehydrate for LSM fidelity) + new unit test <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> + enhancements/asserts in roundtrip + cache_hints tests. Covers timing injection gap + strengthens cache/LSM recon; pre-existing CI harness (replay compare + thresholds in main.rs) referenced. Net &lt;50 LOC, unit+integration tests, no format change. Followed by fmt/clippy/test (replay-filtered + full relevant), matrix+backlog update, site rebuild, hard review, commit (ref review/matrix/R18). Per AGENTS. Gaps now: full injection pacing during exec + CI workflow distribution gates.</li>
+<li><strong>2026-06-11:</strong> R19 Wasm query operators (host fallback hardening micro-slice): extended <code>engine::tests::wasm_plan_compile_falls_back_for_unsupported_types</code> to insert rows + call <code>wasm_plan_inspect</code> + <code>wasm_plan_run</code> (exercises the <code>if artifact.execution == ... GENERATED else execute_select</code> dispatch in <code>wasm_plan_run</code> for <code>host_interpreted_v1</code> artifacts) and assert projected row results. This adds concrete coverage for compile/inspect/run/perf/edge-package surfaces on the host fallback path (in addition to generated_filter_project_v1). Still prototype: SIMD-lowered codegen and broader operator support (joins etc) remain gaps. Updated TRUE_STATUS_MATRIX + RESEARCH_BACKLOG; followed by fmt/clippy/test/site-rebuild/review/commit (ref review/matrix/R19). Per AGENTS: tiny, tests included, no on-disk/format change.</li>
 <li><strong>2026-06-11:</strong> Next micro-slices per latest hard review (continuing A/B/C/D): (A) in core_lsm test, wired storage_stats_snapshot to assert core_lsm_active parity (engine.rs); (C) in encryption secondary test, exercised read_envelope on EncryptedValueStore (deeper secondary API baseline); (D) in pg_catalog override test, added asserts for new pg_class columns (relkind/relowner). B helpers already in prior. All tiny test-only, per AGENTS (no format/unsafe change), with matrix evidence updates. Full review + fmt/clippy/test + site rebuild + push.</li>
 <li><strong>2026-06-11:</strong> Full workspace verification + small storage hardening: added <code>Engine::core_lsm_files_active()</code> + <code>EngineStorageStats.core_lsm_active</code> (engine.rs) with test evidence in dedup_stats_roundtrip_across_restart. Confirmed core LSM files (MANIFEST + wal-*.log) for non-JSON modes. Matrix Storage core / Phase 1 gap description + evidence updated with code locations and this observability step toward primary pipeline.</li>
 <li><strong>2026-05-28:</strong> PostgreSQL CSV <code>COPY</code> now honors single-byte <code>ESCAPE</code> markers on supported CSV forms, allowing custom quote and escape characters to round-trip values containing both characters over <code>COPY ... TO STDOUT</code> and <code>COPY ... FROM STDIN</code>. Coverage: <code>server::tests::pg_copy_csv_encode_and_parse_rows_handle_custom_escape_marker</code>, <code>server::tests::pg_parse_copy_to_stdout_recognizes_table_and_query_sources</code>, <code>server::tests::pg_parse_copy_from_stdin_and_decode_rows</code>, <code>cluster_rpc.rs::pg_simple_query_copy_to_stdout_with_csv_escape_roundtrip</code>, <code>cluster_rpc.rs::pg_simple_query_copy_from_stdin_with_csv_escape_roundtrip</code>.</li>
@@ -452,13 +454,13 @@
 </tr>
 <tr>
 <td>R18 Perf regression replay</td>
-<td>Prototype implemented</td>
-<td>Performance profiles and replay variance exist; fidelity/CI gates remain open.</td>
+<td>Prototype implemented (micro progress)</td>
+<td>Performance profiles, variance reports, cache-hint rehydrate, timing injection primitive (inject_replay_timing + dedicated test), LSM stats fidelity re-compute in replay run exist; see recent verified + engine replay tests. CI distribution harness (compare) pre-exists.</td>
 </tr>
 <tr>
 <td>R19 Wasm query operators</td>
 <td>Prototype implemented</td>
-<td>Wasm plan compile/inspect/run/perf/edge-package exists; production SIMD breadth remains open.</td>
+<td>Wasm plan compile/inspect/run/perf/edge-package exists; production SIMD-lowered codegen and hardened operator breadth remain open. 2026-06-11 micro: host fallback run/inspect exercised in engine test (see Recent Verified + partial areas).</td>
 </tr>
 <tr>
 <td>R20 Energy-aware compaction</td>
