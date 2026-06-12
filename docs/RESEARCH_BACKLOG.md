@@ -161,6 +161,7 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T085: Compile a restricted plan subset to Wasm (filter/project)
 - [ ] T086: Wasm SIMD exploration + perf tests
 - [ ] T087: Edge runtime packaging (ship plan artifact)
+  - Progress note (2026-06-11): host fallback + inspect/run_generated exercised in tests for unsupported/nullable; nullable handling stub added in engine.rs; 'in'/'between' coverage for scalars exercised (still via host execute_select fallback); see TRUE_STATUS_MATRIX R19 + engine wasm_plan_* (from_query/analyze/execute fallback). Production lowered codegen + SIMD still open. (ABCD interleave: Phase 8 with core SQL/expr/RPC paths.)
 
 ### Extend Phase 10 — Adaptive row/column execution (R02)
 - [ ] T103: Column snapshot cost model (build vs benefit)

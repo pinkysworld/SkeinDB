@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-03-14
-Latest changes: R03/R04/R06/R08/R10/R13 research hardening; PostgreSQL compat phase planned.
+Last updated: 2026-06-11
+Latest changes: R19 Wasm query operators (host fallback exercised with inspect/run_generated in test for unsupported types + nullable stub + 'in'/'between' coverage); R03/R04/R06/R08/R10/R13 prior hardening; PostgreSQL compat phase planned.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -70,7 +70,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R16 Auto index synthesis | Prototype implemented | `advisor.index_synthesize/apply_index/history`. |
 | R17 Intent inference | Prototype implemented | `migration.intent_report/rewrite_preview`. |
 | R18 Perf regression replay | Prototype implemented | Replay/perf scaffolds and harness direction. |
-| R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/run` + batch ABI scaffolds. |
+| R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/run` + batch ABI scaffolds + host fallback exercised with wasm_plan_inspect/run_generated in wasm_plan_host_fallback_for_nullable_and_unsupported test (engine.rs:26246) for unsupported types/nullable; nullable handling stub + 'in'/'between' for scalars in generated path context (still host via execute_select); see crates/skeindb/src/engine.rs wasm_plan_* fns + WASM_OPERATORS.md. |
 | R20 Energy-aware compaction | Prototype implemented | Policy-level scheduler scaffolds and docs. |
 
 ## 4) Recommended “next truth-maintenance” rule

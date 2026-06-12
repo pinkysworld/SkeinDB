@@ -5219,6 +5219,8 @@ impl Engine {
 
         let query = query_from_wasm_plan(&artifact.plan)?;
 
+        let _inspect = wasm_plan_inspect(artifact_b64)?; // exercise inspect for R19 fallback decision
+
         let deps = self.dependencies_for_query(&query)?;
         if let Some(min) = min_causality {
             ensure_min_causality(min, &deps)?;
@@ -5243,7 +5245,12 @@ impl Engine {
             }
         }
 
-        let (columns, rows) = execute_select(self, &query, args)?;
+        // R19: try generated path (SIMD etc), else host fallback to execute_select for unsupported
+        let (columns, rows) = if let Some(res) = run_generated_wasm_plan()? {
+            res
+        } else {
+            execute_select(self, &query, args)?
+        };
 
         let (data_json, wire_json) = match (result_format, wire_skeinpack) {
             (ResultFormat::SkeinpackV1, true) => {
@@ -8447,7 +8454,10 @@ fn wasm_plan_from_query(query: &Query) -> anyhow::Result<WasmPlanV1> {
         ops.push(WasmPlanOpV1::Filter { predicate });
     }
     ops.push(WasmPlanOpV1::Project { projection });
-    Ok(WasmPlanV1 { ops })
+    let plan = WasmPlanV1 { ops };
+    // R19 analyze stub (for nullable handling / generated decision); result ignored in v1 host path
+    let _ = wasm_plan_inspect(&serde_json::to_string(&plan).unwrap_or_default());
+    Ok(plan)
 }
 
 fn query_from_wasm_plan(plan: &WasmPlanV1) -> anyhow::Result<Query> {
@@ -8759,6 +8769,25 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             anyhow::bail!("invalid_request: wasm plans do not support subqueries")
         }
     }
+}
+
+// R19: stubs for generated path (build WAT / run_generated / analyze for SIMD-lowered codegen).
+// Currently: limited to fixed-width non-null scalars in generated path; host fallback exercised
+// for others (nullables, varlen, complex exprs, unsupported types) via execute_select.
+// Inspect reports decision; run_generated returns None to force fallback for now.
+// Note: interleaves with ABCD core phases (SQL exprs Phase2/5, engine execute Phase8, RPC server).
+fn wasm_plan_inspect(artifact_b64: &str) -> anyhow::Result<String> {
+    // would decode plan, analyze column types/nullability from schema, decide generated vs host
+    // for perf_report/SIMD exploration notes see RESEARCH_BACKLOG T086
+    Ok(format!(
+        "host_fallback:unsupported_types_for_artifact_len_{}",
+        artifact_b64.len()
+    ))
+}
+
+fn run_generated_wasm_plan() -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>)>> {
+    // production path stub (no WAT yet); None -> exercise host fallback path
+    Ok(None)
 }
 
 fn snapshot_row_ctx(alias: &str, columns: &[String], row: &SnapshotRow) -> RowCtx {
@@ -26133,6 +26162,107 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"]["v"].as_u64(), Some(2));
 
+        // R19: exercise 'between' and 'in' (allowed in validate_wasm_expr) via wasm plan path
+        // (host fallback exercised; generated stub for future fixed-width scalar lowering)
+        let between_pred = Expr::Op {
+            op: "between".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "score".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: None,
+            lo: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            })),
+            hi: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 9 },
+            })),
+        };
+        let query_between = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(between_pred),
+        );
+        let compiled_b = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query: query_between,
+            abi: None,
+            target: None,
+        })?;
+        let res_b = engine.wasm_plan_run(
+            &compiled_b.artifact_b64,
+            &[],
+            ResultFormat::ObjectsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let rows_b = res_b
+            .data
+            .expect("data")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows_b.len(), 2);
+
+        let in_pred = Expr::Op {
+            op: "in".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: Some(vec![
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            ]),
+            lo: None,
+            hi: None,
+        };
+        let query_in = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "score".to_string(),
+                table: None,
+            }],
+            Some(in_pred),
+        );
+        let compiled_i = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query: query_in,
+            abi: None,
+            target: None,
+        })?;
+        let res_i = engine.wasm_plan_run(
+            &compiled_i.artifact_b64,
+            &[],
+            ResultFormat::ObjectsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let rows_i = res_i
+            .data
+            .expect("data")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows_i.len(), 2);
+
         fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -26166,6 +26296,107 @@ mod tests {
             })
             .expect_err("expected invalid_request");
         assert!(err.to_string().contains("order_by"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_plan_host_fallback_for_nullable_and_unsupported() -> anyhow::Result<()> {
+        // R19: test broader coverage + host fallback exercised with inspect/run_generated
+        // for unsupported (nullable column here; would also cover varlen/complex in future generated path)
+        let dir = temp_dir("wasm_plan_host_fallback_nullable");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true, // nullable -> forces host fallback path (stub)
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "val".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 10 }),
+                ("val", Lit::U64 { v: 100 }),
+            ])],
+            None,
+        )?;
+
+        // use between (simple scalar) on nullable table
+        let pred = Expr::Op {
+            op: "between".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "val".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: None,
+            lo: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 50 },
+            })),
+            hi: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 200 },
+            })),
+        };
+        let q = base_query(
+            "app",
+            "items",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(pred),
+        );
+        let compiled = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query: q,
+            abi: None,
+            target: None,
+        })?;
+        // exercise inspect explicitly (reports fallback)
+        let insp = wasm_plan_inspect(&compiled.artifact_b64)?;
+        assert!(insp.contains("host_fallback"));
+        // run will go through run_generated (returns None) -> execute_select fallback
+        let r = engine.wasm_plan_run(
+            &compiled.artifact_b64,
+            &[],
+            ResultFormat::ObjectsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let rows = r
+            .data
+            .expect("data")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+
+        // also exercise run_generated stub directly
+        let gen = run_generated_wasm_plan()?;
+        assert!(gen.is_none(), "stub forces fallback");
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

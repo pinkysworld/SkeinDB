@@ -175,6 +175,9 @@ When `result_format: "wasm_batch_v1"` is used, `data` contains a columnar batch:
 ## 6) Prototype notes
 
 Current implementation:
-- The plan artifact is interpreted by the host (no Wasm codegen yet).
+- The plan artifact is interpreted by the host (no Wasm codegen yet; run always falls back via execute_select).
+- Stubs added for generated path: wasm_plan_inspect + run_generated_wasm_plan (return None to exercise host fallback for unsupported types e.g. nullables); nullable handling stub.
+- 'in'/'between' + broader (nullable) coverage exercised in WasmPlan tests (wasm_plan_host_fallback_for_nullable_and_unsupported + extended compile_and_run).
 - Only the filter/project subset is accepted.
 - `abi` and `target` are validated but otherwise ignored in v1.
+- See engine.rs for from_query/analyze/parts/validate + server RPC delegation.
