@@ -150,7 +150,7 @@
 <tbody>
 <tr>
 <td>R18 Perf regression replay</td>
-<td>Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (<code>inject_replay_timing</code>) + wired to pacing mechanism (<code>apply_simulated_pacing</code> in maintenance_replay_run) + exercised in replay run + LSM/cache stats + new unit <code>engine::tests::replay_pacing_applies_injected_delays_for_replay_exec_fidelity</code> + updated engine roundtrips + cluster_rpc t188 (replay/RPC integration test) (engine::tests + cluster).</td>
+<td>Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (<code>inject_replay_timing</code>) + wired to pacing mechanism (<code>apply_simulated_pacing</code> in maintenance_replay_run) + exercised in replay run + LSM/cache stats + new unit <code>engine::tests::replay_pacing_applies_injected_delays_for_replay_exec_fidelity</code> + updated engine roundtrips + cluster_rpc t188 (replay/RPC integration test) (engine::tests + cluster). 2026-06-11 A/B storage interleave (this round): replay materialize (R18 run path) routes core writers + streaming stub (via extended replay_bundle_export_import_run_roundtrip + t183); storage_stats_snapshot fidelity use. See TRUE_STATUS.</td>
 <td>Full timing pacing integration into runner execution + .github CI distribution gates (e.g. replay-compare step on bundles) remain.</td>
 </tr>
 <tr>

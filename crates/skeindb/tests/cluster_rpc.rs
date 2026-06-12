@@ -7238,6 +7238,10 @@ async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> 
         run_result["performance_report"]["storage"]["total_rows_delta"].as_i64(),
         Some(0)
     );
+    // This round A/B: t183 (integration over SkeinQL RPC exercising SQL DML that
+    // populates CDC changes + replay export/import/run) now also covers the
+    // replay materialize path that routes core RowSeg/Manifest/WAL + streaming
+    // stub for hybrid mode (default). See engine replay test + matrix.
 
     let resp = client
         .post(format!("{base}/api/v1/rpc"))

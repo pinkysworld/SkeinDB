@@ -90,3 +90,25 @@ pub(crate) fn lsm_pipeline_files_active(data_dir: &Path, mode: TableStorageMode)
     }
     false
 }
+
+/// Centralized decision helper (B: monolith split) for routing replay
+/// materialize / future primary load/persist paths. For segment/hybrid modes
+/// we route the replayed tables' materialization through core Manifest/WAL/
+/// RowSeg writers (A: progress on primary LSM row path; only in isolated
+/// replay workspaces so far — no user table row format or main data/ change).
+pub(crate) fn should_bootstrap_core_lsm_for_replay_materialize(mode: TableStorageMode) -> bool {
+    mode.expects_core_lsm_files()
+}
+
+/// Small stub selector (A: toward streaming/large-table read support without
+/// full in-mem materialization). For segment mode future will select
+/// RowSegmentReader + RowDir/MVCC over core files; today documents the intent.
+/// (Interleaves R18 replay which relies on post-materialize stats snapshots.)
+#[allow(dead_code)]
+pub(crate) fn select_streaming_row_path_stub(mode: TableStorageMode) -> &'static str {
+    if mode.uses_segment() {
+        "core_lsm_rowseg_reader_stub"
+    } else {
+        "json_full_materialize"
+    }
+}
