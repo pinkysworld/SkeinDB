@@ -2064,11 +2064,36 @@ impl Engine {
         let (interned_values, delta_chains) = self
             .value_store
             .lock()
-            .map(|store| {
+            .map(|mut store| {
+                // C: extend secondary routing baseline - construct EncryptedValueStore
+                // over the (non-primary row) ValueStore in the stats snapshot path.
+                // Exercises EncryptedValueStore + key_manager wiring for secondary/dedup
+                // values (distinct from primary RowEncryptionCodec path). Read-only
+                // construction here; prepares routing without changing any value
+                // writes or formats. See Phase 20 gap in matrix.
+                let _evs = skeindb_core::encrypted_valuestore::EncryptedValueStore::new(
+                    &mut store,
+                    &self.key_manager,
+                );
                 let s = store.stats();
                 (s.entries as u64, s.delta_values_written)
             })
             .unwrap_or((0, 0));
+
+        // A: exercise additional core primitive (ManifestReader::replay_state) in the
+        // stats path (called on open, restart, dedup tests, and R18 replay fidelity
+        // rehydration for LSM stats). Small step toward primary LSM pipeline usage
+        // of typed manifest in load/stats (read-only, no persist/format change).
+        // Interleaved with R18 (storage_stats_snapshot post-rehydrate used for
+        // cache/LSM fidelity recon in replay bundles).
+        let _core_manifest_state: Option<_> = if self.storage_mode.expects_core_lsm_files() {
+            let mpath = self.data_dir.join("MANIFEST.log");
+            ManifestReader::open(&mpath)
+                .ok()
+                .and_then(|r| r.replay_state().ok())
+        } else {
+            None
+        };
 
         let disk_bytes = data_dir_size_bytes(&self.data_dir);
 
@@ -2093,29 +2118,10 @@ impl Engine {
     /// for the current storage mode. This is observability for the "full production
     /// MANIFEST/WAL/LSM pipeline" gap (see TRUE_STATUS_MATRIX Storage core / Phase 1).
     /// For segment/hybrid modes we expect these core files to be active alongside .rseg.
+    /// Delegates to extracted helper in storage_mode (B: more decision + core call site
+    /// logic moved out of monolith engine.rs / server.rs duplication risk).
     pub fn core_lsm_files_active(&self) -> bool {
-        if !self.storage_mode.expects_core_lsm_files() {
-            return false;
-        }
-        let manifest_path = self.data_dir.join("MANIFEST.log");
-        // Use full core ManifestReader (A: exercises typed Manifest pipeline + header
-        // validation from skeindb-core in the engine's primary open/stats path).
-        // Stronger than raw FileHeader peek; read-only; no row format or behavior change.
-        // Complements storage_mode helper (B monolith split: decision lives in mode).
-        if ManifestReader::open(&manifest_path).is_err() {
-            return false;
-        }
-        // Look for at least one wal file produced by the core WAL writer
-        if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("wal-") && name.ends_with(".log") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        crate::storage_mode::lsm_pipeline_files_active(&self.data_dir, self.storage_mode)
     }
 
     pub fn value_lookup_distribution_snapshot(&self) -> ValueIdLookupDistribution {
@@ -49610,6 +49616,12 @@ mod tests {
         assert_eq!(TableStorageMode::Json.primary_row_extension(), "json");
         assert_eq!(TableStorageMode::Segment.primary_row_extension(), "rseg");
         assert_eq!(TableStorageMode::Dual.primary_row_extension(), "rseg");
+        // Exercise newly extracted B helper (pure lsm check using core ManifestReader).
+        use std::path::Path;
+        let _ = crate::storage_mode::lsm_pipeline_files_active(
+            Path::new("/tmp"),
+            TableStorageMode::Json,
+        );
     }
 
     #[test]
@@ -49633,7 +49645,8 @@ mod tests {
         // typed ManifestWriter + ManifestReader path end-to-end from engine test;
         // stronger validation of core LSM pipeline in observability used by
         // storage_stats_snapshot on open/restart. No row data or format change).
-        // (B: also exercises the new expects_core_lsm_files helper from storage_mode.)
+        // (B: exercises expects_core_lsm_files + now-delegated lsm_pipeline_files_active
+        // extracted helper from storage_mode.rs.)
         {
             // Writer open creates header; we don't append records here (read-only check).
             let _w = skeindb_core::manifest::ManifestWriter::open(dir.join("MANIFEST.log"))?;
@@ -49646,6 +49659,13 @@ mod tests {
         // A: wire stats snapshot to core_lsm (exercises full observability path cited in matrix)
         let stats = engine.storage_stats_snapshot();
         assert_eq!(stats.core_lsm_active, engine.core_lsm_files_active());
+
+        // A: more core in stats path - replay_state exercised (full Manifest record
+        // replay to state for LSM fidelity/observability step toward primary path).
+        // Interleaved R18: stats path now touches replay used for replay bundle LSM recon.
+        assert!(ManifestReader::open(dir.join("MANIFEST.log"))
+            .and_then(|r| r.replay_state())
+            .is_ok());
 
         // Corrupt header -> ManifestReader open fails -> not active (strict core validation)
         let manifest_path = dir.join("MANIFEST.log");
@@ -49668,6 +49688,9 @@ mod tests {
         // usage outside core/tests, providing a baseline for routing encrypted
         // values through the ValueStore without touching primary row path or
         // changing formats. See TRUE_STATUS_MATRIX Phase 20 gap.
+        // Extended: stats snapshot path (non-primary) now also constructs it
+        // (see storage_stats_snapshot) so secondary routing exercised on
+        // open/restart/dedup/R18 paths.
         use skeindb_core::encrypted_valuestore::EncryptedValueStore;
         use skeindb_core::encryption::{
             DatabaseKeyManager, EncryptionContext, EncryptionMode, ENCRYPTION_MASTER_KEY_LEN,

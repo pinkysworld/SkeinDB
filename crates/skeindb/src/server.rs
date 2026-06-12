@@ -29355,6 +29355,28 @@ fn pg_catalog_select_result(
         vec!["oid", "amname", "amhandler", "amtype"]
     } else if table.table.eq_ignore_ascii_case("pg_description") {
         vec!["objoid", "classoid", "objsubid", "description"]
+    } else if table.table.eq_ignore_ascii_case("pg_stat_user_tables") {
+        // D PG/CDC micro: one more PG catalog item (empty typed virtual table).
+        // Advances catalog parity (pg_stat_* family) for PG/CDC consumers without
+        // adding rows or behavior. SELECT * FROM pg_catalog.pg_stat_user_tables
+        // returns correct RowDescription + 0 rows over sql.exec + live PG.
+        vec![
+            "relid",
+            "schemaname",
+            "relname",
+            "seq_scan",
+            "seq_tup_read",
+            "idx_scan",
+            "idx_tup_fetch",
+            "n_tup_ins",
+            "n_tup_upd",
+            "n_tup_del",
+            "n_live_tup",
+            "n_dead_tup",
+            "last_vacuum",
+            "last_autovacuum",
+            "vacuum_count",
+        ]
     } else if table.table.eq_ignore_ascii_case("pg_class") {
         // D PG/CDC: one additional catalog table (empty but typed, like pg_description).
         // Widens parity without new rows or behavior change; enables SELECT * FROM pg_catalog.pg_class
@@ -34999,6 +35021,30 @@ mod tests {
         assert!(
             class_rows.is_empty(),
             "pg_class should be empty but return typed columns"
+        );
+
+        // D: exercise new pg_stat_user_tables catalog item (empty typed).
+        let pgstat = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT relid, relname, n_live_tup FROM pg_catalog.pg_stat_user_tables LIMIT 5"
+            }),
+        )
+        .await;
+        assert!(pgstat.ok);
+        let stat_rows = pgstat
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            stat_rows.is_empty(),
+            "pg_stat_user_tables should be empty but return typed columns"
         );
 
         let pg_tables = call_sql_exec_http(
@@ -49161,6 +49207,7 @@ mod tests {
         // D: cover new pg_class columns from micro (relkind/relowner added in catalog handler)
         assert!(pg_catalog_result_column_override("relkind").is_some());
         assert!(pg_catalog_result_column_override("relowner").is_some());
+        // D: pg_stat_user_tables columns exercised via sql_exec test (typed cols even if no override entry).
         // pg_roles / pg_authid / pg_user / pg_group / pg_tablespace / pg_stat* columns
         assert!(pg_catalog_result_column_override("rolcanlogin").is_some());
         assert!(pg_catalog_result_column_override("rolconnlimit").is_some());

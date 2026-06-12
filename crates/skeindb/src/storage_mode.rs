@@ -2,6 +2,10 @@
 //! Part of monolith split effort (reviewer recommendation B) to improve maintainability
 //! for all future hardening work on partial areas.
 
+use std::path::Path;
+
+use skeindb_core::manifest::ManifestReader;
+
 const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,4 +63,30 @@ impl TableStorageMode {
             "json"
         }
     }
+}
+
+/// Pure helper extracted to storage_mode (B monolith split): centralizes the
+/// decision + core ManifestReader + fs walk for whether core LSM pipeline
+/// (MANIFEST + at least one wal-*.log) files are present for the mode.
+/// Engine and any future server paths now delegate here instead of duplicating.
+/// Uses full typed ManifestReader::open (complements A storage pipeline work).
+pub(crate) fn lsm_pipeline_files_active(data_dir: &Path, mode: TableStorageMode) -> bool {
+    if !mode.expects_core_lsm_files() {
+        return false;
+    }
+    let manifest_path = data_dir.join("MANIFEST.log");
+    if ManifestReader::open(&manifest_path).is_err() {
+        return false;
+    }
+    // Look for at least one wal file produced by the core WAL writer.
+    if let Ok(entries) = std::fs::read_dir(data_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("wal-") && name.ends_with(".log") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
