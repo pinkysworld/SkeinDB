@@ -20,6 +20,7 @@ export const PANEL_META = {
   replay:     { title: 'Time Travel & Replay', subtitle: 'Run point-in-time queries, manage history retention, verify replay bundles, and manage edge bundles.' },
   security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
+  encryption: { title: 'Encryption',         subtitle: 'At-rest encryption mode (ENC_OFF/ENC_RANDOM/ENC_MLE_DB) and key management/rotation.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
   import:     { title: 'Import / Export',      subtitle: 'Bulk import data or export schemas and rows.' },
   research:   { title: 'Research Agenda',      subtitle: 'Dashboard for all 20 research tracks R01–R20.' },

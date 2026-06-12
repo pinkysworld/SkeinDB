@@ -32974,7 +32974,11 @@ async fn collect_compaction_worker_queue(
 
     let mut planned = {
         let engine = state.engine.read().await;
-        let json_mode = engine.storage_mode_name() == "json";
+        // B monolith split wiring (per plan + storage_mode helpers): use the extracted
+        // TableStorageMode + uses_segment helper instead of raw "json" string compare.
+        // This centralizes the decision (previously duplicated in engine/server).
+        let json_mode = crate::storage_mode::TableStorageMode::parse(engine.storage_mode_name())
+            .is_none_or(|m| !m.uses_segment());
         raw_tasks
             .into_iter()
             .filter(|task| task.bytes > 0)
@@ -33060,7 +33064,12 @@ async fn run_compaction_worker_task(
     };
 
     let after_bytes = if persisted {
-        if storage_mode == "json" {
+        // B monolith split (second wiring site): delegate "json" vs segment decision to
+        // the extracted TableStorageMode helper (uses_segment) instead of raw string.
+        // Matches the prior change in the same compaction path and storage_mode.rs logic.
+        if crate::storage_mode::TableStorageMode::parse(&storage_mode)
+            .is_none_or(|m| !m.uses_segment())
+        {
             match std::fs::remove_file(&planned.task.path) {
                 Ok(()) => 0,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
