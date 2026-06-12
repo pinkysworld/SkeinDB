@@ -45,7 +45,7 @@ use skeindb_core::wasm_catalog::{
 use skeindb_core::wasm_udf::{
     execute_scalar_udf_with_options, ScalarUdfExecutionOptions, WasmValue,
 };
-use skeindb_core::{audit_hash256, encode_varu, value_id, FileHeader, FileKind, ValueKind};
+use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
     AdvisorEvaluateLatencyReport, AdvisorEvaluateLatencyStats, AdvisorEvaluateParams,
     AdvisorEvaluatePhaseResult, AdvisorEvaluateResult, AdvisorHistoryEntry, AdvisorHistoryParams,
@@ -49640,7 +49640,7 @@ mod tests {
         // Corrupt header -> ManifestReader open fails -> not active (strict core validation)
         let manifest_path = dir.join("MANIFEST.log");
         let mut bad = std::fs::read(&manifest_path)?;
-        if bad.len() > 0 {
+        if !bad.is_empty() {
             bad[0] ^= 0xff;
         }
         std::fs::write(&manifest_path, bad)?;
