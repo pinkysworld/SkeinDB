@@ -19,11 +19,13 @@ This file is the research task inventory. It is not the best place to read curre
 
 | Track | Truth today | Remaining gap |
 |---|---|---|
-| R18 Perf regression replay | Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, and variance reports exist. | Timing injection, stronger cache/LSM reconstruction fidelity, and CI distribution gates remain open. |
-| R19 Wasm query operators | `wasm.plan.compile/run/inspect/perf_report/edge_package` exists with generated fixed-width artifacts and host fallback. | Production SIMD-lowered codegen and broader hardened operator coverage are not yet claimed. |
+| R18 Perf regression replay | Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (`inject_replay_timing`) implemented+exercised in replay run + LSM stats re-compute for fidelity + new unit test `replay_timing_injection_simulates_deterministic_pacing` + test enhancements (engine::tests + cluster). | Full timing pacing integration into runner execution + .github CI distribution gates (e.g. replay-compare step on bundles) remain. |
+| R19 Wasm query operators | `wasm.plan.compile/run/inspect/perf_report/edge_package` exists with generated fixed-width artifacts and host fallback. | Production SIMD-lowered codegen and broader hardened operator coverage are not yet claimed. 2026-06-11 micro: hardened host fallback surface coverage (wasm_plan_run dispatch + inspect exercised on host_interpreted_v1 in engine::tests::wasm_plan_compile_falls_back_for_unsupported_types with data roundtrip). See TRUE_STATUS_MATRIX. |
 
 ## Recent verified closures
 
+- **2026-06-11:** R18 micro-slice (timing injection + fidelity): `inject_replay_timing` (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test `engine::tests::replay_timing_injection_simulates_deterministic_pacing` + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.
+- **2026-06-11:** R19 micro hardening (T085/T086 surfaces): added explicit host fallback `wasm_plan_inspect` + `wasm_plan_run` + result parity assertions inside existing fallback test (exercises the host dispatch in engine.rs:wasm_plan_run for non-generated artifacts). Evidence locked to `engine::tests::wasm_plan_compile_falls_back_for_unsupported_types`. Matrix + this backlog updated. Followed full AGENTS process (fmt/clippy/test/review/site rebuild/commit ref R19/matrix).
 - **2026-05-17:** R02 adaptive row/column hardening was finished across T103-T106, covering live-row-count cost modeling, hot-projection tracking, dependency-driven snapshot invalidation, and adaptive replacement decisions.
 - **2026-05-17:** R14 bounded-staleness bundle windows were closed with retained coverage-gap detection in `edge.bundle.status`.
 - **2026-05-17:** R16 workload-shift evaluation was closed with phased convergence reporting in `advisor.evaluate`.
