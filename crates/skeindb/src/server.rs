@@ -49156,6 +49156,9 @@ mod tests {
         assert!(pg_catalog_result_column_override("relhasindex").is_some());
         assert!(pg_catalog_result_column_override("relhaspkey").is_some());
         assert!(pg_catalog_result_column_override("relnatts").is_some());
+        // D: cover new pg_class columns from micro (relkind/relowner added in catalog handler)
+        assert!(pg_catalog_result_column_override("relkind").is_some());
+        assert!(pg_catalog_result_column_override("relowner").is_some());
         // pg_roles / pg_authid / pg_user / pg_group / pg_tablespace / pg_stat* columns
         assert!(pg_catalog_result_column_override("rolcanlogin").is_some());
         assert!(pg_catalog_result_column_override("rolconnlimit").is_some());

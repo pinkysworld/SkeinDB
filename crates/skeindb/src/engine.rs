@@ -49554,6 +49554,10 @@ mod tests {
         std::fs::write(dir.join("wal-000001.log"), b"")?;
         assert!(engine.core_lsm_files_active());
 
+        // A: wire stats snapshot to core_lsm (exercises full observability path cited in matrix)
+        let stats = engine.storage_stats_snapshot();
+        assert_eq!(stats.core_lsm_active, engine.core_lsm_files_active());
+
         // Corrupt header -> decode fails -> not active (strict core validation)
         let mut bad = hdr.encode();
         bad[0] ^= 0xff;
@@ -49596,6 +49600,9 @@ mod tests {
             assert_eq!(rec.mode, EncryptionMode::EncRandom);
             let plain = evs.get_decrypted(&ctx, &rec.value_id).expect("get");
             assert_eq!(plain, b"secondary-value-plain");
+
+            // C: exercise additional secondary API (read_envelope) for matrix Phase 20 baseline
+            let _env = evs.read_envelope(&rec.value_id).expect("envelope");
         }
         // value is in underlying store as envelope
         assert!(store.stats().entries > 0);
