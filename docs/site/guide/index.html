@@ -110,6 +110,17 @@
 <li><a href="transport-quic.html">QUIC transport</a></li>
 <li><a href="cas-replication.html">CAS replication</a></li>
 </ul>
+<div class="group-title">🔬 &nbsp;Advanced &amp; Research Features</div>
+<ul>
+<li><a href="oblivious-execution.html">Oblivious execution (privacy)</a></li>
+<li><a href="incremental-views.html">Incremental views (pipelines)</a></li>
+<li><a href="audit-wal.html">Audit WAL &amp; forensics</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+</ul>
 <div class="group-title">📐 &nbsp;Research &amp; Project</div>
 <ul>
 <li><a href="research-agenda.html">Research agenda</a></li>
@@ -155,6 +166,15 @@
   <a class="home-card" href="replay-bundles-and-integrity.html"><div class="home-icon">🧾</div><h3>Replay bundles and integrity</h3><p>Export a deterministic replay bundle, import it into a workspace, and verify checksums.</p></a>
 </div>
 
+<h2 id="advanced-research-features">Advanced &amp; research features<a class="headerlink" href="#advanced-research-features" title="Permanent link">¶</a></h2>
+<div class="home-grid">
+  <a class="home-card" href="oblivious-execution.html"><div class="home-icon">🛡️</div><h3>Privacy &amp; Differential Privacy</h3><p>R04/R05: DP aggregates with Laplace noise, oblivious execution for access-pattern protection, budgets, audit, and privacy ETags.</p></a>
+  <a class="home-card" href="incremental-views.html"><div class="home-icon">🔄</div><h3>Incremental Views &amp; Pipelines</h3><p>R08: Dependency-graph materialized view maintenance, refresh modes, evaluate, explain_deps, and tight integration with CDC/ETags.</p></a>
+  <a class="home-card" href="audit-wal.html"><div class="home-icon">🕵️</div><h3>Forensic Audit &amp; Tamper-Evident WAL</h3><p>R06: Hash-chained WAL, forensic queries, Merkle proofs, and exportable proof bundles for compliance or incident response.</p></a>
+  <a class="home-card" href="delta-values.html"><div class="home-icon">🧬</div><h3>Delta-chained Values + ETags</h3><p>Core MVCC storage efficiencies, traffic reduction, cache-coherent reads via ETags, and causal consistency.</p></a>
+  <a class="home-card" href="research-agenda.html"><div class="home-icon">📐</div><h3>Full Research Tracks (R01–R20)</h3><p>Learned indexes, delta chains, vectors, Wasm operators, schema evolution, energy-aware compaction, and more. See the True Status Matrix for hardened vs. prototype.</p></a>
+</div>
+
 <h2 id="suggested-paths">Suggested paths<a class="headerlink" href="#suggested-paths" title="Permanent link">¶</a></h2>
 <ol>
 <li><strong>Application developer</strong>: <a href="quickstart.html">Quickstart</a> → <a href="first-query.html">Your first query (SkeinQL)</a> → <a href="vector-rag.html">Vector RAG retrieval</a> → <a href="mysql-in-5-min.html">MySQL in 5 minutes</a> or <a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a> → <a href="cdc-with-sse.html">CDC with SSE</a>.</li>
@@ -190,6 +210,7 @@
 <ul>
 <li><a href="#new-here-start-with-these-five">New here? Start with these five</a></li>
 <li><a href="#more-guided-walkthroughs">More guided walkthroughs</a></li>
+<li><a href="#advanced-research-features">Advanced &amp; research features</a></li>
 <li><a href="#suggested-paths">Suggested paths</a></li>
 <li><a href="#reference">Reference</a></li>
 <li><a href="#status">Status</a></li>

@@ -106,6 +106,16 @@ NAV: list[Section] = [
         DocPage("transport-quic",         "TRANSPORT_QUIC.md",                 "QUIC transport",               "Internals"),
         DocPage("cas-replication",        "CAS_REPLICATION.md",                "CAS replication",              "Internals"),
     ]),
+    Section("Advanced & Research Features", "🔬", [
+        DocPage("oblivious-execution",    "OBLIVIOUS_EXECUTION.md",            "Oblivious execution (privacy)", "Advanced"),
+        DocPage("incremental-views",      "INCREMENTAL_VIEWS.md",              "Incremental views (pipelines)", "Advanced"),
+        DocPage("audit-wal",              "AUDIT_WAL.md",                      "Audit WAL & forensics",        "Advanced"),
+        DocPage("delta-values",           "DELTA_VALUES.md",                   "Delta-chained values",         "Advanced"),
+        DocPage("merge-functions",        "MERGE_FUNCTIONS.md",                "Merge functions (CRDT)",       "Advanced"),
+        DocPage("index-advisor",          "INDEX_ADVISOR.md",                  "Index advisor",                "Advanced"),
+        DocPage("time-travel-replay",     "TIME_TRAVEL_REPLAY.md",             "Time-travel & replay",         "Advanced"),
+        DocPage("cdc-changefeed",         "CDC_CHANGEFEED.md",                 "CDC changefeed",               "Advanced"),
+    ]),
     Section("Research & Project", "📐", [
         DocPage("research-agenda",        "RESEARCH_AGENDA.md",                "Research agenda",              "Research"),
         DocPage("research-backlog",       "RESEARCH_BACKLOG.md",               "Research backlog",             "Research"),

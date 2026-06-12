@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC</title>
-  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL corpus-backed compatibility, partial PostgreSQL support, CDC changefeeds, and web-native administration.">
-  <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
-  <meta property="og:title" content="SkeinDB — Single-Binary Database">
-  <meta property="og:description" content="Cell-interned MVCC · 147 RPC methods · 20 research tracks (18 hardened / 2 prototype) · MySQL corpus-backed + partial PostgreSQL · One binary">
+  <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC, Deduplication, Forensics &amp; Research</title>
+  <meta name="description" content="SkeinDB: Single Rust binary with content-addressed deduplication, dedup-preserving convergent encryption, tamper-evident forensic audit WAL + proof bundles, query-aware CDC with view/CTE dependency expansion, incremental views, CRDT merges + Wasm, differential privacy + oblivious execution, vector RAG, self-tuning index advisor, MVCC time-travel + replay bundles, ETags, CAS replication, MySQL corpus-backed compatibility, partial PostgreSQL, and 20 research tracks (18 hardened). One executable, full web admin.">
+  <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, deduplication, convergent encryption, audit WAL, forensic, changefeed, CDC, CRDT, merge functions, differential privacy, oblivious execution, vector search, RAG, index advisor, time travel, replay bundles, Wasm UDF, ETag, causal consistency, CAS replication, SkeinQL, Rust, MySQL, PostgreSQL, research">
+  <meta property="og:title" content="SkeinDB — Single-Binary Database with Dedup, Forensics &amp; 20 Research Tracks">
+  <meta property="og:description" content="Cell-interned MVCC · Automatic Dedup + Convergent Encryption · Forensic Proofs · Query-Aware CDC · 147 RPC methods · 20 research tracks (18 hardened / 2 prototype) · MySQL corpus-backed + partial PostgreSQL · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -560,13 +560,11 @@
     Rust · Single Binary · Open Source
   </div>
   <h1>
-    The Database That<br>
-    <span class="grad">Researches Itself</span>
+    One Binary.<br>
+    <span class="grad">Real Storage Smarts + Research Depth</span>
   </h1>
   <p>
-    SkeinDB is a single-binary database combining cell-interned MVCC storage,
-    MySQL corpus-backed compatibility, partial PostgreSQL support, 20 opt-in research features (18 hardened / 2 prototype), CDC changefeeds, and a full web admin —
-    all in one Rust executable.
+    SkeinDB is the single-executable database with cell-interned MVCC and automatic content-addressed deduplication, dedup-preserving convergent encryption, delta-chained values, tamper-evident hash-chained forensic audit WAL with proof bundles, query-aware CDC with automatic dependency expansion, incremental views, client-side merge/CRDT + safe Wasm, differential privacy, oblivious execution, vector RAG, self-tuning index advisor, MVCC time-travel + reproducible replay bundles, ETag cache coherence + causal consistency, CAS replication, and 20 opt-in research tracks (18 hardened).
   </p>
   <div class="hero-actions">
     <a href="#quickstart" class="btn btn-primary">
@@ -617,15 +615,15 @@
 <!-- FEATURES -->
 <section id="features">
   <div class="section-header">
-    <h2>Core Capabilities</h2>
-    <p>Everything ships in one binary. No external dependencies, no cluster of services.</p>
+    <h2>Core Capabilities &amp; Differentiators</h2>
+    <p>Everything ships in one binary. No external dependencies, no cluster of services. Advanced storage, privacy, CDC, extensibility, and forensics are first-class and live in the same process.</p>
   </div>
   <div class="features-grid">
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
-      <h3>Cell-Interned MVCC</h3>
-      <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead. Segment-backed <code>.rseg</code> row storage is now the default serve mode.</p>
+      <h3>Content-Addressed Deduplication</h3>
+      <p>Every cell is hashed to a stable ValueID in the ValueStore. Identical values across rows, versions, tables, and replicas share one physical representation — automatic storage and replication savings with zero app changes. Live <code>dedup_ratio</code> and bytes-saved metrics in <code>stats.snapshot</code> and the admin dashboard (no flags required). Default segment-backed <code>.rseg</code> storage.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -680,6 +678,62 @@
       <div class="feature-icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🌐</div>
       <h3>Cluster Control-Plane</h3>
       <p>9 typed cluster methods for topology lifecycle: join tokens, node admission, shard placement, replica promotion, and RPC fanout replication with recursion suppression.</p>
+    </div>
+
+    <!-- New advanced differentiator cards -->
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔐</div>
+      <h3>Dedup-Preserving Encryption</h3>
+      <p>Opt-in <code>ENC_MLE_DB</code> (message-locked/convergent) mode derives content keys so identical plaintexts within a database/tenant still produce identical ciphertexts — dedup and CAS benefits survive encryption at rest. <code>ENC_RANDOM</code> for stronger confidentiality. Full key registration, rotation plans, re-encryption progress, and redacted audit ring in the SkeinAdmin Encryption panel. Master keys never persisted to disk. See <a href="../docs/site/guide/convergent-encryption.html">convergent-encryption</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R03)</span>
+      <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🧩</div>
+      <h3>Delta-Chained Large Values</h3>
+      <p>Store only diffs for similar TEXT/JSON/BLOB updates across MVCC versions. Policy-driven (min size, max chain depth, snapshot interval, min savings) with geometric skip patches, compaction-time rebasing/rewrites, and topology reports. Preserves stable ValueIDs and full-hash validation. See <a href="../docs/site/guide/delta-values.html">delta-values</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R06)</span>
+      <div class="feature-icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🕵️</div>
+      <h3>Tamper-Evident Audit WAL + Forensics</h3>
+      <p>BLAKE3-256 hash-chained WAL with checkpoint anchors. Forensic queries with JSON filters, Merkle inclusion proofs, boundary hashes, and exportable <code>skein.forensic.bundle.v1</code> proof bundles for incident response or compliance. <code>forensic.query</code> / <code>verify</code> / <code>export</code> + SkeinAdmin Forensics panel. Verify chain integrity in one RPC. See <a href="../docs/site/guide/audit-wal.html">audit-wal</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-prototype">Partial (Strong Local)</span>
+      <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">📡</div>
+      <h3>Query-Aware CDC Changefeeds</h3>
+      <p>Table and prepared-query subscriptions with durable cursors, row images (before/after opt-in), source-op / exact-PK / inclusive-PK-range / changed-column filters, and <code>objects_json</code> or <code>plain_json</code> formats. Dependency expansion automatically maps views, CTEs, UNIONs, and set-ops to real base tables for correct invalidations. Polling + SSE + WebSocket streams, pause/resume, backpressure, resnapshot signaling. Live lag/pressure in stats and SkeinAdmin CDC panel. See <a href="../docs/site/guide/cdc-changefeed.html">cdc-changefeed</a> and <a href="../docs/site/guide/cdc-with-sse.html">SSE tutorial</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R08)</span>
+      <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">📊</div>
+      <h3>Incremental Materialized Views</h3>
+      <p><code>view.create</code> / <code>drop</code> / <code>refresh</code> (full / incremental / auto) / <code>evaluate</code> (deterministic oracle + benchmark vs. full recompute) / <code>status</code> / <code>explain_deps</code>. Column-granular dependency tracking, persisted contributing rows for grouped views, auto full-refresh fallback, and catalog shims for MySQL/PG tools. See <a href="../docs/site/guide/incremental-views.html">incremental-views</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R07)</span>
+      <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🔀</div>
+      <h3>Optimistic Merge Functions + CRDT</h3>
+      <p>Per-table policies with built-ins (last-write-wins, sum, set_union, object_merge, etc.) and values-only Wasm modules. <code>merge.apply</code> (ETag + min_causality guarded), <code>simulate</code>, <code>evaluate</code> (conflict rates + timing reports). Safe sandbox with fuel/timeout cancellation. Offline queue interchange format for clients. Perfect for edge/offline-first apps. See <a href="../docs/site/guide/merge-functions.html">merge-functions</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R04/R05)</span>
+      <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🛡️</div>
+      <h3>Differential Privacy + Oblivious Execution</h3>
+      <p><code>dp.*</code> aggregates (COUNT/SUM/AVG) with persisted budgets, audit, seeded Laplace/Gaussian noise, RDP composition, and privacy ETags. Per-table oblivious policies, padded scans, dummy lookups, explain/evaluate with leakage/overhead traces. Privacy lab in SkeinAdmin. See <a href="../docs/site/guide/oblivious-execution.html">oblivious-execution</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R16)</span>
+      <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">📈</div>
+      <h3>Self-Tuning Index Advisor</h3>
+      <p>Workload telemetry + dependency analysis synthesizes ranked composite/covering suggestions with read-benefit vs. write/compaction overhead scoring. <code>advisor.*</code> (synthesize/apply/retire/evaluate/history) with before/after latency benchmarks for joins/ranges/grouped. Live ranked page in SkeinAdmin. See <a href="../docs/site/guide/index-advisor.html">index-advisor</a>.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Hardened (R14; R18 Prototype)</span>
+      <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">⏳</div>
+      <h3>Time Travel + Reproducible Replay Bundles</h3>
+      <p>MVCC <code>as_of</code> queries (session var or hint; works over MySQL wire too) with retention policy + GC. Export deterministic bundles (schema + retained versions + change metadata + checksums + optional PK redaction + R18 performance profiles). Import/run anywhere for debugging, regression testing, or edge use. SkeinAdmin Time Travel &amp; Replay panel + full CLI. See <a href="../docs/site/guide/time-travel-replay.html">time-travel-replay</a> and <a href="../docs/site/guide/replay-bundles-and-integrity.html">replay tutorial</a>.</p>
     </div>
   </div>
 </section>
@@ -769,29 +823,29 @@
 <section id="research">
   <div class="section-header">
     <h2>20 Research Tracks</h2>
-    <p>Each track has RPC methods, a dedicated admin panel, and automated test coverage. Click any track for details.</p>
+    <p>Each track has RPC methods, a dedicated admin panel, and automated test coverage. <strong>18 hardened / 2 prototype</strong> (see the authoritative <a href="../docs/site/guide/true-status-matrix.html">True Status Matrix</a>). Click any track for details.</p>
   </div>
   <div class="tracks-grid">
-    <a class="track" href="../docs/site/research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
-    <a class="track" href="../docs/site/research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
-    <a class="track" href="../docs/site/research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
-    <a class="track" href="../docs/site/research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
-    <a class="track" href="../docs/site/research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
-    <a class="track" href="../docs/site/research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
-    <a class="track" href="../docs/site/research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
-    <a class="track" href="../docs/site/research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
-    <a class="track" href="../docs/site/research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
-    <a class="track" href="../docs/site/research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
-    <a class="track" href="../docs/site/research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
-    <a class="track" href="../docs/site/research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
-    <a class="track" href="../docs/site/research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
-    <a class="track" href="../docs/site/research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
-    <a class="track" href="../docs/site/research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
-    <a class="track" href="../docs/site/research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
-    <a class="track" href="../docs/site/research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
-    <a class="track" href="../docs/site/research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
-    <a class="track" href="../docs/site/research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
-    <a class="track" href="../docs/site/research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
+    <a class="track" href="../docs/site/research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL) <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT) <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
+    <a class="track" href="../docs/site/research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay <small style="color:var(--amber);font-size:.65rem">(Prototype)</small></span></a>
+    <a class="track" href="../docs/site/research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators <small style="color:var(--amber);font-size:.65rem">(Prototype)</small></span></a>
+    <a class="track" href="../docs/site/research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction <small style="color:var(--green);font-size:.65rem">(Hardened)</small></span></a>
   </div>
 </section>
 

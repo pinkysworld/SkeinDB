@@ -36,13 +36,29 @@ The repo is intentionally written so you can read it in two ways:
    - `WASM_UDFS.md` (sandboxed extensions)
    - includes table row `format_version: 2` ValueID ref encoding (prototype)
 
-5) **Clustering & operations**
+5) **Privacy, Security & Compliance**
+   - `CONVERGENT_ENCRYPTION.md` (dedup-preserving convergent encryption + key rotation)
+   - `OBLIVIOUS_EXECUTION.md` (oblivious policies, padded execution, DP via R04)
+   - `AUDIT_WAL.md` (forensic queries + proof bundles)
+   - `ETAG_VALIDATORS.md` + `TRAFFIC_REDUCTION.md` (cache coherence, causal ETags)
+   - See also the Privacy lab and Forensics panels in SkeinAdmin.
+
+6) **Advanced Storage, Views & Pipelines**
+   - `INCREMENTAL_VIEWS.md` (materialized view maintenance, dependency graphs, R08)
+   - `DELTA_VALUES.md` + `COLUMN_SNAPSHOTS.md` (delta chains, hybrid snapshots)
+   - `CDC_CHANGEFEED.md` (query-aware changefeeds with view/CTE expansion)
+   - `MERGE_FUNCTIONS.md` (CRDT merges + Wasm, offline queue)
+   - `CAS_REPLICATION.md` + `TIME_TRAVEL_REPLAY.md` (CAS moves, MVCC time travel, replay bundles)
+   - `INDEX_ADVISOR.md` (self-tuning synthesis + evaluate benchmarks, R16)
+
+7) **Clustering & operations**
    - `CLUSTERING.md` (cluster configuration and goals)
    - `OBSERVABILITY.md` (server load / stats endpoint)
    - `RELEASE_PACKAGING.md` (tag-driven release assets, Homebrew formula rendering, optional apt signing)
    - `TELEMETRY_AND_MIGRATION.md` (compatibility telemetry + migration hints)
+   - `COMPACTION_SCHEDULER.md` (including energy-aware R20)
 
-6) **Research roadmap**
+8) **Research roadmap**
    - `RESEARCH_AGENDA.md` (20-track research agenda + priorities)
    - `TRUE_STATUS_MATRIX.md` (short current truth snapshot for compatibility, partial core phases, and research maturity)
    - `RESEARCH_BACKLOG.md` (task inventory for the research tracks)

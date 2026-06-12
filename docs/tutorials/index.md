@@ -32,6 +32,16 @@ This site is organised into six sections:
   <a class="home-card" href="replay-bundles-and-integrity.html"><div class="home-icon">🧾</div><h3>Replay bundles and integrity</h3><p>Export a deterministic replay bundle, import it into a workspace, and verify checksums.</p></a>
 </div>
 
+## Advanced & research features
+
+<div class="home-grid">
+  <a class="home-card" href="oblivious-execution.html"><div class="home-icon">🛡️</div><h3>Privacy &amp; Differential Privacy</h3><p>R04/R05: DP aggregates with Laplace noise, oblivious execution for access-pattern protection, budgets, audit, and privacy ETags.</p></a>
+  <a class="home-card" href="incremental-views.html"><div class="home-icon">🔄</div><h3>Incremental Views &amp; Pipelines</h3><p>R08: Dependency-graph materialized view maintenance, refresh modes, evaluate, explain_deps, and tight integration with CDC/ETags.</p></a>
+  <a class="home-card" href="audit-wal.html"><div class="home-icon">🕵️</div><h3>Forensic Audit &amp; Tamper-Evident WAL</h3><p>R06: Hash-chained WAL, forensic queries, Merkle proofs, and exportable proof bundles for compliance or incident response.</p></a>
+  <a class="home-card" href="delta-values.html"><div class="home-icon">🧬</div><h3>Delta-chained Values + ETags</h3><p>Core MVCC storage efficiencies, traffic reduction, cache-coherent reads via ETags, and causal consistency.</p></a>
+  <a class="home-card" href="research-agenda.html"><div class="home-icon">📐</div><h3>Full Research Tracks (R01–R20)</h3><p>Learned indexes, delta chains, vectors, Wasm operators, schema evolution, energy-aware compaction, and more. See the True Status Matrix for hardened vs. prototype.</p></a>
+</div>
+
 ## Suggested paths
 
 1. **Application developer**: [Quickstart](quickstart.html) → [Your first query (SkeinQL)](first-query.html) → [Vector RAG retrieval](vector-rag.html) → [MySQL in 5 minutes](mysql-in-5-min.html) or [PostgreSQL in 5 minutes](postgresql-in-5-min.html) → [CDC with SSE](cdc-with-sse.html).
