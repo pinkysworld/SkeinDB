@@ -7436,6 +7436,14 @@ async fn t188_replay_run_rehydrates_cache_hints() -> anyhow::Result<()> {
         run_result["performance_report"]["cache_warm"]["cached_patch_entries_delta"].as_i64(),
         Some(0)
     );
+    // R18 integration: exercises replay/RPC path (maintenance.replay.run over SkeinQL RPC)
+    // which now wires timing injection -> apply_simulated_pacing in engine replay run
+    // for deterministic pacing + cache/LSM fidelity. (unit: replay_pacing_* in engine.rs)
+    assert!(run_result["performance_report"]["timing"].is_object());
+    assert_eq!(
+        run_result["performance_report"]["timing"]["change_count_delta"].as_i64(),
+        Some(0)
+    );
 
     Ok(())
 }

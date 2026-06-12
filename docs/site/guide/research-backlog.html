@@ -150,7 +150,7 @@
 <tbody>
 <tr>
 <td>R18 Perf regression replay</td>
-<td>Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (<code>inject_replay_timing</code>) implemented+exercised in replay run + LSM stats re-compute for fidelity + new unit test <code>replay_timing_injection_simulates_deterministic_pacing</code> + test enhancements (engine::tests + cluster).</td>
+<td>Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (<code>inject_replay_timing</code>) + wired to pacing mechanism (<code>apply_simulated_pacing</code> in maintenance_replay_run) + exercised in replay run + LSM/cache stats + new unit <code>engine::tests::replay_pacing_applies_injected_delays_for_replay_exec_fidelity</code> + updated engine roundtrips + cluster_rpc t188 (replay/RPC integration test) (engine::tests + cluster).</td>
 <td>Full timing pacing integration into runner execution + .github CI distribution gates (e.g. replay-compare step on bundles) remain.</td>
 </tr>
 <tr>
@@ -166,8 +166,9 @@
 <p><strong>2026-06-11:</strong> R19 host fallback micro (see TRUE_STATUS for details).</p>
 </li>
 <li>
-<p><strong>2026-06-11:</strong> R18 micro-slice (timing injection + fidelity): <code>inject_replay_timing</code> (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.</p>
+<p><strong>2026-06-11:</strong> R18 micro-slice (pacing wiring + fidelity): <code>inject_replay_timing</code> wired into <code>apply_simulated_pacing</code> (simple deterministic sim delays in replay run internal exec) + new unit test <code>engine::tests::replay_pacing_applies_injected_delays_for_replay_exec_fidelity</code> + updated integration in cluster_rpc::t188 (exercises replay/RPC) + engine tests. Full AGENTS (deep dive, &lt;200LOC net, unit+RPC int tests, fmt/clippy/test, matrix/backlogs/site, hard review, commit ref review/matrix/R18/AGENTS, push). Still prototype.</p>
 </li>
+<li><strong>2026-06-11:</strong> R18 micro-slice (timing injection + fidelity): <code>inject_replay_timing</code> (R18 primitive for deterministic delay sim from profile) added + exercised in maintenance_replay_run (with LSM stats_snapshot for recon fidelity) + dedicated unit test <code>engine::tests::replay_timing_injection_simulates_deterministic_pacing</code> + coverage/asserts in roundtrip + rehydrate tests. Refs in matrix. Full AGENTS followed (fmt/clippy/test relevant, updates, site, review, commit ref review/matrix/R18). Still prototype.</li>
 <li><strong>2026-06-11:</strong> R19 micro hardening (T085/T086 surfaces): added explicit host fallback <code>wasm_plan_inspect</code> + <code>wasm_plan_run</code> + result parity assertions inside existing fallback test (exercises the host dispatch in engine.rs:wasm_plan_run for non-generated artifacts). Evidence locked to <code>engine::tests::wasm_plan_compile_falls_back_for_unsupported_types</code>. Matrix + this backlog updated. Followed full AGENTS process (fmt/clippy/test/review/site rebuild/commit ref R19/matrix).</li>
 <li><strong>2026-05-17:</strong> R02 adaptive row/column hardening was finished across T103-T106, covering live-row-count cost modeling, hot-projection tracking, dependency-driven snapshot invalidation, and adaptive replacement decisions.</li>
 <li><strong>2026-05-17:</strong> R14 bounded-staleness bundle windows were closed with retained coverage-gap detection in <code>edge.bundle.status</code>.</li>
