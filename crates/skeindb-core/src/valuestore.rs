@@ -966,7 +966,7 @@ impl ValueStore {
         };
 
         // Sort hot chains by depth (worst first).
-        hot_chains.sort_by(|a, b| b.depth.cmp(&a.depth));
+        hot_chains.sort_by_key(|c| std::cmp::Reverse(c.depth));
         hot_chains.truncate(20);
 
         let savings_ratio = if total_cell_bytes + total_delta_bytes > 0 {

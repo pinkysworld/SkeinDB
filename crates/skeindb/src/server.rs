@@ -24,7 +24,7 @@ use axum::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use skeindb_skeinql::{
     methods::{
@@ -19135,7 +19135,7 @@ pub(crate) async fn handle_rpc(
                             last_seen_ms: v.last_seen_ms,
                         })
                         .collect();
-                    flags.sort_by(|a, b| b.hit_count.cmp(&a.hit_count));
+                    flags.sort_by_key(|b| std::cmp::Reverse(b.hit_count));
                     let total_queries = counters.total_rpc;
                     Ok(serde_json::to_value(
                         skeindb_skeinql::methods::TelemetryFeatureFlagsResult {
@@ -33178,9 +33178,9 @@ async fn maintenance_compaction_status(state: &AppState) -> Value {
 async fn stats_snapshot(state: &AppState) -> Value {
     // sysinfo is cross-platform; we keep fields minimal and optional.
     let mut sys = System::new();
-    sys.refresh_processes();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.refresh_memory();
-    sys.refresh_cpu();
+    sys.refresh_cpu_usage();
 
     let pid = Pid::from_u32(std::process::id());
     let proc = sys.process(pid);
@@ -33189,7 +33189,8 @@ async fn stats_snapshot(state: &AppState) -> Value {
         Some(p) => {
             // `cpu_usage` is a percentage of a single core in sysinfo.
             let cpu = p.cpu_usage() as f64;
-            let rss = p.memory() * 1024;
+            // `memory()` returns bytes (sysinfo >= 0.30).
+            let rss = p.memory();
             (cpu, rss)
         }
         None => (0.0, 0),
