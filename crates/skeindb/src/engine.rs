@@ -2295,7 +2295,7 @@ impl Engine {
             .into_iter()
             .map(|(id, bytes)| ObjectManifestEntry { id, bytes })
             .collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        entries.sort_by_key(|a| a.id);
         let total_bytes = entries.iter().map(|entry| entry.bytes).sum();
         Ok(ObjectManifest {
             entries,
@@ -4317,7 +4317,7 @@ impl Engine {
             .into_values()
             .filter(is_active_advisor_apply)
             .collect::<Vec<_>>();
-        latest.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        latest.sort_by_key(|b| std::cmp::Reverse(b.updated_at_ms));
         if latest.len() > limit {
             latest.truncate(limit);
         }
@@ -4542,7 +4542,7 @@ impl Engine {
             })
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.created_at_ms));
         if entries.len() > limit {
             entries.truncate(limit);
         }
@@ -9897,7 +9897,7 @@ impl Engine {
         let (columns, rows, keys) = execute_select_with_keys(self, &view.query, &[], None)?;
         let mut view_rows = Vec::new();
         let mut pk_index = HashMap::new();
-        for (idx, (pk, values)) in keys.into_iter().zip(rows.into_iter()).enumerate() {
+        for (idx, (pk, values)) in keys.into_iter().zip(rows).enumerate() {
             pk_index.insert(pk_key(&pk), idx);
             view_rows.push(ViewRow { pk, values });
         }
@@ -12098,7 +12098,7 @@ impl Engine {
                         row: row.row.clone(),
                     })
                     .collect::<Vec<_>>();
-                source_rows.sort_by(|a, b| pk_key(&a.pk).cmp(&pk_key(&b.pk)));
+                source_rows.sort_by_key(|a| pk_key(&a.pk));
                 ViewEntryDisk {
                     db: view.db.clone(),
                     name: view.name.clone(),
@@ -12122,7 +12122,7 @@ impl Engine {
                 }
             })
             .collect::<Vec<_>>();
-        views.sort_by(|a, b| (a.db.clone(), a.name.clone()).cmp(&(b.db.clone(), b.name.clone())));
+        views.sort_by_key(|a| (a.db.clone(), a.name.clone()));
         let _ = save_json(
             &self.views_path(),
             &ViewDisk {
@@ -12202,8 +12202,7 @@ impl Engine {
                 version: *version,
             })
             .collect::<Vec<_>>();
-        versions
-            .sort_by(|a, b| (a.db.clone(), a.table.clone()).cmp(&(b.db.clone(), b.table.clone())));
+        versions.sort_by_key(|a| (a.db.clone(), a.table.clone()));
         let _ = save_json(
             &self.schema_versions_path(),
             &SchemaVersionsDisk {
@@ -12315,8 +12314,7 @@ impl Engine {
                 })
             })
             .collect::<Vec<_>>();
-        tables
-            .sort_by(|a, b| (a.db.clone(), a.table.clone()).cmp(&(b.db.clone(), b.table.clone())));
+        tables.sort_by_key(|a| (a.db.clone(), a.table.clone()));
         let _ = save_json(
             &self.schema_flags_path(),
             &SchemaFlagsDisk {
@@ -12482,7 +12480,7 @@ impl Engine {
     }
 
     fn merge_edge_coverage_windows(windows: &mut Vec<EdgeCoverage>) {
-        windows.sort_by(|a, b| (a.start_seq, a.end_seq).cmp(&(b.start_seq, b.end_seq)));
+        windows.sort_by_key(|a| (a.start_seq, a.end_seq));
         let mut merged: Vec<EdgeCoverage> = Vec::with_capacity(windows.len());
         for current in windows.drain(..) {
             if let Some(last) = merged.last_mut() {
@@ -29935,11 +29933,12 @@ fn advisor_secondary_index_scan_rows(
     }
 
     let range_bound = filters.range_filters.first().and_then(|range_filter| {
-        index
+        // Not `Option::zip`: the column position lookup depends on `range_filter`.
+        let position = index
             .columns
             .iter()
-            .position(|column| column.eq_ignore_ascii_case(&range_filter.column))
-            .map(|position| (position, range_filter))
+            .position(|column| column.eq_ignore_ascii_case(&range_filter.column))?;
+        Some((position, range_filter))
     });
 
     let mut key_rows = index
@@ -30080,7 +30079,7 @@ fn advisor_secondary_index_ordered_row_ids(
 
     let mut rows = Vec::new();
     for candidates in ordered_keys.into_iter() {
-        rows.extend(candidates.into_iter());
+        rows.extend(candidates);
     }
     rows.retain(|idx| {
         tdata
@@ -31159,7 +31158,7 @@ fn build_grouped_view_rows(
     }
 
     let mut grouped = groups.into_values().collect::<Vec<_>>();
-    grouped.sort_by(|a, b| pk_key(&a.0).cmp(&pk_key(&b.0)));
+    grouped.sort_by_key(|a| pk_key(&a.0));
 
     let mut rows = Vec::new();
     let mut pk_index = HashMap::new();
