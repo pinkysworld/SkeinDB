@@ -1,6 +1,5 @@
-//! Storage mode handling extracted from the monolithic engine.
-//! Part of monolith split effort (reviewer recommendation B) to improve maintainability
-//! for all future hardening work on partial areas.
+//! Storage mode parsing and the decision helpers that route row persistence,
+//! extracted from the monolithic engine to keep mode logic in one place.
 
 use std::path::Path;
 
@@ -46,30 +45,17 @@ impl TableStorageMode {
     }
 
     /// Returns true for modes where core MANIFEST/WAL/LSM pipeline files are expected
-    /// (alongside or instead of prototype table snapshots). Centralizes mode decision
-    /// in the extracted storage_mode module (B monolith split).
-    /// Delegates to uses_segment for now (Segment/Dual); Json never expects core LSM files.
-    /// Used by engine core_lsm_files_active observability (A storage pipeline micro).
+    /// alongside the row segments. Segment/Dual use `.rseg`; Json never expects core
+    /// LSM files. Backs the `core_lsm_files_active` storage observability check.
     pub(crate) fn expects_core_lsm_files(&self) -> bool {
         self.uses_segment()
     }
-
-    /// Primary on-disk extension used for row data under this mode (for docs/observability).
-    #[allow(dead_code)]
-    pub(crate) fn primary_row_extension(&self) -> &'static str {
-        if self.uses_segment() {
-            "rseg"
-        } else {
-            "json"
-        }
-    }
 }
 
-/// Pure helper extracted to storage_mode (B monolith split): centralizes the
-/// decision + core ManifestReader + fs walk for whether core LSM pipeline
-/// (MANIFEST + at least one wal-*.log) files are present for the mode.
-/// Engine and any future server paths now delegate here instead of duplicating.
-/// Uses full typed ManifestReader::open (complements A storage pipeline work).
+/// Returns whether the core LSM pipeline files (`MANIFEST.log` plus at least one
+/// `wal-*.log`) are present in `data_dir` for the given storage mode. Json mode
+/// never uses them; segment/dual modes expect them alongside the `.rseg` files.
+/// Backs the `core_lsm_files_active` storage observability stat.
 pub(crate) fn lsm_pipeline_files_active(data_dir: &Path, mode: TableStorageMode) -> bool {
     if !mode.expects_core_lsm_files() {
         return false;
@@ -89,26 +75,4 @@ pub(crate) fn lsm_pipeline_files_active(data_dir: &Path, mode: TableStorageMode)
         }
     }
     false
-}
-
-/// Centralized decision helper (B: monolith split) for routing replay
-/// materialize / future primary load/persist paths. For segment/hybrid modes
-/// we route the replayed tables' materialization through core Manifest/WAL/
-/// RowSeg writers (A: progress on primary LSM row path; only in isolated
-/// replay workspaces so far — no user table row format or main data/ change).
-pub(crate) fn should_bootstrap_core_lsm_for_replay_materialize(mode: TableStorageMode) -> bool {
-    mode.expects_core_lsm_files()
-}
-
-/// Small stub selector (A: toward streaming/large-table read support without
-/// full in-mem materialization). For segment mode future will select
-/// RowSegmentReader + RowDir/MVCC over core files; today documents the intent.
-/// (Interleaves R18 replay which relies on post-materialize stats snapshots.)
-#[allow(dead_code)]
-pub(crate) fn select_streaming_row_path_stub(mode: TableStorageMode) -> &'static str {
-    if mode.uses_segment() {
-        "core_lsm_rowseg_reader_stub"
-    } else {
-        "json_full_materialize"
-    }
 }
