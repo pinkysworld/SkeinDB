@@ -127,15 +127,20 @@ const MYSQL_CAP_SECURE_CONNECTION: u32 = 0x0000_8000;
 const MYSQL_CAP_PLUGIN_AUTH: u32 = 0x0008_0000;
 const MYSQL_CAP_CONNECT_ATTRS: u32 = 0x0010_0000;
 const MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA: u32 = 0x0020_0000;
-const MYSQL_CAP_DEPRECATE_EOF: u32 = 0x0100_0000;
+// NOTE: CLIENT_DEPRECATE_EOF (0x0100_0000) is intentionally NOT advertised. The
+// result-set encoder (`mysql_send_text_result` and the binary result path) emits
+// the classic protocol — an intermediate EOF after the column definitions and a
+// trailing EOF after the rows — rather than the deprecate-EOF form (no
+// intermediate EOF, trailing OK packet). Advertising a capability we do not
+// implement made strict clients (the MariaDB `mysql` CLI) reject the result with
+// "Malformed packet (2027)"; lenient drivers (mysql2, PyMySQL) tolerated it.
 const MYSQL_SERVER_CAPABILITIES: u32 = MYSQL_CAP_LONG_PASSWORD
     | MYSQL_CAP_CONNECT_WITH_DB
     | MYSQL_CAP_PROTOCOL_41
     | MYSQL_CAP_SECURE_CONNECTION
     | MYSQL_CAP_PLUGIN_AUTH
     | MYSQL_CAP_CONNECT_ATTRS
-    | MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA
-    | MYSQL_CAP_DEPRECATE_EOF;
+    | MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA;
 
 fn admin_index_html() -> &'static str {
     ADMIN_INDEX_HTML
@@ -39854,6 +39859,23 @@ mod tests {
         let seed = [42u8; 20];
         let packet = mysql_handshake_packet(7, &seed, true);
         assert_ne!(mysql_handshake_capabilities(&packet) & MYSQL_CAP_SSL, 0);
+    }
+
+    #[test]
+    fn mysql_handshake_packet_does_not_advertise_deprecate_eof() {
+        // `mysql_send_text_result` (and the binary result path) emit classic EOF
+        // packets, so the server must not negotiate CLIENT_DEPRECATE_EOF
+        // (0x0100_0000): advertising it desynced strict clients such as the
+        // MariaDB `mysql` CLI, which rejected results with "Malformed packet".
+        const CLIENT_DEPRECATE_EOF: u32 = 0x0100_0000;
+        for tls_available in [false, true] {
+            let packet = mysql_handshake_packet(7, &[42u8; 20], tls_available);
+            assert_eq!(
+                mysql_handshake_capabilities(&packet) & CLIENT_DEPRECATE_EOF,
+                0,
+                "server must not advertise a deprecate-EOF protocol it does not implement"
+            );
+        }
     }
 
     /// Decode the 32-bit capability flags from a server handshake packet,
