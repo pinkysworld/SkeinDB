@@ -73,7 +73,7 @@ jobs:
             --output dist/Formula/skeindb.rb
 
       - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/skeindb-${{ steps.resolve_version.outputs.version }}-source.tar.gz
@@ -176,7 +176,7 @@ jobs:
             --output dist
 
       - name: Publish signed macOS release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/skeindb-${{ steps.resolve_version.outputs.version }}-macos-*.tar.gz
