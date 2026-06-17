@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Groups coordinated RustCrypto and HTTP/web-stack dependency bumps in Dependabot and adds a router-construction regression test so `axum` path-syntax breakage is caught by CI before fragmented upgrade PRs land.
+
 ## v0.3.20 - 2026-06-11
 
 - Adds **opt-in TLS** on the MySQL and PostgreSQL wire listeners via `serve --tls-cert <pem> --tls-key <pem>`: the PostgreSQL listener answers `SSLRequest` with `S` and completes a rustls handshake before startup, and the MySQL listener advertises `CLIENT_SSL` and upgrades after the short SSLRequest packet. Without a configured certificate both listeners stay plaintext (PG replies `N`; MySQL omits `CLIENT_SSL` and rejects an SSL request). The wire handlers now operate over a `MaybeTlsStream` so the full protocol surface works identically over plaintext and TLS.
