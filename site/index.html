@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC, Deduplication, Forensics &amp; Research</title>
-  <meta name="description" content="SkeinDB: Single Rust binary with content-addressed deduplication, dedup-preserving convergent encryption, tamper-evident forensic audit WAL + proof bundles, query-aware CDC with view/CTE dependency expansion, incremental views, CRDT merges + Wasm, differential privacy + oblivious execution, vector RAG, self-tuning index advisor, MVCC time-travel + replay bundles, ETags, CAS replication, MySQL corpus-backed compatibility, partial PostgreSQL, and 20 research tracks (18 hardened). One executable, full web admin.">
+  <meta name="description" content="SkeinDB: Single Rust binary with content-addressed deduplication, WAL-backed row recovery, dedup-preserving convergent encryption, tamper-evident forensic audit WAL + proof bundles, query-aware CDC with view/CTE dependency expansion, incremental views, CRDT merges + Wasm, differential privacy + oblivious execution, vector RAG, self-tuning index advisor, MVCC time-travel + replay bundles, ETags, CAS replication, MySQL corpus-backed compatibility, and partial PostgreSQL with stronger admin-tool introspection. One executable, full web admin.">
   <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, deduplication, convergent encryption, audit WAL, forensic, changefeed, CDC, CRDT, merge functions, differential privacy, oblivious execution, vector search, RAG, index advisor, time travel, replay bundles, Wasm UDF, ETag, causal consistency, CAS replication, SkeinQL, Rust, MySQL, PostgreSQL, research">
   <meta property="og:title" content="SkeinDB — Single-Binary Database with Dedup, Forensics &amp; 20 Research Tracks">
-  <meta property="og:description" content="Cell-interned MVCC · Automatic Dedup + Convergent Encryption · Forensic Proofs · Query-Aware CDC · 147 RPC methods · 20 research tracks (18 hardened / 2 prototype) · MySQL corpus-backed + partial PostgreSQL · One binary">
+  <meta property="og:description" content="Cell-interned MVCC · WAL-backed row recovery bridge · Automatic Dedup + Convergent Encryption · Forensic Proofs · Query-Aware CDC · 147 RPC methods · 20 research tracks (18 hardened / 2 prototype) · MySQL corpus-backed + partial PostgreSQL with stronger admin introspection · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -623,7 +623,7 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
       <h3>Content-Addressed Deduplication</h3>
-      <p>Every cell is hashed to a stable ValueID in the ValueStore. Identical values across rows, versions, tables, and replicas share one physical representation — automatic storage and replication savings with zero app changes. Live <code>dedup_ratio</code> and bytes-saved metrics in <code>stats.snapshot</code> and the admin dashboard (no flags required). Default segment-backed <code>.rseg</code> storage.</p>
+      <p>Every cell is hashed to a stable ValueID in the ValueStore. Identical values across rows, versions, tables, and replicas share one physical representation — automatic storage and replication savings with zero app changes. Live <code>dedup_ratio</code> and bytes-saved metrics in <code>stats.snapshot</code> and the admin dashboard (no flags required). Default segment-backed <code>.rseg</code> storage now has a WAL-backed recovery bridge for committed row mutations between checkpoints.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -635,7 +635,7 @@
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables for tables/views, roles/users, indexes, tablespaces, sequences, statistics, and database health, plus common bootstrap probes like <code>SHOW server_version</code> and <code>current_setting(...)</code> backed by the shared engine.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables for tables/views, roles/users, indexes, tablespaces, sequences, statistics, and database health, plus common bootstrap probes like <code>SHOW server_version</code> and <code>current_setting(...)</code> backed by the shared engine. Recent hardening adds pgAdmin/DBeaver-style introspection coverage and typed empty <code>pg_stat_*</code>/<code>pg_locks</code> surfaces where SkeinDB does not yet expose a real runtime statistic.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>

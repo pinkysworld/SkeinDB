@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Groups coordinated RustCrypto and HTTP/web-stack dependency bumps in Dependabot and adds a router-construction regression test so `axum` path-syntax breakage is caught by CI before fragmented upgrade PRs land.
+- Adds a **WAL-backed storage recovery bridge** around the live JSON/segment row snapshots: committed row `insert` / `update` / `delete` mutations now log through the core WAL primitives, snapshots persist `last_applied_lsn`, startup replays only newer committed mutations, torn WAL tails are truncated, and `stats.snapshot.storage` reports replay/checkpoint state.
+- Hardens **PostgreSQL admin-tool compatibility** with live pgAdmin/DBeaver-style introspection fixtures, new typed empty virtual tables for `pg_stat_all_tables`, `pg_stat_user_tables`, `pg_stat_all_indexes`, `pg_stat_user_indexes`, and `pg_locks`, plus extended-protocol regression coverage for described admin catalog queries.
+- Refreshes the True Status Matrix, PG compatibility docs, observability/on-disk docs, generated docs site pages, README, and public website copy so the repo and site reflect the current storage and PostgreSQL truth surfaces.
 
 ## v0.3.20 - 2026-06-11
 
