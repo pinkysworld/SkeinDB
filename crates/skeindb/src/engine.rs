@@ -26,7 +26,7 @@ use base64::Engine as _;
 use md5::Md5;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
+use sha1::Sha1;
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 use wasmtime::{
     Engine as WasmRuntimeEngine, Instance as WasmInstance, Module as WasmModule, Store as WasmStore,
@@ -9344,7 +9344,7 @@ impl Engine {
         let (artifact, artifact_bytes) = decode_wasm_plan_artifact(&params.artifact_b64)?;
         let info = wasm_plan_info_from_artifact(&artifact, artifact_bytes)?;
         let raw_artifact = BASE64_STANDARD.decode(params.artifact_b64.as_bytes())?;
-        let artifact_sha256 = hex_encode(&Sha256::digest(&raw_artifact));
+        let artifact_sha256 = hex_encode(&<Sha256 as sha2::Digest>::digest(&raw_artifact));
         let manifest_json = serde_json::to_string_pretty(&serde_json::json!({
             "format": "skein.wasm.edge_package.v1",
             "package_name": package_name,
@@ -20211,7 +20211,7 @@ fn eval_expr(
                     let Some(s) = lit_to_string_for_like(&value) else {
                         return Ok(Lit::Null);
                     };
-                    let digest = Md5::digest(s.as_bytes());
+                    let digest = <Md5 as md5::Digest>::digest(s.as_bytes());
                     Ok(Lit::Str {
                         v: hex_encode(&digest),
                     })
@@ -20224,7 +20224,7 @@ fn eval_expr(
                     let Some(s) = lit_to_string_for_like(&value) else {
                         return Ok(Lit::Null);
                     };
-                    let digest = Sha1::digest(s.as_bytes());
+                    let digest = <Sha1 as sha1::Digest>::digest(s.as_bytes());
                     Ok(Lit::Str {
                         v: hex_encode(&digest),
                     })
@@ -20242,10 +20242,10 @@ fn eval_expr(
                         return Ok(Lit::Null);
                     };
                     let hex = match hash_len {
-                        224 => hex_encode(&Sha224::digest(s.as_bytes())),
-                        256 | 0 => hex_encode(&Sha256::digest(s.as_bytes())),
-                        384 => hex_encode(&Sha384::digest(s.as_bytes())),
-                        512 => hex_encode(&Sha512::digest(s.as_bytes())),
+                        224 => hex_encode(&<Sha224 as sha2::Digest>::digest(s.as_bytes())),
+                        256 | 0 => hex_encode(&<Sha256 as sha2::Digest>::digest(s.as_bytes())),
+                        384 => hex_encode(&<Sha384 as sha2::Digest>::digest(s.as_bytes())),
+                        512 => hex_encode(&<Sha512 as sha2::Digest>::digest(s.as_bytes())),
                         _ => return Ok(Lit::Null),
                     };
                     Ok(Lit::Str { v: hex })

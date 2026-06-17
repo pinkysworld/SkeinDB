@@ -6,7 +6,7 @@ use aes_gcm_siv::{
 };
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use thiserror::Error;
 
 use crate::{decode_varu, encode_varu, ValueKind};
@@ -411,7 +411,7 @@ impl DatabaseKeyManager {
                 let master_key = self.lookup_key(&db_id, &key_id)?;
                 let content_key = derive_key(master_key, None, ENC_RANDOM_INFO)?;
                 let mut nonce = [0u8; ENCRYPTION_NONCE_LEN];
-                getrandom::getrandom(&mut nonce)
+                getrandom::fill(&mut nonce)
                     .map_err(|err| EncryptionError::Entropy(err.to_string()))?;
                 let ciphertext = encrypt_with_key(&content_key, &nonce, &aad, plaintext)?;
                 Ok(EncryptionEnvelope {
@@ -430,7 +430,7 @@ impl DatabaseKeyManager {
                     .clone()
                     .ok_or_else(|| EncryptionError::MissingActiveKey(db_id.clone()))?;
                 let master_key = self.lookup_key(&db_id, &key_id)?;
-                let digest = Sha256::digest(plaintext);
+                let digest = <Sha256 as sha2::Digest>::digest(plaintext);
                 let mut derivation_salt = [0u8; ENCRYPTION_DERIVATION_SALT_LEN];
                 derivation_salt.copy_from_slice(&digest);
                 let content_key = derive_key(master_key, Some(&derivation_salt), ENC_MLE_DB_INFO)?;
