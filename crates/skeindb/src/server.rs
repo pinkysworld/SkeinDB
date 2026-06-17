@@ -16757,32 +16757,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     load_cluster_state(&state).ok();
 
     let app_state = state.clone();
-    let app = Router::new()
-        .route("/api/v1/rpc", post(rpc_handler))
-        .route("/api/v1/sql/exec", post(sql_exec_http_handler))
-        .route("/api/v1/q/{query_id}", get(prepared_get_handler))
-        .route("/api/v1/q/{query_id}/events", get(prepared_sse_handler))
-        .route("/api/v1/cdc/sse/{sub_id}", get(cdc_sse_handler))
-        .route("/api/v1/cdc/ws/{sub_id}", get(cdc_ws_handler))
-        .route("/metrics", get(metrics_handler))
-        .route("/health", get(health_handler))
-        .route("/console", get(console_handler))
-        .route("/console/", get(console_handler))
-        .route("/console/src/main.js", get(console_main_js_handler))
-        .route("/console/src/lib/catalog.js", get(admin_catalog_js_handler))
-        .route("/admin", get(admin_handler))
-        .route("/admin/", get(admin_handler))
-        .route("/admin/src/main.js", get(admin_main_js_handler))
-        .route("/admin/src/lib/catalog.js", get(admin_catalog_js_handler))
-        .route("/src/main.js", get(admin_main_js_handler))
-        .route("/src/lib/catalog.js", get(admin_catalog_js_handler))
-        .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                .allow_headers(Any),
-        );
+    let app = build_http_router(state);
 
     let quic_handle = if let Some(quic_port) = opts.quic_port {
         let cert_path = opts
@@ -16904,6 +16879,35 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn build_http_router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/v1/rpc", post(rpc_handler))
+        .route("/api/v1/sql/exec", post(sql_exec_http_handler))
+        .route("/api/v1/q/{query_id}", get(prepared_get_handler))
+        .route("/api/v1/q/{query_id}/events", get(prepared_sse_handler))
+        .route("/api/v1/cdc/sse/{sub_id}", get(cdc_sse_handler))
+        .route("/api/v1/cdc/ws/{sub_id}", get(cdc_ws_handler))
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(health_handler))
+        .route("/console", get(console_handler))
+        .route("/console/", get(console_handler))
+        .route("/console/src/main.js", get(console_main_js_handler))
+        .route("/console/src/lib/catalog.js", get(admin_catalog_js_handler))
+        .route("/admin", get(admin_handler))
+        .route("/admin/", get(admin_handler))
+        .route("/admin/src/main.js", get(admin_main_js_handler))
+        .route("/admin/src/lib/catalog.js", get(admin_catalog_js_handler))
+        .route("/src/main.js", get(admin_main_js_handler))
+        .route("/src/lib/catalog.js", get(admin_catalog_js_handler))
+        .with_state(state)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any),
+        )
 }
 
 async fn shutdown_signal() {
@@ -33538,6 +33542,7 @@ mod tests {
     };
     use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse};
     use std::collections::BTreeSet;
+    use std::panic::AssertUnwindSafe;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn level_task(db: &str, table: &str, bytes: u64) -> CompactionWorkerTask {
@@ -33683,6 +33688,16 @@ mod tests {
         assert!(catalog.contains("'R19'"));
         assert!(catalog.contains("'R20'"));
         assert!(catalog.contains("security:"));
+    }
+
+    #[test]
+    fn http_router_accepts_current_dynamic_path_syntax() {
+        let dir = temp_dir("http_router_paths");
+        let engine = Engine::open_with_storage_mode_name(&dir, "segment").unwrap();
+        let state = build_state(dir, engine);
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| build_http_router(state)));
+        assert!(result.is_ok(), "router construction should not panic");
     }
 
     /// Deterministic, stable-Rust fuzz harness for the wire-protocol byte
