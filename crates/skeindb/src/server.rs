@@ -23,7 +23,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use sha1::{Digest, Sha1};
+use sha1::{Digest as Sha1Digest, Sha1};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use skeindb_skeinql::{
@@ -16760,10 +16760,10 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/v1/rpc", post(rpc_handler))
         .route("/api/v1/sql/exec", post(sql_exec_http_handler))
-        .route("/api/v1/q/:query_id", get(prepared_get_handler))
-        .route("/api/v1/q/:query_id/events", get(prepared_sse_handler))
-        .route("/api/v1/cdc/sse/:sub_id", get(cdc_sse_handler))
-        .route("/api/v1/cdc/ws/:sub_id", get(cdc_ws_handler))
+        .route("/api/v1/q/{query_id}", get(prepared_get_handler))
+        .route("/api/v1/q/{query_id}/events", get(prepared_sse_handler))
+        .route("/api/v1/cdc/sse/{sub_id}", get(cdc_sse_handler))
+        .route("/api/v1/cdc/ws/{sub_id}", get(cdc_ws_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/console", get(console_handler))
@@ -17605,7 +17605,7 @@ async fn cdc_ws_session(
                     let Ok(message) = build_cdc_ws_resnapshot_event(&stream_sub_id, &batch) else {
                         return;
                     };
-                    let _ = socket.send(WsMessage::Text(message)).await;
+                    let _ = socket.send(WsMessage::Text(message.into())).await;
                     return;
                 }
                 if batch.backpressure.state != "healthy" {
@@ -17615,7 +17615,7 @@ async fn cdc_ws_session(
                         else {
                             return;
                         };
-                        if socket.send(WsMessage::Text(message)).await.is_err() {
+                        if socket.send(WsMessage::Text(message.into())).await.is_err() {
                             return;
                         }
                         last_backpressure_state = Some(batch.backpressure.state.clone());
@@ -17630,7 +17630,7 @@ async fn cdc_ws_session(
                         let Ok(message) = build_cdc_ws_event(&event, event_format) else {
                             return;
                         };
-                        if socket.send(WsMessage::Text(message)).await.is_err() {
+                        if socket.send(WsMessage::Text(message.into())).await.is_err() {
                             return;
                         }
                     }
