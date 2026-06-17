@@ -137,7 +137,7 @@
     </div>
     <article class="doc-article">
       <h1 id="postgresql-compatibility">PostgreSQL Compatibility<a class="headerlink" href="#postgresql-compatibility" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-06-01</p>
+<p>Last updated: 2026-06-17</p>
 <p>Status: Partial advanced baseline</p>
 <p>SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
 The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.</p>
@@ -183,6 +183,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li>extended query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, including named prepared statements, named portals, <code>$1</code>/<code>$2</code> placeholders, statement/portal <code>Describe</code>, text <strong>and binary</strong> bind parameters for common scalar OIDs (<code>int2</code>/<code>int4</code>/<code>int8</code>, <code>float4</code>/<code>float8</code>, <code>bool</code>, <code>numeric</code>, <code>date</code>/<code>time</code>/<code>timestamp</code>/<code>timestamptz</code>, <code>uuid</code>, <code>bytea</code>, and <code>text</code>/<code>varchar</code>/<code>json</code>/<code>jsonb</code>), binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors</li>
 <li>PG compatibility corpus at <code>tests/compat/pg_corpus.sql</code> executed end-to-end over the live PG listener; every statement must complete without an <code>ErrorResponse</code>, and a curated subset of deterministic literal/scalar expressions is checked for exact values. Coverage spans startup probes, savepoints, <code>::</code>/<code>CAST</code> type casts, dollar-quoted literals (<code>$$…$$</code>, <code>$tag$…$tag$</code>), <code>ARRAY[…]</code> constructors, JSON/JSONB <code>-&gt;</code>/<code>-&gt;&gt;</code>, column-side regex <code>~</code>/<code>~*</code>, <code>FETCH FIRST</code>, aggregates (<code>COUNT</code>/<code>SUM</code>/<code>AVG</code>/<code>string_agg</code>/<code>array_agg</code>), <code>GROUP BY</code>/<code>HAVING</code>, joins, <code>CASE</code>/<code>COALESCE</code>/<code>NULLIF</code>, subqueries/CTEs/<code>UNION</code>, scalar string/math functions, and DML with <code>RETURNING</code> and <code>ON CONFLICT … DO UPDATE</code></li>
 <li>real-driver smoke matrix at <code>tests/smoke/</code> that boots <code>skeindb serve</code> and round-trips through <code>psql</code>, psycopg3, and node-postgres (alongside the MySQL drivers), gated as the <code>driver-smoke</code> CI job</li>
+<li>admin-tool compatibility harnesses for representative pgAdmin- and DBeaver-style schema/table/index/stat introspection queries over the live PG listener, including empty-but-typed <code>pg_stat_all_tables</code>, <code>pg_stat_user_tables</code>, <code>pg_stat_all_indexes</code>, <code>pg_stat_user_indexes</code>, and <code>pg_locks</code></li>
 <li>PG-specific operators: <code>||</code> (string concatenation), <code>~</code> / <code>~*</code> (regex match), <code>-&gt;</code> / <code>-&gt;&gt;</code> (JSON access)</li>
 <li>PG-specific scalar functions: <code>gen_random_uuid()</code>, <code>date_trunc()</code>, <code>to_char()</code>, <code>pg_typeof()</code>, <code>string_to_array()</code>, <code>array_length()</code>, <code>array_upper()</code>, <code>array_lower()</code>, <code>clock_timestamp()</code>, <code>statement_timestamp()</code>, <code>transaction_timestamp()</code></li>
 <li>driver-introspection helpers that return deterministic single-tenant answers: <code>format_type(oid, typmod)</code> for common base/array types (with <code>varchar(n)</code>, <code>numeric(p,s)</code>, and time/timestamp precision modifiers), the <code>pg_*_is_visible(oid)</code> visibility probes (<code>pg_table_is_visible</code>, <code>pg_type_is_visible</code>, <code>pg_function_is_visible</code>, and the text-search/operator/opclass/collation/conversion variants), the <code>has_*_privilege(...)</code> probes (<code>has_table_privilege</code>, <code>has_column_privilege</code>, <code>has_schema_privilege</code>, <code>has_database_privilege</code>, <code>has_sequence_privilege</code>, <code>has_function_privilege</code>, and friends) which always succeed for the owner role, <code>pg_get_userbyid(oid)</code> returning the bootstrap role, and <code>pg_encoding_to_char(int)</code> returning <code>UTF8</code></li>
@@ -361,8 +362,11 @@ For the common shared SQL subset, responses are encoded as:</p>
 <li>extended-query <code>COPY ... TO/FROM STDOUT/STDIN WITH (FORMAT csv, NULL 'NULL')</code> round-trip covering literal <code>"NULL"</code>, unquoted nulls, and empty strings</li>
 <li>startup/bootstrap query bundle covering <code>current_database()</code>, <code>current_catalog</code>, <code>current_schema</code> (with optional parentheses), <code>current_schemas(bool)</code>, <code>current_user</code>, <code>current_role</code>, <code>session_user</code>, <code>user</code>, <code>SHOW server_version</code> / <code>server_version_num</code> / <code>standard_conforming_strings</code> / <code>max_identifier_length</code>, <code>SHOW transaction isolation level</code>, and <code>SELECT current_setting(...)</code></li>
 <li>simple-query <code>pg_catalog</code> round-trips for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_tables</code>, <code>pg_views</code>, <code>pg_roles</code>, <code>pg_authid</code>, <code>pg_user</code>, <code>pg_group</code>, <code>pg_tablespace</code>, <code>pg_am</code>, <code>pg_description</code>, <code>pg_indexes</code>, <code>pg_matviews</code>, <code>pg_sequences</code>, <code>pg_stats</code>, <code>pg_settings</code>, <code>pg_type</code>, <code>pg_stat_activity</code>, <code>pg_stat_database</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_index</code>, and <code>pg_constraint</code></li>
+<li>simple-query admin-tool introspection fixtures for pgAdmin/DBeaver over <code>pg_catalog</code>, <code>pg_stat_*</code>, <code>pg_locks</code>, and <code>information_schema</code> metadata browsing paths</li>
 <li>simple-query <code>RowDescription</code> OID checks for numeric, boolean, temporal, JSON, UUID, and text result columns</li>
+<li>simple-query <code>RowDescription</code> OID checks for empty-but-typed <code>pg_stat_all_tables</code>, <code>pg_stat_all_indexes</code>, <code>pg_stat_user_indexes</code>, and <code>pg_locks</code></li>
 <li>extended query <code>Parse</code> / <code>Bind</code> / statement+portal <code>Describe</code> / <code>Execute</code> / <code>Close</code> / <code>Sync</code> / <code>Flush</code> round-trips</li>
+<li>extended-query admin/introspection portal <code>Describe</code> + <code>Execute</code> round-trip for <code>pg_catalog.pg_stat_all_tables</code></li>
 <li>extended-query portal suspension/resume for prepared <code>SELECT</code> statements when <code>Execute</code> uses <code>max_rows &gt; 0</code></li>
 <li>extended-query <code>RowDescription</code> OID checks for described/executed result columns</li>
 <li>sync-based recovery after extended-query execution errors</li>
@@ -390,6 +394,21 @@ For the common shared SQL subset, responses are encoded as:</p>
 <li>broader type/array/domain encoding beyond the current scalar and array OID baseline</li>
 <li>broader portal suspension beyond prepared <code>SELECT</code> result sets</li>
 <li>production-grade driver compatibility for Django, Rails, SQLAlchemy, <code>pgAdmin</code>, <code>DBeaver</code>, <code>psycopg</code>, and <code>node-postgres</code></li>
+</ul>
+<h2 id="admin-tool-compatibility">Admin-tool compatibility<a class="headerlink" href="#admin-tool-compatibility" title="Permanent link">¶</a></h2>
+<p>Tested today:</p>
+<ul>
+<li>connect and bootstrap over the live PG listener</li>
+<li>enumerate databases and namespaces</li>
+<li>browse tables, indexes, columns, constraints, and views</li>
+<li>read PostgreSQL-shaped typed empty stats/catalog tables for admin dashboards that expect them</li>
+<li>prepare and describe simple metadata queries through the extended protocol</li>
+</ul>
+<p>Current limit:</p>
+<ul>
+<li>this is introspection parity, not full pgAdmin/DBeaver feature parity</li>
+<li>typed empty tables are used where SkeinDB does not yet have a real runtime statistic to expose</li>
+<li>framework/ORM startup matrices remain a separate hardening track</li>
 </ul>
 <h2 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">¶</a></h2>
 <p>Both SQL frontends target the same shared execution layer:</p>
@@ -435,6 +454,7 @@ HTTP  (8080) ──┘
 <li><a href="#tested-flows">Tested flows</a></li>
 <li><a href="#claimed-version-and-startup-behavior">Claimed version and startup behavior</a></li>
 <li><a href="#not-implemented-yet">Not implemented yet</a></li>
+<li><a href="#admin-tool-compatibility">Admin-tool compatibility</a></li>
 <li><a href="#architecture">Architecture</a></li>
 <li><a href="#backlog-map">Backlog map</a></li>
 </ul>

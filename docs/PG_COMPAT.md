@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-06-01
+Last updated: 2026-06-17
 
 Status: Partial advanced baseline
 
@@ -52,6 +52,7 @@ Notes:
 - extended query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, including named prepared statements, named portals, `$1`/`$2` placeholders, statement/portal `Describe`, text **and binary** bind parameters for common scalar OIDs (`int2`/`int4`/`int8`, `float4`/`float8`, `bool`, `numeric`, `date`/`time`/`timestamp`/`timestamptz`, `uuid`, `bytea`, and `text`/`varchar`/`json`/`jsonb`), binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors
 - PG compatibility corpus at `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener; every statement must complete without an `ErrorResponse`, and a curated subset of deterministic literal/scalar expressions is checked for exact values. Coverage spans startup probes, savepoints, `::`/`CAST` type casts, dollar-quoted literals (`$$…$$`, `$tag$…$tag$`), `ARRAY[…]` constructors, JSON/JSONB `->`/`->>`, column-side regex `~`/`~*`, `FETCH FIRST`, aggregates (`COUNT`/`SUM`/`AVG`/`string_agg`/`array_agg`), `GROUP BY`/`HAVING`, joins, `CASE`/`COALESCE`/`NULLIF`, subqueries/CTEs/`UNION`, scalar string/math functions, and DML with `RETURNING` and `ON CONFLICT … DO UPDATE`
 - real-driver smoke matrix at `tests/smoke/` that boots `skeindb serve` and round-trips through `psql`, psycopg3, and node-postgres (alongside the MySQL drivers), gated as the `driver-smoke` CI job
+- admin-tool compatibility harnesses for representative pgAdmin- and DBeaver-style schema/table/index/stat introspection queries over the live PG listener, including empty-but-typed `pg_stat_all_tables`, `pg_stat_user_tables`, `pg_stat_all_indexes`, `pg_stat_user_indexes`, and `pg_locks`
 - PG-specific operators: `||` (string concatenation), `~` / `~*` (regex match), `->` / `->>` (JSON access)
 - PG-specific scalar functions: `gen_random_uuid()`, `date_trunc()`, `to_char()`, `pg_typeof()`, `string_to_array()`, `array_length()`, `array_upper()`, `array_lower()`, `clock_timestamp()`, `statement_timestamp()`, `transaction_timestamp()`
 - driver-introspection helpers that return deterministic single-tenant answers: `format_type(oid, typmod)` for common base/array types (with `varchar(n)`, `numeric(p,s)`, and time/timestamp precision modifiers), the `pg_*_is_visible(oid)` visibility probes (`pg_table_is_visible`, `pg_type_is_visible`, `pg_function_is_visible`, and the text-search/operator/opclass/collation/conversion variants), the `has_*_privilege(...)` probes (`has_table_privilege`, `has_column_privilege`, `has_schema_privilege`, `has_database_privilege`, `has_sequence_privilege`, `has_function_privilege`, and friends) which always succeed for the owner role, `pg_get_userbyid(oid)` returning the bootstrap role, and `pg_encoding_to_char(int)` returning `UTF8`
@@ -175,8 +176,11 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - extended-query `COPY ... TO/FROM STDOUT/STDIN WITH (FORMAT csv, NULL 'NULL')` round-trip covering literal `"NULL"`, unquoted nulls, and empty strings
 - startup/bootstrap query bundle covering `current_database()`, `current_catalog`, `current_schema` (with optional parentheses), `current_schemas(bool)`, `current_user`, `current_role`, `session_user`, `user`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - simple-query `pg_catalog` round-trips for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_am`, `pg_description`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_settings`, `pg_type`, `pg_stat_activity`, `pg_stat_database`, `pg_class`, `pg_attribute`, `pg_index`, and `pg_constraint`
+- simple-query admin-tool introspection fixtures for pgAdmin/DBeaver over `pg_catalog`, `pg_stat_*`, `pg_locks`, and `information_schema` metadata browsing paths
 - simple-query `RowDescription` OID checks for numeric, boolean, temporal, JSON, UUID, and text result columns
+- simple-query `RowDescription` OID checks for empty-but-typed `pg_stat_all_tables`, `pg_stat_all_indexes`, `pg_stat_user_indexes`, and `pg_locks`
 - extended query `Parse` / `Bind` / statement+portal `Describe` / `Execute` / `Close` / `Sync` / `Flush` round-trips
+- extended-query admin/introspection portal `Describe` + `Execute` round-trip for `pg_catalog.pg_stat_all_tables`
 - extended-query portal suspension/resume for prepared `SELECT` statements when `Execute` uses `max_rows > 0`
 - extended-query `RowDescription` OID checks for described/executed result columns
 - sync-based recovery after extended-query execution errors
@@ -205,6 +209,22 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - broader type/array/domain encoding beyond the current scalar and array OID baseline
 - broader portal suspension beyond prepared `SELECT` result sets
 - production-grade driver compatibility for Django, Rails, SQLAlchemy, `pgAdmin`, `DBeaver`, `psycopg`, and `node-postgres`
+
+## Admin-tool compatibility
+
+Tested today:
+
+- connect and bootstrap over the live PG listener
+- enumerate databases and namespaces
+- browse tables, indexes, columns, constraints, and views
+- read PostgreSQL-shaped typed empty stats/catalog tables for admin dashboards that expect them
+- prepare and describe simple metadata queries through the extended protocol
+
+Current limit:
+
+- this is introspection parity, not full pgAdmin/DBeaver feature parity
+- typed empty tables are used where SkeinDB does not yet have a real runtime statistic to expose
+- framework/ORM startup matrices remain a separate hardening track
 
 ## Architecture
 

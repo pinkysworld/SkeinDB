@@ -1,7 +1,7 @@
 # Observability and Server Statistics
 
 Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, `stats.snapshot`-driven HTTP(S) webhook delivery, and configurable escalation automation (cooldown re-fire + warning->critical severity ladder) landed; non-HTTP sinks and retry policies remain backlog
-Last updated: 2026-05-27
+Last updated: 2026-06-17
 
 This document defines the observability surface of SkeinDB:
 - server load and resource stats
@@ -117,6 +117,32 @@ Current drill-down surface in `stats.query_fingerprint_latency`:
   - dedup ratio
   - encryption mode and encrypted objects count (if enabled)
   - delta chain depth stats (if DELTA enabled)
+
+Current runtime surface in `stats.snapshot.storage`:
+- `wal_bytes`
+- `dedup_ratio`
+- `logical_bytes`
+- `unique_bytes`
+- `duplicate_bytes`
+- `unique_values`
+- `interned_values`
+- `total_rows`
+- `total_tables`
+- `disk_bytes`
+- `core_lsm_active`
+- `wal_recovery_pending`
+- `wal_replayed_mutations`
+- `wal_truncated_torn_tail`
+- `last_checkpoint_ts_ms`
+- `checkpoint_dirty_tables`
+
+Storage recovery note:
+- the live engine still serves row snapshots, but restart safety now bridges through
+  `MANIFEST.log` + `wal-000001.log`
+- table snapshots persist their latest applied storage WAL LSN
+- startup replays only newer committed row mutations and truncates torn WAL tails
+- `checkpoint_dirty_tables > 0` means there are committed WAL-backed table mutations
+  that have not yet been cleared by a successful durable persist/checkpoint cycle
 
 History/replay (if enabled):
 - oldest retained commit_ts

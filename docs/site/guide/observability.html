@@ -138,7 +138,7 @@
     <article class="doc-article">
       <h1 id="observability-and-server-statistics">Observability and Server Statistics<a class="headerlink" href="#observability-and-server-statistics" title="Permanent link">¶</a></h1>
 <p>Status: Baseline implemented, per-fingerprint histogram drill-down, CDC pressure telemetry, basic operator alerts, settings-backed alert routing, <code>stats.snapshot</code>-driven HTTP(S) webhook delivery, and configurable escalation automation (cooldown re-fire + warning-&gt;critical severity ladder) landed; non-HTTP sinks and retry policies remain backlog
-Last updated: 2026-05-27</p>
+Last updated: 2026-06-17</p>
 <p>This document defines the observability surface of SkeinDB:
 - server load and resource stats
 - query and storage statistics
@@ -247,6 +247,30 @@ while still integrating cleanly with standard monitoring stacks.</p>
 <li>encryption mode and encrypted objects count (if enabled)</li>
 <li>delta chain depth stats (if DELTA enabled)</li>
 </ul>
+<p>Current runtime surface in <code>stats.snapshot.storage</code>:
+- <code>wal_bytes</code>
+- <code>dedup_ratio</code>
+- <code>logical_bytes</code>
+- <code>unique_bytes</code>
+- <code>duplicate_bytes</code>
+- <code>unique_values</code>
+- <code>interned_values</code>
+- <code>total_rows</code>
+- <code>total_tables</code>
+- <code>disk_bytes</code>
+- <code>core_lsm_active</code>
+- <code>wal_recovery_pending</code>
+- <code>wal_replayed_mutations</code>
+- <code>wal_truncated_torn_tail</code>
+- <code>last_checkpoint_ts_ms</code>
+- <code>checkpoint_dirty_tables</code></p>
+<p>Storage recovery note:
+- the live engine still serves row snapshots, but restart safety now bridges through
+  <code>MANIFEST.log</code> + <code>wal-000001.log</code>
+- table snapshots persist their latest applied storage WAL LSN
+- startup replays only newer committed row mutations and truncates torn WAL tails
+- <code>checkpoint_dirty_tables &gt; 0</code> means there are committed WAL-backed table mutations
+  that have not yet been cleared by a successful durable persist/checkpoint cycle</p>
 <p>History/replay (if enabled):
 - oldest retained commit_ts
 - retained history bytes

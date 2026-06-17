@@ -641,6 +641,8 @@ Rules:
 - The first occurrence of a ValueID in a table file should include `lit` seed data.
 - Later duplicates may omit `lit` and reference only `id`.
 - `schema_version` records the table schema version active when that row version was written.
+- `last_applied_lsn` records the latest committed storage WAL record already reflected in
+  this table snapshot. Startup replay only reapplies WAL mutations with a higher LSN.
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 - v2 table-row payloads without `schema_version` remain readable and are normalized from `schema_versions.json` when loaded.
@@ -704,14 +706,48 @@ Rules:
   rotation. It does not change the on-disk format (still `format_version: 4`) and
   is a no-op when the database has no active encryption mode/key.
 
-### 11.9 tables/<db>/<table>.rseg (prototype segment container v1)
+#### 11.8.2 Storage recovery bridge (`format_version: 5`)
+
+The current live engine still persists full table snapshots, but now layers a
+small recovery bridge on top of them:
+
+```json
+{
+  "format_version": 5,
+  "last_applied_lsn": 42,
+  "rows": [
+    {
+      "row": {
+        "id": {"t":"u64","v":1},
+        "payload": {"t":"str","v":"hello"}
+      },
+      "version": 3,
+      "schema_version": 4,
+      "deleted": false,
+      "commit_ts_ms": 1730000000123
+    }
+  ]
+}
+```
+
+Rules:
+- `last_applied_lsn` is the highest committed storage WAL mutation already persisted
+  into this table snapshot.
+- Startup recovery loads the snapshot first, then replays committed WAL mutations
+  whose record LSN is greater than `last_applied_lsn`.
+- Replay currently covers row `insert`, `update`, and `delete` mutations only.
+- v2/v3/v4 table snapshots remain readable; missing `last_applied_lsn` is treated as `0`.
+
+### 11.9 tables/<db>/<table>.rseg (prototype segment container v2)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
 
 Header:
 - `magic[8]`: `SKNSEGR1`
-- `segment_format_version` (`u32 LE`): currently `1`
-- `table_format_version` (`u32 LE`): currently `3` (same row payload schema as `.json`)
+- `segment_format_version` (`u32 LE`): currently `2`
+- `table_format_version` (`u32 LE`): current row snapshot schema version (matches `.json`)
+- `last_applied_lsn` (`u64 LE`): latest committed storage WAL record already reflected
+  in this segment snapshot
 - `row_count` (`u64 LE`)
 
 Body:
@@ -727,8 +763,27 @@ Behavior:
 
 Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
+- v1 segment containers remain readable and imply `last_applied_lsn = 0`.
 - v2 row payloads remain readable; missing `schema_version` fields are normalized from the per-table schema-version map on load.
 - If both files are missing or unreadable, the table loads as empty.
+
+### 11.11 storage_recovery.json
+
+Optional metadata for the current storage recovery bridge.
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "last_checkpoint_ts_ms": 1730000000456
+}
+```
+
+Rules:
+- `last_checkpoint_ts_ms` records the latest successful engine checkpoint that also
+  appended `SetLastLsn` / `CleanShutdown` to `MANIFEST.log` and reset the active WAL.
+- Missing files mean no checkpoint has been recorded yet.
 
 ### 11.10 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
 

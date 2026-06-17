@@ -14192,10 +14192,11 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         "oid" | "objoid" | "classoid" | "datdba" | "dattablespace" | "amhandler"
         | "typnamespace" | "typowner" | "typrelid" | "typelem" | "typarray" | "typbasetype"
         | "typndims" | "nspowner" | "datid" | "usesysid" | "grosysid" | "spcowner"
-        | "relnamespace" | "relowner" | "relam" | "reltablespace" | "reloftype" | "attrelid"
-        | "atttypid" | "attcollation" | "indexrelid" | "indrelid" | "connamespace" | "conrelid"
-        | "contypid" | "conindid" | "conparentid" | "confrelid" | "pronamespace" | "proowner"
-        | "prolang" | "provariadic" | "prosupport" | "prorettype" => (26, 4),
+        | "relnamespace" | "relowner" | "relam" | "reltablespace" | "reloftype" | "relid"
+        | "attrelid" | "atttypid" | "attcollation" | "indexrelid" | "indrelid" | "connamespace"
+        | "conrelid" | "contypid" | "conindid" | "conparentid" | "confrelid" | "pronamespace"
+        | "proowner" | "prolang" | "provariadic" | "prosupport" | "prorettype" | "database"
+        | "relation" | "classid" | "transactionid" => (26, 4),
         "datistemplate"
         | "datallowconn"
         | "pending_restart"
@@ -14244,13 +14245,21 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "condeferred"
         | "convalidated"
         | "conislocal"
-        | "connoinherit" => (pg_wire::oid::BOOL, 1),
-        "setting" | "boot_val" | "reset_val" | "relkind" | "relpersistence" | "relreplident" => {
+        | "connoinherit"
+        | "granted"
+        | "fastpath" => (pg_wire::oid::BOOL, 1),
+        "setting" | "boot_val" | "reset_val" | "relkind" | "relpersistence" | "relreplident"
+        | "locktype" | "mode" | "virtualxid" | "virtualtransaction" | "waitstart" => {
             (pg_wire::oid::TEXT, -1)
         }
         "rolconnlimit" | "numbackends" | "avg_width" | "relnatts" | "relchecks" | "attlen"
         | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "objsubid" | "indnatts"
-        | "indnkeyatts" | "coninhcount" | "pronargs" | "pronargdefaults" => (pg_wire::oid::INT4, 4),
+        | "indnkeyatts" | "coninhcount" | "pronargs" | "pronargdefaults" | "seq_scan"
+        | "seq_tup_read" | "idx_scan" | "idx_tup_fetch" | "n_tup_ins" | "n_tup_upd"
+        | "n_tup_del" | "n_live_tup" | "n_dead_tup" | "vacuum_count" | "autovacuum_count"
+        | "analyze_count" | "autoanalyze_count" | "idx_tup_read" | "page" | "tuple" | "pid" => {
+            (pg_wire::oid::INT4, 4)
+        }
         "null_frac" | "n_distinct" | "correlation" | "procost" | "prorows" => {
             (pg_wire::oid::FLOAT4, 4)
         }
@@ -14263,6 +14272,65 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         _ => return None,
     };
     Some(pg_wire::PgColumn::text(name, type_oid, type_size))
+}
+
+fn pg_stat_table_columns() -> Vec<&'static str> {
+    vec![
+        "relid",
+        "schemaname",
+        "relname",
+        "seq_scan",
+        "seq_tup_read",
+        "idx_scan",
+        "idx_tup_fetch",
+        "n_tup_ins",
+        "n_tup_upd",
+        "n_tup_del",
+        "n_live_tup",
+        "n_dead_tup",
+        "last_vacuum",
+        "last_autovacuum",
+        "last_analyze",
+        "last_autoanalyze",
+        "vacuum_count",
+        "autovacuum_count",
+        "analyze_count",
+        "autoanalyze_count",
+    ]
+}
+
+fn pg_stat_index_columns() -> Vec<&'static str> {
+    vec![
+        "relid",
+        "indexrelid",
+        "schemaname",
+        "relname",
+        "indexrelname",
+        "idx_scan",
+        "idx_tup_read",
+        "idx_tup_fetch",
+    ]
+}
+
+fn pg_locks_columns() -> Vec<&'static str> {
+    vec![
+        "locktype",
+        "database",
+        "relation",
+        "page",
+        "tuple",
+        "virtualxid",
+        "transactionid",
+        "classid",
+        "objid",
+        "objsubid",
+        "virtualtransaction",
+        "pid",
+        "mode",
+        "granted",
+        "fastpath",
+        "waitstart",
+    ]
 }
 
 fn pg_infer_result_columns_to_pg(
@@ -29364,28 +29432,18 @@ fn pg_catalog_select_result(
         vec!["oid", "amname", "amhandler", "amtype"]
     } else if table.table.eq_ignore_ascii_case("pg_description") {
         vec!["objoid", "classoid", "objsubid", "description"]
-    } else if table.table.eq_ignore_ascii_case("pg_stat_user_tables") {
-        // D PG/CDC micro: one more PG catalog item (empty typed virtual table).
-        // Advances catalog parity (pg_stat_* family) for PG/CDC consumers without
-        // adding rows or behavior. SELECT * FROM pg_catalog.pg_stat_user_tables
-        // returns correct RowDescription + 0 rows over sql.exec + live PG.
-        vec![
-            "relid",
-            "schemaname",
-            "relname",
-            "seq_scan",
-            "seq_tup_read",
-            "idx_scan",
-            "idx_tup_fetch",
-            "n_tup_ins",
-            "n_tup_upd",
-            "n_tup_del",
-            "n_live_tup",
-            "n_dead_tup",
-            "last_vacuum",
-            "last_autovacuum",
-            "vacuum_count",
-        ]
+    } else if table.table.eq_ignore_ascii_case("pg_stat_user_tables")
+        || table.table.eq_ignore_ascii_case("pg_stat_all_tables")
+    {
+        // Admin-tool parity: expose empty-but-typed pg_stat_* table metadata so
+        // pgAdmin/DBeaver introspection succeeds without invented statistics.
+        pg_stat_table_columns()
+    } else if table.table.eq_ignore_ascii_case("pg_stat_user_indexes")
+        || table.table.eq_ignore_ascii_case("pg_stat_all_indexes")
+    {
+        pg_stat_index_columns()
+    } else if table.table.eq_ignore_ascii_case("pg_locks") {
+        pg_locks_columns()
     } else if table.table.eq_ignore_ascii_case("pg_class") {
         // D PG/CDC: one additional catalog table (empty but typed, like pg_description).
         // Widens parity without new rows or behavior change; enables SELECT * FROM pg_catalog.pg_class
@@ -33332,6 +33390,12 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "total_rows": storage.total_rows,
             "total_tables": storage.total_tables,
             "disk_bytes": storage.disk_bytes,
+            "core_lsm_active": storage.core_lsm_active,
+            "wal_recovery_pending": storage.wal_recovery_pending,
+            "wal_replayed_mutations": storage.wal_replayed_mutations,
+            "wal_truncated_torn_tail": storage.wal_truncated_torn_tail,
+            "last_checkpoint_ts_ms": storage.last_checkpoint_ts_ms,
+            "checkpoint_dirty_tables": storage.checkpoint_dirty_tables,
             "value_lookup": value_lookup,
             "learned_index": learned_index
         },
@@ -35076,6 +35140,26 @@ mod tests {
             stat_rows.is_empty(),
             "pg_stat_user_tables should be empty but return typed columns"
         );
+
+        for sql in [
+            "SELECT relid, relname, n_live_tup FROM pg_catalog.pg_stat_all_tables LIMIT 5",
+            "SELECT relid, indexrelid, idx_scan FROM pg_catalog.pg_stat_all_indexes LIMIT 5",
+            "SELECT relid, indexrelname, idx_scan FROM pg_catalog.pg_stat_user_indexes LIMIT 5",
+            "SELECT locktype, database, relation, mode, granted FROM pg_catalog.pg_locks LIMIT 5",
+        ] {
+            let resp = call_sql_exec_http(&state, json!({"default_db":"app", "sql": sql})).await;
+            assert!(resp.ok, "expected success for {sql}");
+            let rows = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("result"))
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.get("rows"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            assert!(rows.is_empty(), "expected empty rows for {sql}");
+        }
 
         let pg_tables = call_sql_exec_http(
             &state,
@@ -43262,6 +43346,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_snapshot_reports_storage_recovery_metrics() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_storage_recovery");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "recoverable".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.checkpoint_for_shutdown()?;
+        let state = build_state(dir.clone(), engine);
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let storage = stats
+            .result
+            .as_ref()
+            .and_then(|v| v.get("storage"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(storage.get("core_lsm_active").is_some());
+        assert!(storage.get("wal_recovery_pending").is_some());
+        assert!(storage.get("wal_replayed_mutations").is_some());
+        assert!(storage.get("wal_truncated_torn_tail").is_some());
+        assert!(storage.get("last_checkpoint_ts_ms").is_some());
+        assert!(storage.get("checkpoint_dirty_tables").is_some());
+        assert_eq!(
+            storage
+                .get("checkpoint_dirty_tables")
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stats_snapshot_reports_cdc_metrics() -> anyhow::Result<()> {
         let dir = temp_dir("stats_cdc_metrics");
         let mut engine = Engine::open(&dir)?;
@@ -49269,6 +49423,15 @@ mod tests {
         assert!(pg_catalog_result_column_override("numbackends").is_some());
         assert!(pg_catalog_result_column_override("null_frac").is_some());
         assert!(pg_catalog_result_column_override("blk_read_time").is_some());
+        assert!(pg_catalog_result_column_override("database").is_some());
+        assert!(pg_catalog_result_column_override("relation").is_some());
+        assert!(pg_catalog_result_column_override("relid").is_some());
+        assert!(pg_catalog_result_column_override("locktype").is_some());
+        assert!(pg_catalog_result_column_override("mode").is_some());
+        assert!(pg_catalog_result_column_override("granted").is_some());
+        assert!(pg_catalog_result_column_override("seq_scan").is_some());
+        assert!(pg_catalog_result_column_override("n_live_tup").is_some());
+        assert!(pg_catalog_result_column_override("idx_scan").is_some());
         // pg_attribute columns
         assert!(pg_catalog_result_column_override("attrelid").is_some());
         assert!(pg_catalog_result_column_override("atttypid").is_some());

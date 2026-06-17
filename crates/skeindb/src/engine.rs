@@ -34,9 +34,11 @@ use wasmtime::{
 
 use crate::storage_mode::TableStorageMode;
 use skeindb_core::decode_varu;
+use skeindb_core::manifest::{ManifestRecord, ManifestWriter};
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
 };
+use skeindb_core::wal::{WalReader, WalWriter};
 use skeindb_core::wasm_catalog::{
     WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
     WASM_UDF_ABI_V1,
@@ -151,7 +153,7 @@ pub struct ColumnSchema {
     pub auto_increment: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RowEntry {
     pub row: RowObject,
 
@@ -171,9 +173,10 @@ pub struct RowEntry {
     pub commit_ts_ms: u64,
 }
 
-// Bumped to 4 for T193: row segments/JSON may carry encrypted-at-rest cell payloads
-// keyed by `TABLE_ROW_ENC_KEY`. Version 2/3 files (plaintext only) remain readable.
-const TABLE_ROWS_FORMAT_VERSION: u32 = 4;
+// Bumped to 5 for storage recovery metadata: row segments/JSON now persist the
+// latest applied WAL LSN so restart replay can skip already-durable mutations.
+// Version 2/3/4 files remain readable.
+const TABLE_ROWS_FORMAT_VERSION: u32 = 5;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 /// Marker key for an encrypted-at-rest row cell payload (T193). The payload object carries
 /// the originating column id, the value kind label, and a base64 of the self-describing
@@ -184,13 +187,19 @@ const TABLE_ROW_ENC_KEY: &str = "$skein_enc";
 /// plaintext serialization (serde_json of `Lit`) changes in an incompatible way.
 const ENCRYPTION_CELL_CODEC_VERSION: u32 = 1;
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
-const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
+const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 2;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
 const ENCRYPTION_STATE_FORMAT_VERSION: u32 = 1;
+const STORAGE_RECOVERY_META_FORMAT_VERSION: u32 = 1;
+const STORAGE_WAL_MUTATION_FORMAT_VERSION: u32 = 1;
+const STORAGE_MANIFEST_FILE_NAME: &str = "MANIFEST.log";
+const STORAGE_WAL_FILE_NAME: &str = "wal-000001.log";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableRowsDisk {
     format_version: u32,
+    #[serde(default)]
+    last_applied_lsn: u64,
     rows: Vec<RowEntryDisk>,
 }
 
@@ -212,6 +221,38 @@ struct SecondaryIndexCacheDisk {
     row_count: u64,
     #[serde(default)]
     indexes: Vec<SecondaryIndexDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StorageRecoveryMetaDisk {
+    format_version: u32,
+    #[serde(default)]
+    last_checkpoint_ts_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StorageWalMutationOp {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct StorageWalMutation {
+    format_version: u32,
+    db: String,
+    table: String,
+    op: StorageWalMutationOp,
+    before_pk: Vec<Lit>,
+    row: RowEntry,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StorageRecoveryRuntime {
+    wal_replayed_mutations: u64,
+    wal_truncated_torn_tail: bool,
+    last_checkpoint_ts_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +302,8 @@ struct SecondaryIndex {
 pub struct TableData {
     pub rows: Vec<RowEntry>,
     pub pk_index: HashMap<String, usize>,
+    last_applied_lsn: u64,
+    recovery_lsn_tracked: bool,
     vector_index: Mutex<HashMap<String, VectorIndex>>,
     secondary_indexes: Mutex<HashMap<String, SecondaryIndex>>,
 }
@@ -384,6 +427,10 @@ pub struct Engine {
     /// would otherwise overwrite the ciphertext with empty/plaintext data). They are
     /// transparently reloaded once the matching key is registered.
     encrypted_locked_tables: HashSet<TableKey>,
+
+    storage_recovery: StorageRecoveryRuntime,
+    dirty_tables: HashSet<TableKey>,
+    next_storage_txn_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1501,6 +1548,11 @@ pub struct EngineStorageStats {
     /// Whether core LSM pipeline files (MANIFEST.log + wal-*.log) are active for segment/hybrid modes.
     /// See core_lsm_files_active and TRUE_STATUS_MATRIX Storage core gap.
     pub core_lsm_active: bool,
+    pub wal_recovery_pending: bool,
+    pub wal_replayed_mutations: u64,
+    pub wal_truncated_torn_tail: bool,
+    pub last_checkpoint_ts_ms: u64,
+    pub checkpoint_dirty_tables: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2000,10 +2052,15 @@ impl Engine {
             encryption_audit: Vec::new(),
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
+            storage_recovery: StorageRecoveryRuntime::default(),
+            dirty_tables: HashSet::new(),
+            next_storage_txn_id: 1,
         };
 
+        engine.load_storage_recovery_meta_best_effort();
         engine.load_encryption_state_best_effort();
         engine.load_tables_best_effort();
+        engine.recover_storage_wal()?;
         engine.rebuild_value_store_from_tables_best_effort();
         engine.load_changes_best_effort();
         engine.load_prepared_best_effort();
@@ -2085,6 +2142,11 @@ impl Engine {
             mvcc_versions,
             delta_chains,
             core_lsm_active: self.core_lsm_files_active(),
+            wal_recovery_pending: !self.dirty_tables.is_empty(),
+            wal_replayed_mutations: self.storage_recovery.wal_replayed_mutations,
+            wal_truncated_torn_tail: self.storage_recovery.wal_truncated_torn_tail,
+            last_checkpoint_ts_ms: self.storage_recovery.last_checkpoint_ts_ms,
+            checkpoint_dirty_tables: self.dirty_tables.len() as u64,
         }
     }
 
@@ -2350,7 +2412,10 @@ impl Engine {
                 db: db.to_string(),
                 table: table.to_string(),
             },
-            TableData::default(),
+            TableData {
+                recovery_lsn_tracked: true,
+                ..TableData::default()
+            },
         );
 
         let key = TableKey {
@@ -3498,7 +3563,7 @@ impl Engine {
         let mut last_insert_id = 0u64;
         let mut affected = 0u64;
         let mut returning_rows: Vec<serde_json::Value> = Vec::new();
-        let mut change_rows: Vec<(Vec<Lit>, RowObject)> = Vec::new();
+        let mut change_rows: Vec<(Vec<Lit>, RowEntry)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
         let table_key = TableKey {
@@ -3549,7 +3614,7 @@ impl Engine {
                 tdata.pk_index.insert(pk_key_s, idx);
                 secondary_index_add_row(tdata, idx, &row)?;
 
-                change_rows.push((pk, row.clone()));
+                change_rows.push((pk, tdata.rows[idx].clone()));
                 collect_value_store_items(&row, &mut intern_items);
                 snapshot_rows.push(row.clone());
                 affected += 1;
@@ -3583,6 +3648,24 @@ impl Engine {
             self.invalidate_hnsw_indexes_for_table(table);
         }
 
+        let wal_mutations = change_rows
+            .iter()
+            .map(|(pk, entry)| StorageWalMutation {
+                format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+                db: table.db.clone(),
+                table: table.table.clone(),
+                op: StorageWalMutationOp::Insert,
+                before_pk: pk.clone(),
+                row: entry.clone(),
+            })
+            .collect::<Vec<_>>();
+        let commit_lsn = self.append_storage_wal_transaction(wal_mutations)?;
+        if let Some(tdata) = self.tables.get_mut(&table_key) {
+            tdata.last_applied_lsn = commit_lsn;
+            tdata.recovery_lsn_tracked = true;
+        }
+        self.dirty_tables.insert(table_key.clone());
+
         for (pk, after) in change_rows {
             self.emit_change(
                 &table.db,
@@ -3590,11 +3673,12 @@ impl Engine {
                 "insert",
                 Some(pk),
                 None,
-                Some(after),
+                Some(after.row),
             );
         }
         self.persist_catalog()?;
         self.persist_table(&table.db, &table.table)?;
+        self.dirty_tables.remove(&table_key);
         self.persist_changes_best_effort();
 
         Ok(WriteResult {
@@ -3635,7 +3719,7 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<WriteResult> {
         let mut affected = 0u64;
-        let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject, RowObject)> = Vec::new();
+        let mut change_rows: Vec<(Vec<Lit>, RowObject, RowEntry)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
         let key = TableKey {
@@ -3707,8 +3791,8 @@ impl Engine {
                 tdata.rows[idx].commit_ts_ms = now_millis();
                 affected += 1;
 
-                let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
-                change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
+                let before_pk = extract_pk(schema, &current_row)?;
+                change_rows.push((before_pk, current_row, tdata.rows[idx].clone()));
                 collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
                 snapshot_rows.push(tdata.rows[idx].row.clone());
 
@@ -3739,20 +3823,44 @@ impl Engine {
             self.invalidate_hnsw_indexes_for_table(table);
         }
 
-        for (pk, before, after) in change_rows {
+        if affected > 0 {
+            let wal_mutations = change_rows
+                .iter()
+                .map(|(before_pk, _before, entry)| StorageWalMutation {
+                    format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+                    db: table.db.clone(),
+                    table: table.table.clone(),
+                    op: StorageWalMutationOp::Update,
+                    before_pk: before_pk.clone(),
+                    row: entry.clone(),
+                })
+                .collect::<Vec<_>>();
+            let commit_lsn = self.append_storage_wal_transaction(wal_mutations)?;
+            if let Some(tdata) = self.tables.get_mut(&key) {
+                tdata.last_applied_lsn = commit_lsn;
+                tdata.recovery_lsn_tracked = true;
+            }
+            self.dirty_tables.insert(key.clone());
+        }
+
+        for (before_pk, before, after) in change_rows {
+            let pk = extract_pk(self.get_schema(&table.db, &table.table)?, &after.row)
+                .ok()
+                .or(Some(before_pk));
             self.emit_change(
                 &table.db,
                 &table.table,
                 "update",
                 pk,
                 Some(before),
-                Some(after),
+                Some(after.row),
             );
         }
 
         if affected > 0 {
             self.persist_catalog()?;
             self.persist_table(&table.db, &table.table)?;
+            self.dirty_tables.remove(&key);
             self.persist_changes_best_effort();
         }
 
@@ -3772,7 +3880,7 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<WriteResult> {
         let mut affected = 0u64;
-        let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject)> = Vec::new();
+        let mut change_rows: Vec<(Vec<Lit>, RowObject, RowEntry)> = Vec::new();
         let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
@@ -3809,11 +3917,9 @@ impl Engine {
                 entry.schema_version = row_schema_version;
                 entry.commit_ts_ms = now_millis();
                 affected += 1;
-                let pk = extract_pk(schema, &row_before_delete).ok();
-                if let Some(ref pk) = pk {
-                    snapshot_pks.push(pk.clone());
-                }
-                change_rows.push((pk, row_before_delete));
+                let pk = extract_pk(schema, &row_before_delete)?;
+                snapshot_pks.push(pk.clone());
+                change_rows.push((pk, row_before_delete, entry.clone()));
                 if let Some(lim) = limit {
                     if affected >= lim {
                         break;
@@ -3827,21 +3933,46 @@ impl Engine {
             }
         }
 
-        for (pk, before) in change_rows {
-            self.emit_change(&table.db, &table.table, "delete", pk, Some(before), None);
-        }
-
         if self.apply_snapshot_deletes(table, &snapshot_pks) {
             self.persist_snapshots_best_effort();
         }
 
         if affected > 0 {
             self.invalidate_hnsw_indexes_for_table(table);
+            let wal_mutations = change_rows
+                .iter()
+                .map(|(before_pk, _before, entry)| StorageWalMutation {
+                    format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+                    db: table.db.clone(),
+                    table: table.table.clone(),
+                    op: StorageWalMutationOp::Delete,
+                    before_pk: before_pk.clone(),
+                    row: entry.clone(),
+                })
+                .collect::<Vec<_>>();
+            let commit_lsn = self.append_storage_wal_transaction(wal_mutations)?;
+            if let Some(tdata) = self.tables.get_mut(&key) {
+                tdata.last_applied_lsn = commit_lsn;
+                tdata.recovery_lsn_tracked = true;
+            }
+            self.dirty_tables.insert(key.clone());
+        }
+
+        for (pk, before, _entry) in change_rows {
+            self.emit_change(
+                &table.db,
+                &table.table,
+                "delete",
+                Some(pk),
+                Some(before),
+                None,
+            );
         }
 
         if affected > 0 {
             self.persist_catalog()?;
             self.persist_table(&table.db, &table.table)?;
+            self.dirty_tables.remove(&key);
             self.persist_changes_best_effort();
         }
 
@@ -10939,8 +11070,16 @@ impl Engine {
         codec: &RowEncryptionCodec<'_>,
     ) -> LoadedTableRows {
         if let Some(disk) = load_json::<TableRowsDisk>(path) {
+            let last_applied_lsn = disk.last_applied_lsn;
+            let recovery_lsn_tracked = disk.format_version >= TABLE_ROWS_FORMAT_VERSION;
             match decode_table_rows_disk(disk, Some(codec)) {
-                Ok(rows) => return LoadedTableRows::Rows(rows),
+                Ok(rows) => {
+                    return LoadedTableRows::Rows {
+                        rows,
+                        last_applied_lsn,
+                        recovery_lsn_tracked,
+                    };
+                }
                 Err(err) if is_encryption_locked_error(&err) => {
                     return LoadedTableRows::Locked;
                 }
@@ -10948,7 +11087,11 @@ impl Engine {
             }
         }
         match load_json::<Vec<RowEntry>>(path) {
-            Some(rows) => LoadedTableRows::Rows(rows),
+            Some(rows) => LoadedTableRows::Rows {
+                rows,
+                last_applied_lsn: 0,
+                recovery_lsn_tracked: false,
+            },
             None => LoadedTableRows::Missing,
         }
     }
@@ -10964,8 +11107,14 @@ impl Engine {
         let Ok(disk) = decode_table_rows_segment(&bytes) else {
             return LoadedTableRows::Missing;
         };
+        let last_applied_lsn = disk.last_applied_lsn;
+        let recovery_lsn_tracked = disk.format_version >= TABLE_ROWS_FORMAT_VERSION;
         match decode_table_rows_disk(disk, Some(codec)) {
-            Ok(rows) => LoadedTableRows::Rows(rows),
+            Ok(rows) => LoadedTableRows::Rows {
+                rows,
+                last_applied_lsn,
+                recovery_lsn_tracked,
+            },
             Err(err) if is_encryption_locked_error(&err) => LoadedTableRows::Locked,
             Err(_) => LoadedTableRows::Missing,
         }
@@ -10975,7 +11124,11 @@ impl Engine {
     /// registered. Returns `(rows, locked)` where `locked` is true if encrypted cells were
     /// present but could not be decrypted (the table is then loaded empty and blocked from
     /// being persisted until the key is registered).
-    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> (Vec<RowEntry>, bool) {
+    fn load_table_rows_best_effort_for_mode(
+        &self,
+        db: &str,
+        table: &str,
+    ) -> (Vec<RowEntry>, bool, u64, bool) {
         let json_path = self.table_path(db, table);
         let segment_path = self.table_segment_path(db, table);
         let codec = self.row_encryption_codec(db, table);
@@ -10987,12 +11140,20 @@ impl Engine {
             (from_json(), from_segment())
         };
         match first {
-            LoadedTableRows::Rows(rows) => (rows, false),
-            LoadedTableRows::Locked => (Vec::new(), true),
+            LoadedTableRows::Rows {
+                rows,
+                last_applied_lsn,
+                recovery_lsn_tracked,
+            } => (rows, false, last_applied_lsn, recovery_lsn_tracked),
+            LoadedTableRows::Locked => (Vec::new(), true, 0, false),
             LoadedTableRows::Missing => match second {
-                LoadedTableRows::Rows(rows) => (rows, false),
-                LoadedTableRows::Locked => (Vec::new(), true),
-                LoadedTableRows::Missing => (Vec::new(), false),
+                LoadedTableRows::Rows {
+                    rows,
+                    last_applied_lsn,
+                    recovery_lsn_tracked,
+                } => (rows, false, last_applied_lsn, recovery_lsn_tracked),
+                LoadedTableRows::Locked => (Vec::new(), true, 0, false),
+                LoadedTableRows::Missing => (Vec::new(), false, 0, false),
             },
         }
     }
@@ -11141,6 +11302,7 @@ impl Engine {
             .collect::<anyhow::Result<Vec<_>>>()?;
         let disk = TableRowsDisk {
             format_version: TABLE_ROWS_FORMAT_VERSION,
+            last_applied_lsn: tdata.last_applied_lsn,
             rows,
         };
         if self.storage_mode.uses_segment() {
@@ -11228,6 +11390,7 @@ impl Engine {
         self.persist_oblivious_best_effort();
         self.persist_advisor_patterns_best_effort();
         self.persist_advisor_history_best_effort();
+        self.checkpoint_storage_recovery()?;
         Ok(())
     }
 
@@ -11243,7 +11406,8 @@ impl Engine {
             })
             .collect();
         for (db, table) in targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&db, &table);
+            let (rows, locked, last_applied_lsn, recovery_lsn_tracked) =
+                self.load_table_rows_best_effort_for_mode(&db, &table);
             let key = TableKey {
                 db: db.clone(),
                 table: table.clone(),
@@ -11257,6 +11421,8 @@ impl Engine {
                 self.load_table_secondary_indexes_best_effort(&db, &table, rows.len());
             let mut tdata = TableData {
                 rows,
+                last_applied_lsn,
+                recovery_lsn_tracked,
                 secondary_indexes: Mutex::new(secondary_indexes),
                 ..TableData::default()
             };
@@ -11289,7 +11455,8 @@ impl Engine {
             .cloned()
             .collect();
         for key in locked_targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
+            let (rows, locked, last_applied_lsn, recovery_lsn_tracked) =
+                self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
             if locked {
                 continue;
             }
@@ -11298,6 +11465,8 @@ impl Engine {
                 self.load_table_secondary_indexes_best_effort(&key.db, &key.table, rows.len());
             let mut tdata = TableData {
                 rows,
+                last_applied_lsn,
+                recovery_lsn_tracked,
                 secondary_indexes: Mutex::new(secondary_indexes),
                 ..TableData::default()
             };
@@ -11336,6 +11505,193 @@ impl Engine {
 
     fn changes_path(&self) -> PathBuf {
         self.data_dir.join("changes.json")
+    }
+
+    fn storage_manifest_path(&self) -> PathBuf {
+        self.data_dir.join(STORAGE_MANIFEST_FILE_NAME)
+    }
+
+    fn storage_wal_path(&self) -> PathBuf {
+        self.data_dir.join(STORAGE_WAL_FILE_NAME)
+    }
+
+    fn storage_recovery_meta_path(&self) -> PathBuf {
+        self.data_dir.join("storage_recovery.json")
+    }
+
+    fn load_storage_recovery_meta_best_effort(&mut self) {
+        if let Some(disk) = load_json::<StorageRecoveryMetaDisk>(&self.storage_recovery_meta_path())
+            .filter(|disk| disk.format_version == STORAGE_RECOVERY_META_FORMAT_VERSION)
+        {
+            self.storage_recovery.last_checkpoint_ts_ms = disk.last_checkpoint_ts_ms;
+        }
+    }
+
+    fn persist_storage_recovery_meta_best_effort(&self) {
+        let _ = save_json(
+            &self.storage_recovery_meta_path(),
+            &StorageRecoveryMetaDisk {
+                format_version: STORAGE_RECOVERY_META_FORMAT_VERSION,
+                last_checkpoint_ts_ms: self.storage_recovery.last_checkpoint_ts_ms,
+            },
+        );
+    }
+
+    fn recover_storage_wal(&mut self) -> anyhow::Result<()> {
+        let _manifest = ManifestWriter::open(self.storage_manifest_path())?;
+        let wal_path = self.storage_wal_path();
+        if !wal_path.exists() {
+            return Ok(());
+        }
+
+        let recovery = WalReader::open(&wal_path)?.recover()?;
+        self.next_storage_txn_id = recovery.last_valid_lsn.saturating_add(1).max(1);
+        self.storage_recovery.wal_truncated_torn_tail = recovery.truncated_tail;
+
+        let mut affected_tables = HashSet::<TableKey>::new();
+        let mut replayed = 0u64;
+
+        for txn in recovery.txns {
+            for mutation in txn.mutations {
+                let payload: StorageWalMutation = serde_json::from_slice(&mutation.payload)?;
+                if payload.format_version != STORAGE_WAL_MUTATION_FORMAT_VERSION {
+                    anyhow::bail!(
+                        "unsupported storage wal mutation format: {}",
+                        payload.format_version
+                    );
+                }
+                let key = TableKey {
+                    db: payload.db.clone(),
+                    table: payload.table.clone(),
+                };
+                if self.encrypted_locked_tables.contains(&key) {
+                    continue;
+                }
+                let Some((last_applied_lsn, recovery_lsn_tracked)) = self
+                    .tables
+                    .get(&key)
+                    .map(|table| (table.last_applied_lsn, table.recovery_lsn_tracked))
+                else {
+                    continue;
+                };
+                if !recovery_lsn_tracked {
+                    continue;
+                }
+                if mutation.lsn <= last_applied_lsn {
+                    continue;
+                }
+                self.apply_storage_wal_mutation(&payload)?;
+                if let Some(table) = self.tables.get_mut(&key) {
+                    table.last_applied_lsn = mutation.lsn;
+                    table.recovery_lsn_tracked = true;
+                }
+                affected_tables.insert(key);
+                replayed = replayed.saturating_add(1);
+            }
+        }
+
+        for key in affected_tables.iter() {
+            self.persist_table(&key.db, &key.table)?;
+            self.dirty_tables.remove(key);
+        }
+        self.storage_recovery.wal_replayed_mutations = replayed;
+        Ok(())
+    }
+
+    fn checkpoint_storage_recovery(&mut self) -> anyhow::Result<()> {
+        let _manifest = ManifestWriter::open(self.storage_manifest_path())?;
+        let max_lsn = self
+            .tables
+            .values()
+            .map(|table| table.last_applied_lsn)
+            .max()
+            .unwrap_or(0);
+        let mut manifest = ManifestWriter::open(self.storage_manifest_path())?;
+        manifest.append(&ManifestRecord::SetLastLsn { lsn: max_lsn })?;
+        manifest.append(&ManifestRecord::CleanShutdown {
+            unix_s: now_unix_s(),
+        })?;
+        manifest.sync()?;
+
+        self.storage_recovery.last_checkpoint_ts_ms = now_millis();
+        self.persist_storage_recovery_meta_best_effort();
+        self.dirty_tables.clear();
+        remove_file_if_exists(&self.storage_wal_path())?;
+        let _writer = WalWriter::open(self.storage_wal_path())?;
+        Ok(())
+    }
+
+    fn append_storage_wal_transaction(
+        &mut self,
+        mutations: Vec<StorageWalMutation>,
+    ) -> anyhow::Result<u64> {
+        if mutations.is_empty() {
+            return Ok(0);
+        }
+        let _manifest = ManifestWriter::open(self.storage_manifest_path())?;
+        let mut writer = WalWriter::open(self.storage_wal_path())?;
+        if writer.truncated_tail() {
+            self.storage_recovery.wal_truncated_torn_tail = true;
+        }
+        let txn_id = self.next_storage_txn_id;
+        self.next_storage_txn_id = self.next_storage_txn_id.saturating_add(1);
+        writer.begin_txn(txn_id)?;
+        for mutation in mutations {
+            writer.append_mutation(txn_id, serde_json::to_vec(&mutation)?)?;
+        }
+        let commit_lsn = writer.commit_txn(txn_id)?;
+        writer.sync()?;
+        Ok(commit_lsn)
+    }
+
+    fn apply_storage_wal_mutation(&mut self, mutation: &StorageWalMutation) -> anyhow::Result<()> {
+        let table = BaseTableRef {
+            db: mutation.db.clone(),
+            table: mutation.table.clone(),
+            r#as: None,
+        };
+        let key = TableKey {
+            db: mutation.db.clone(),
+            table: mutation.table.clone(),
+        };
+        let (schema, tdata) = self.get_table_mut(&table)?;
+        let before_pk_key = pk_key(&mutation.before_pk);
+        let after_pk = extract_pk(schema, &mutation.row.row).unwrap_or_default();
+        let after_pk_key = pk_key(&after_pk);
+        let target_idx = tdata
+            .pk_index
+            .get(&before_pk_key)
+            .copied()
+            .or_else(|| tdata.pk_index.get(&after_pk_key).copied());
+
+        match mutation.op {
+            StorageWalMutationOp::Insert => {
+                if let Some(idx) = target_idx {
+                    tdata.rows[idx] = mutation.row.clone();
+                } else {
+                    tdata.rows.push(mutation.row.clone());
+                }
+            }
+            StorageWalMutationOp::Update | StorageWalMutationOp::Delete => {
+                if let Some(idx) = target_idx {
+                    tdata.rows[idx] = mutation.row.clone();
+                } else {
+                    tdata.rows.push(mutation.row.clone());
+                }
+            }
+        }
+
+        tdata.pk_index.clear();
+        for (idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted {
+                continue;
+            }
+            let pk = extract_pk(schema, &entry.row)?;
+            tdata.pk_index.insert(pk_key(&pk), idx);
+        }
+        rebuild_all_secondary_indexes(schema, tdata)?;
+        self.dirty_tables.insert(key);
+        Ok(())
     }
 
     fn cdc_subscriptions_path(&self) -> PathBuf {
@@ -22718,6 +23074,23 @@ fn set_secondary_indexes_built_version(tdata: &TableData, version: u64) -> anyho
     Ok(())
 }
 
+fn rebuild_all_secondary_indexes(schema: &TableSchema, tdata: &TableData) -> anyhow::Result<()> {
+    ensure_mysql_compat_secondary_indexes(schema, tdata);
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        *index = build_secondary_index(
+            schema.table_version,
+            &index.columns,
+            &index.include,
+            &tdata.rows,
+        );
+    }
+    Ok(())
+}
+
 fn register_secondary_index(
     schema: &TableSchema,
     tdata: &TableData,
@@ -22910,6 +23283,13 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn now_unix_s() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Cryptographic-quality PRNG for differential privacy noise generation.
@@ -26545,7 +26925,11 @@ fn is_encryption_locked_error(err: &anyhow::Error) -> bool {
 /// Outcome of attempting to load one table's rows from a single backing file.
 enum LoadedTableRows {
     /// Rows decoded successfully (encrypted cells, if any, were decrypted).
-    Rows(Vec<RowEntry>),
+    Rows {
+        rows: Vec<RowEntry>,
+        last_applied_lsn: u64,
+        recovery_lsn_tracked: bool,
+    },
     /// Encrypted-at-rest cells are present but the database key is not registered.
     Locked,
     /// No usable file was found / could be parsed.
@@ -26789,6 +27173,7 @@ fn decode_table_rows_disk(
 ) -> anyhow::Result<Vec<RowEntry>> {
     if disk.format_version != 2
         && disk.format_version != 3
+        && disk.format_version != 4
         && disk.format_version != TABLE_ROWS_FORMAT_VERSION
     {
         anyhow::bail!("unsupported table format version: {}", disk.format_version);
@@ -26868,6 +27253,7 @@ fn encode_table_rows_segment(disk: &TableRowsDisk) -> anyhow::Result<Vec<u8>> {
     out.extend_from_slice(&TABLE_ROWS_SEGMENT_MAGIC);
     out.extend_from_slice(&TABLE_ROWS_SEGMENT_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&disk.format_version.to_le_bytes());
+    out.extend_from_slice(&disk.last_applied_lsn.to_le_bytes());
     let row_count = u64::try_from(disk.rows.len())
         .map_err(|_| anyhow::anyhow!("too many rows for segment container"))?;
     out.extend_from_slice(&row_count.to_le_bytes());
@@ -26891,10 +27277,15 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 
     let mut offset = 8usize;
     let segment_version = read_u32_le_chunk(bytes, &mut offset)?;
-    if segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+    if segment_version != 1 && segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
         anyhow::bail!("unsupported segment format version: {segment_version}");
     }
     let table_format_version = read_u32_le_chunk(bytes, &mut offset)?;
+    let last_applied_lsn = if segment_version >= 2 {
+        read_u64_le_chunk(bytes, &mut offset)?
+    } else {
+        0
+    };
     let row_count = read_u64_le_chunk(bytes, &mut offset)?;
     let capacity = usize::try_from(row_count)
         .map_err(|_| anyhow::anyhow!("row count too large for this platform"))?;
@@ -26916,6 +27307,7 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 
     Ok(TableRowsDisk {
         format_version: table_format_version,
+        last_applied_lsn,
         rows,
     })
 }
@@ -49713,6 +50105,274 @@ mod tests {
                 v: "checkpoint-a".to_string()
             })
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn storage_wal_mutation_mapping_roundtrip_for_insert_update_delete() -> anyhow::Result<()> {
+        let entry = RowEntry {
+            row: row(&[
+                ("id", Lit::U64 { v: 7 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "wal".to_string(),
+                    },
+                ),
+            ]),
+            version: 3,
+            schema_version: 2,
+            deleted: false,
+            commit_ts_ms: 42,
+        };
+        for op in [
+            StorageWalMutationOp::Insert,
+            StorageWalMutationOp::Update,
+            StorageWalMutationOp::Delete,
+        ] {
+            let mutation = StorageWalMutation {
+                format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+                db: "app".to_string(),
+                table: "events".to_string(),
+                op: op.clone(),
+                before_pk: vec![Lit::U64 { v: 7 }],
+                row: RowEntry {
+                    deleted: matches!(op, StorageWalMutationOp::Delete),
+                    ..entry.clone()
+                },
+            };
+            let bytes = serde_json::to_vec(&mutation)?;
+            let decoded: StorageWalMutation = serde_json::from_slice(&bytes)?;
+            assert_eq!(decoded, mutation);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn storage_wal_recovery_replays_committed_mutation_before_checkpoint() -> anyhow::Result<()> {
+        let dir = temp_dir("storage_wal_replay");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let entry = RowEntry {
+            row: row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "replayed".to_string(),
+                    },
+                ),
+            ]),
+            version: 1,
+            schema_version: 1,
+            deleted: false,
+            commit_ts_ms: 77,
+        };
+        engine.append_storage_wal_transaction(vec![StorageWalMutation {
+            format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+            db: "app".to_string(),
+            table: "events".to_string(),
+            op: StorageWalMutationOp::Insert,
+            before_pk: vec![Lit::U64 { v: 1 }],
+            row: entry,
+        }])?;
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "replayed".to_string()
+            })
+        );
+        let stats = reopened.storage_stats_snapshot();
+        assert_eq!(stats.wal_replayed_mutations, 1);
+        assert!(!stats.wal_recovery_pending);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn storage_wal_recovery_truncates_torn_tail_and_skips_partial_mutation() -> anyhow::Result<()> {
+        let dir = temp_dir("storage_wal_torn_tail");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.append_storage_wal_transaction(vec![StorageWalMutation {
+            format_version: STORAGE_WAL_MUTATION_FORMAT_VERSION,
+            db: "app".to_string(),
+            table: "events".to_string(),
+            op: StorageWalMutationOp::Insert,
+            before_pk: vec![Lit::U64 { v: 1 }],
+            row: RowEntry {
+                row: row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "valid".to_string(),
+                        },
+                    ),
+                ]),
+                version: 1,
+                schema_version: 1,
+                deleted: false,
+                commit_ts_ms: 88,
+            },
+        }])?;
+        let wal_path = engine.storage_wal_path();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&wal_path)?;
+        use std::io::Write as _;
+        file.write_all(b"partial-tail")?;
+        drop(file);
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "valid".to_string()
+            })
+        );
+        let stats = reopened.storage_stats_snapshot();
+        assert!(stats.wal_truncated_torn_tail);
+        assert_eq!(stats.wal_replayed_mutations, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_clears_recovery_pending_and_prevents_duplicate_replay() -> anyhow::Result<()> {
+        let dir = temp_dir("storage_wal_checkpoint");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "checkpointed".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.checkpoint_for_shutdown()?;
+        let after_checkpoint = engine.storage_stats_snapshot();
+        assert!(!after_checkpoint.wal_recovery_pending);
+        assert_eq!(after_checkpoint.checkpoint_dirty_tables, 0);
+        assert!(after_checkpoint.last_checkpoint_ts_ms > 0);
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "checkpointed".to_string()
+            })
+        );
+        let stats = reopened.storage_stats_snapshot();
+        assert_eq!(stats.wal_replayed_mutations, 0);
+        assert!(!stats.wal_recovery_pending);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
