@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-06-17
+Last updated: 2026-06-18
 
 Status: Partial advanced baseline
 
@@ -53,6 +53,7 @@ Notes:
 - PG compatibility corpus at `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener; every statement must complete without an `ErrorResponse`, and a curated subset of deterministic literal/scalar expressions is checked for exact values. Coverage spans startup probes, savepoints, `::`/`CAST` type casts, dollar-quoted literals (`$$…$$`, `$tag$…$tag$`), `ARRAY[…]` constructors, JSON/JSONB `->`/`->>`, column-side regex `~`/`~*`, `FETCH FIRST`, aggregates (`COUNT`/`SUM`/`AVG`/`string_agg`/`array_agg`), `GROUP BY`/`HAVING`, joins, `CASE`/`COALESCE`/`NULLIF`, subqueries/CTEs/`UNION`, scalar string/math functions, and DML with `RETURNING` and `ON CONFLICT … DO UPDATE`
 - real-driver smoke matrix at `tests/smoke/` that boots `skeindb serve` and round-trips through `psql`, psycopg3, and node-postgres (alongside the MySQL drivers), gated as the `driver-smoke` CI job
 - admin-tool compatibility harnesses for representative pgAdmin- and DBeaver-style schema/table/index/stat introspection queries over the live PG listener, including empty-but-typed `pg_stat_all_tables`, `pg_stat_user_tables`, `pg_stat_all_indexes`, `pg_stat_user_indexes`, and `pg_locks`
+- framework/driver compatibility harnesses for representative psycopg- and SQLAlchemy-style bootstrap/introspection queries over the live PG listener, covering `current_schema`/`current_schemas`, visibility probes, `format_type(...)`, and common `information_schema`/`pg_catalog` inspector paths
 - PG-specific operators: `||` (string concatenation), `~` / `~*` (regex match), `->` / `->>` (JSON access)
 - PG-specific scalar functions: `gen_random_uuid()`, `date_trunc()`, `to_char()`, `pg_typeof()`, `string_to_array()`, `array_length()`, `array_upper()`, `array_lower()`, `clock_timestamp()`, `statement_timestamp()`, `transaction_timestamp()`
 - driver-introspection helpers that return deterministic single-tenant answers: `format_type(oid, typmod)` for common base/array types (with `varchar(n)`, `numeric(p,s)`, and time/timestamp precision modifiers), the `pg_*_is_visible(oid)` visibility probes (`pg_table_is_visible`, `pg_type_is_visible`, `pg_function_is_visible`, and the text-search/operator/opclass/collation/conversion variants), the `has_*_privilege(...)` probes (`has_table_privilege`, `has_column_privilege`, `has_schema_privilege`, `has_database_privilege`, `has_sequence_privilege`, `has_function_privilege`, and friends) which always succeed for the owner role, `pg_get_userbyid(oid)` returning the bootstrap role, and `pg_encoding_to_char(int)` returning `UTF8`
@@ -63,6 +64,17 @@ Notes:
 - PG DDL compatibility: `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` → auto-increment integer columns, `CREATE SCHEMA` → `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY` (accepted/ignored), `CREATE INDEX IF NOT EXISTS`, `COMMENT ON` (silently accepted)
 - virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_roles`, `pg_authid`, `pg_user`, `pg_group`, `pg_tablespace`, `pg_am`, `pg_description`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (basic builtin metadata for bootstrap functions plus selected PG scalar/aggregate functions including timestamp, UUID, array, formatting, type, aggregate, and common string helpers, with aggregate `prokind` rows, the current `substring` arities, the current `current_setting` arities, and `current_schemas(bool)`), `pg_settings`, `pg_stat_activity`, and `pg_stat_database`
 - shared `information_schema.columns` introspection through `sql.exec`, including common metadata fields (`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and `EXTRA`) used by cross-dialect ORMs
+
+## Admin-tool compatibility
+
+The current tested admin-tool/browsering coverage is intentionally narrow and fixture-backed:
+
+- pgAdmin-style schema/table/index/stat browsing queries from `tests/compat/pg_admin_pgadmin.sql`
+- DBeaver-style table/column/constraint/index browsing queries from `tests/compat/pg_admin_dbeaver.sql`
+- psycopg-style bootstrap/introspection probes from `tests/compat/pg_framework_psycopg.sql`
+- SQLAlchemy inspector-style metadata probes from `tests/compat/pg_framework_sqlalchemy.sql`
+
+This is enough to harden common metadata navigation flows and framework bootstrap checks without claiming full framework parity.
 
 ## Module map
 

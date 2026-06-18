@@ -1,10 +1,10 @@
 # Change Data Capture (CDC) and dependency-driven changefeeds
 
 Status: Partial implementation
-Last updated: 2026-05-27
+Last updated: 2026-06-18
 
 Current runtime baseline:
-- `cdc.subscribe_table` creates table subscriptions over the RPC API. Subscriptions can request row images with `include: {"before": true, "after": true}`, can narrow delivery to selected source mutation kinds with `ops: ["insert", "update", "delete"]`, can restrict replay to one exact primary-key tuple with `pk: [<typed Lit>, ...]`, can restrict replay to an inclusive primary-key range on single-column primary keys with `pk_range: {"lower_bound": <typed Lit>?, "upper_bound": <typed Lit>?}`, can restrict replay to mutations where at least one named column value changes with `columns: ["status", ...]`, and can choose `format: "objects_json"` or `format: "plain_json"` for `cdc.poll`, SSE, and WebSocket event payloads.
+- `cdc.subscribe_table` creates table subscriptions over the RPC API. Subscriptions can request row images with `include: {"before": true, "after": true}`, can narrow delivery to selected source mutation kinds with `ops: ["insert", "update", "delete"]`, can restrict replay to one exact primary-key tuple with `pk: [<typed Lit>, ...]`, can restrict replay to an inclusive primary-key range on single-column primary keys with `pk_range: {"lower_bound": <typed Lit>?, "upper_bound": <typed Lit>?}`, can restrict replay to mutations where at least one named column value changes with `columns: ["status", ...]`, and can choose `format: "objects_json"`, `format: "plain_json"`, or `format: "compact_json"` for `cdc.poll`, SSE, and WebSocket event payloads.
 - `cdc.subscribe_query` creates dependency-driven subscriptions for prepared queries and emits invalidation events with the current query ETag. Query subscriptions can request the same optional triggering row images through `include`, and the same `ops`, exact `pk`, inclusive `pk_range`, and changed-column `columns` filters constrain which source table mutations emit `invalidate` events. Prepared queries over views expand those view dependencies to the underlying base tables that actually emit retained CDC events, prepared queries with set-operation bodies (for example `UNION` / `UNION ALL`) track dependency tables across every branch, and prepared queries using CTEs walk the CTE definitions for base-table dependencies while ignoring the CTE names as physical tables.
 - `cdc.poll` reads from the retained persisted change log and returns `earliest_offset` / `latest_offset`, `resnapshot_required` metadata when a consumer falls behind the retained horizon, and a `backpressure` object with `state`, `lag`, `remaining_until_resnapshot`, and `paused`.
 - `cdc.pause` and `cdc.resume` persist an operator pause flag per subscription. Paused subscriptions keep their cursor and retained-horizon accounting, but `cdc.poll` suppresses data events until resumed unless a resnapshot is already required.
@@ -12,7 +12,7 @@ Current runtime baseline:
 - `GET /api/v1/cdc/ws/{sub_id}` upgrades to a WebSocket stream that replays the same retained subscription events as JSON text frames, resumes from `Last-Event-ID` or `from_offset`, emits `backpressure` control frames for non-healthy states, and emits a terminal `resnapshot` control frame when the reconnect cursor falls behind retention.
 - `cdc.ack` persists the acknowledged consumer cursor per subscription so polling, SSE, and WebSocket resumes survive process restarts.
 - `cdc.close` removes the subscription handle and its persisted cursor state.
-- `stats.snapshot.cdc` reports active subscription counts, aggregate lag, retained-window offsets, pause/pressure counters, backpressure thresholds, and `dropped_events_total` so operators can spot consumers that have fallen behind retention.
+- `stats.snapshot.cdc` reports active subscription counts, aggregate lag, retained-window offsets, pause/pressure counters, `events_emitted`, `bytes_emitted`, `cursor_resume_count`, `backpressure_drops`, backpressure thresholds, and `dropped_events_total` so operators can spot consumers that have fallen behind retention and measure sink/export activity.
 - SkeinAdmin now includes a dedicated CDC page for `cdc.subscribe_table` / `cdc.poll` / `cdc.pause` / `cdc.resume` / `cdc.ack` / `cdc.close`, with lag and backpressure visualization derived from the current poll/control state.
 - Subscribe results now include both `sse_url` and `ws_url` transport paths.
 
@@ -47,7 +47,7 @@ Each CDC event includes:
 Current runtime scope:
 - row-level table events persist `commit_ts_ms`, `lsn = seq`, and optional `before` / `after` row images in the retained change log; `cdc.poll`, SSE, and WebSocket only expose those images for subscriptions that opt in via `include.before` / `include.after`, only deliver source events whose op matches the optional subscription `ops` allowlist, whose retained `pk` exactly matches the optional subscription `pk` tuple and/or falls within the optional inclusive `pk_range` bounds, and when `columns` is present only deliver events whose retained `before` / `after` row images differ on at least one selected column while projecting exposed row images down to those columns
 - query invalidation events reuse the triggering table event metadata and override `op = "invalidate"`; when requested, they can also forward the triggering event's `before` / `after` row images alongside `query_id` / `etag`, and the optional subscription `ops` allowlist, exact `pk` tuple, inclusive `pk_range`, and changed-column `columns` filter are evaluated against the underlying triggering table event before the invalidation is emitted
-- delivery formats are subscription-scoped and persisted: `objects_json` keeps `pk`, `before`, and `after` values as typed SkeinQL `Lit` envelopes, while `plain_json` emits those same fields as ordinary JSON scalars/objects for clients that do not need type tags
+- delivery formats are subscription-scoped and persisted: `objects_json` keeps `pk`, `before`, and `after` values as typed SkeinQL `Lit` envelopes, `plain_json` emits those same fields as ordinary JSON scalars/objects for clients that do not need type tags, and `compact_json` emits a short-key envelope (`s`/`d`/`t`/`o`/`k`/`b`/`a`/`q`/`e`/`ts`/`l`) for lower-overhead downstream consumers
 
 ## 3. Streams
 
@@ -60,7 +60,7 @@ Current runtime scope:
 - Current runtime scope: `pk` can narrow a full-table stream to one exact primary-key tuple; table subscriptions reject `pk` filters when the table has no primary key or the tuple width does not match.
 - Current runtime scope: `pk_range` can narrow a full-table stream to retained events whose single-column primary key falls inside inclusive `lower_bound` / `upper_bound` bounds; table subscriptions reject range filters when the table has no primary key, has a composite primary key, when both bounds are missing, or when the lower bound sorts after the upper bound.
 - Current runtime scope: `columns` can narrow a stream to events where at least one selected column value changes between the retained `before` / `after` row images; when row images are included, they are projected down to those columns, and table subscriptions reject unknown column names.
-- Current runtime scope: `format` defaults to `objects_json`; `plain_json` is also accepted and applies consistently to `cdc.poll`, SSE, and WebSocket delivery.
+- Current runtime scope: `format` defaults to `objects_json`; `plain_json` and `compact_json` are also accepted and apply consistently to `cdc.poll`, SSE, WebSocket, and sink-drain delivery.
 - Optional filters beyond the current exact/range primary-key, source-op, and changed-column filters (shard) remain planned.
 
 ### 3.2 Query streams (dependency-driven)
@@ -99,6 +99,7 @@ Current runtime support:
   - a subscription may declare `options.sink` to push delivery events to an external destination
   - the first supported connector is a durable append-only **file sink** (`{"type": "file", "path": "..."}`) that writes one NDJSON-encoded delivery event per line, so downstream tools can tail the file
   - the sink tracks its own per-subscription `sink_offset` cursor (independent of the consumer ACK cursor) so repeated drains never re-deliver rows
+  - each successful drain returns a deterministic `cursor_handoff` payload (`sub_id`, `next_offset`, `format`) for external worker checkpoints
   - the cursor is persisted in `cdc_subscriptions.json` and survives restarts; events honor the subscription's filters, projection, and `format`
 
 Backpressure state model:

@@ -17427,6 +17427,7 @@ fn parse_cdc_event_format(format: Option<String>) -> anyhow::Result<CdcEventForm
     match format.as_str() {
         "objects_json" => Ok(CdcEventFormat::ObjectsJson),
         "plain_json" => Ok(CdcEventFormat::PlainJson),
+        "compact_json" => Ok(CdcEventFormat::CompactJson),
         _ => anyhow::bail!("invalid_request: unsupported cdc format {format}"),
     }
 }
@@ -33377,7 +33378,11 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "dropped_events_total": cdc.dropped_events_total,
             "warn_lag": cdc.warn_lag,
             "throttle_lag": cdc.throttle_lag,
-            "min_remaining_until_resnapshot": cdc.min_remaining_until_resnapshot
+            "min_remaining_until_resnapshot": cdc.min_remaining_until_resnapshot,
+            "events_emitted": cdc.events_emitted,
+            "bytes_emitted": cdc.bytes_emitted,
+            "cursor_resume_count": cdc.cursor_resume_count,
+            "backpressure_drops": cdc.backpressure_drops
         },
         "storage": {
             "wal_bytes": storage.wal_bytes,
@@ -33396,6 +33401,12 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "wal_truncated_torn_tail": storage.wal_truncated_torn_tail,
             "last_checkpoint_ts_ms": storage.last_checkpoint_ts_ms,
             "checkpoint_dirty_tables": storage.checkpoint_dirty_tables,
+            "streaming_read_tables": storage.streaming_read_tables,
+            "materialized_table_count": storage.materialized_table_count,
+            "materialized_row_estimate": storage.materialized_row_estimate,
+            "streamed_row_estimate": storage.streamed_row_estimate,
+            "startup_materialization_ms": storage.startup_materialization_ms,
+            "scan_read_amplification_estimate": storage.scan_read_amplification_estimate,
             "value_lookup": value_lookup,
             "learned_index": learned_index
         },
@@ -35669,6 +35680,104 @@ mod tests {
         assert_eq!(events[0]["pk"][0].as_u64(), Some(1));
         assert_eq!(events[0]["after"]["id"].as_u64(), Some(1));
         assert_eq!(events[0]["after"]["data"].as_str(), Some("one"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_table_subscription_compact_json_format_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_compact_json_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({
+                "db":"app",
+                "table":"events",
+                "format":"compact_json",
+                "include":{"after":true}
+            }),
+        )
+        .await;
+        assert!(subscribe.ok, "{subscribe:?}");
+        let sub_id = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("sub_id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|result| result.get("offset"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": offset, "limit": 10}),
+        )
+        .await;
+        assert!(poll.ok, "{poll:?}");
+        let events = poll
+            .result
+            .as_ref()
+            .and_then(|result| result.get("events"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["o"], "insert");
+        assert_eq!(events[0]["d"], "app");
+        assert_eq!(events[0]["t"], "events");
+        assert!(events[0].get("a").is_some());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -43404,6 +43513,12 @@ mod tests {
         assert!(storage.get("wal_truncated_torn_tail").is_some());
         assert!(storage.get("last_checkpoint_ts_ms").is_some());
         assert!(storage.get("checkpoint_dirty_tables").is_some());
+        assert!(storage.get("streaming_read_tables").is_some());
+        assert!(storage.get("materialized_table_count").is_some());
+        assert!(storage.get("materialized_row_estimate").is_some());
+        assert!(storage.get("streamed_row_estimate").is_some());
+        assert!(storage.get("startup_materialization_ms").is_some());
+        assert!(storage.get("scan_read_amplification_estimate").is_some());
         assert_eq!(
             storage
                 .get("checkpoint_dirty_tables")
@@ -43544,6 +43659,14 @@ mod tests {
             cdc.get("min_remaining_until_resnapshot")
                 .and_then(|value| value.as_u64()),
             Some(0)
+        );
+        assert!(cdc.get("events_emitted").is_some());
+        assert!(cdc.get("bytes_emitted").is_some());
+        assert!(cdc.get("cursor_resume_count").is_some());
+        assert_eq!(
+            cdc.get("backpressure_drops")
+                .and_then(|value| value.as_u64()),
+            Some(1)
         );
 
         let paused = call_rpc(&state, "cdc.pause", json!({"sub_id": sub_id})).await;

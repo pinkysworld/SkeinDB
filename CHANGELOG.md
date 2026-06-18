@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Adds a **large-table streaming read path** for segment-backed tables: broad base-table scans can now iterate persisted `.rseg` rows directly for high-row-count tables instead of always scanning the in-memory row image, and `stats.snapshot.storage` now exposes `streaming_read_tables`, `materialized_table_count`, `materialized_row_estimate`, `streamed_row_estimate`, `startup_materialization_ms`, and `scan_read_amplification_estimate`.
+- Extends **PostgreSQL compatibility hardening** with live framework-style fixture coverage for representative psycopg- and SQLAlchemy-style bootstrap/introspection queries over the PG listener.
+- Expands **CDC export surfaces** with a compact JSON delivery format plus sink-drain cursor handoff metadata and additional `stats.snapshot.cdc` delivery counters (`events_emitted`, `bytes_emitted`, `cursor_resume_count`, and `backpressure_drops`).
 - Groups coordinated RustCrypto and HTTP/web-stack dependency bumps in Dependabot and adds a router-construction regression test so `axum` path-syntax breakage is caught by CI before fragmented upgrade PRs land.
 - Adds a **WAL-backed storage recovery bridge** around the live JSON/segment row snapshots: committed row `insert` / `update` / `delete` mutations now log through the core WAL primitives, snapshots persist `last_applied_lsn`, startup replays only newer committed mutations, torn WAL tails are truncated, and `stats.snapshot.storage` reports replay/checkpoint state.
 - Hardens **PostgreSQL admin-tool compatibility** with live pgAdmin/DBeaver-style introspection fixtures, new typed empty virtual tables for `pg_stat_all_tables`, `pg_stat_user_tables`, `pg_stat_all_indexes`, `pg_stat_user_indexes`, and `pg_locks`, plus extended-protocol regression coverage for described admin catalog queries.

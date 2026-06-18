@@ -3237,6 +3237,13 @@ pub struct CdcAckResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcCursorHandoff {
+    pub sub_id: String,
+    pub next_offset: u64,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcSubscriptionControlResult {
     pub sub_id: String,
     pub paused: bool,
@@ -3255,6 +3262,14 @@ pub struct CdcCloseParams {
 pub struct CdcCloseResult {
     pub sub_id: String,
     pub closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSinkDrainResult {
+    pub sub_id: String,
+    pub delivered: u64,
+    pub sink_offset: u64,
+    pub cursor_handoff: CdcCursorHandoff,
 }
 
 // --------------------------------

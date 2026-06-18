@@ -255,6 +255,21 @@ struct StorageRecoveryRuntime {
     last_checkpoint_ts_ms: u64,
 }
 
+#[derive(Debug, Default)]
+struct StorageReadRuntime {
+    streaming_tables: HashSet<TableKey>,
+    streamed_rows: u64,
+    streamed_output_rows: u64,
+    startup_materialization_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct CdcDeliveryRuntime {
+    events_emitted: u64,
+    bytes_emitted: u64,
+    cursor_resume_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecondaryIndexDisk {
     built_version: u64,
@@ -429,6 +444,8 @@ pub struct Engine {
     encrypted_locked_tables: HashSet<TableKey>,
 
     storage_recovery: StorageRecoveryRuntime,
+    storage_reads: Mutex<StorageReadRuntime>,
+    cdc_delivery: Mutex<CdcDeliveryRuntime>,
     dirty_tables: HashSet<TableKey>,
     next_storage_txn_id: u64,
 }
@@ -1485,6 +1502,14 @@ pub struct CdcSinkDrainResult {
     pub sub_id: String,
     pub delivered: u64,
     pub sink_offset: u64,
+    pub cursor_handoff: CdcCursorHandoff,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcCursorHandoff {
+    pub sub_id: String,
+    pub next_offset: u64,
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1529,6 +1554,10 @@ pub struct CdcRuntimeStats {
     pub warn_lag: u64,
     pub throttle_lag: u64,
     pub min_remaining_until_resnapshot: u64,
+    pub events_emitted: u64,
+    pub bytes_emitted: u64,
+    pub cursor_resume_count: u64,
+    pub backpressure_drops: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1553,6 +1582,12 @@ pub struct EngineStorageStats {
     pub wal_truncated_torn_tail: bool,
     pub last_checkpoint_ts_ms: u64,
     pub checkpoint_dirty_tables: u64,
+    pub streaming_read_tables: u64,
+    pub materialized_table_count: u64,
+    pub materialized_row_estimate: u64,
+    pub streamed_row_estimate: u64,
+    pub startup_materialization_ms: u64,
+    pub scan_read_amplification_estimate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1574,11 +1609,13 @@ pub struct Subscriptions {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 #[serde(rename_all = "snake_case")]
 pub enum CdcEventFormat {
     #[default]
     ObjectsJson,
     PlainJson,
+    CompactJson,
 }
 
 impl CdcEventFormat {
@@ -1635,6 +1672,9 @@ impl Serialize for CdcDeliveryEvent<'_> {
     where
         S: serde::Serializer,
     {
+        if matches!(self.format, CdcEventFormat::CompactJson) {
+            return serialize_compact_cdc_event(self.event, serializer);
+        }
         let event = self.event;
         let mut len = 5;
         if event.pk.is_some() {
@@ -1668,6 +1708,7 @@ impl Serialize for CdcDeliveryEvent<'_> {
                     let pk = pk.iter().map(cdc_lit_to_plain_json).collect::<Vec<_>>();
                     state.serialize_field("pk", &pk)?;
                 }
+                CdcEventFormat::CompactJson => unreachable!("compact_json handled above"),
             }
         }
         if let Some(before) = &event.before {
@@ -1677,6 +1718,7 @@ impl Serialize for CdcDeliveryEvent<'_> {
                     let before = cdc_row_to_plain_json(before);
                     state.serialize_field("before", &before)?;
                 }
+                CdcEventFormat::CompactJson => unreachable!("compact_json handled above"),
             }
         }
         if let Some(after) = &event.after {
@@ -1686,6 +1728,7 @@ impl Serialize for CdcDeliveryEvent<'_> {
                     let after = cdc_row_to_plain_json(after);
                     state.serialize_field("after", &after)?;
                 }
+                CdcEventFormat::CompactJson => unreachable!("compact_json handled above"),
             }
         }
         if let Some(query_id) = &event.query_id {
@@ -1700,6 +1743,57 @@ impl Serialize for CdcDeliveryEvent<'_> {
         }
         state.end()
     }
+}
+
+fn serialize_compact_cdc_event<S>(event: &ChangeEvent, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut len = 5;
+    if event.pk.is_some() {
+        len += 1;
+    }
+    if event.before.is_some() {
+        len += 1;
+    }
+    if event.after.is_some() {
+        len += 1;
+    }
+    if event.query_id.is_some() {
+        len += 1;
+    }
+    if event.etag.is_some() {
+        len += 1;
+    }
+    if event.lsn.is_some() {
+        len += 1;
+    }
+    let mut state = serializer.serialize_struct("CompactChangeEvent", len)?;
+    state.serialize_field("s", &event.seq)?;
+    state.serialize_field("d", &event.db)?;
+    state.serialize_field("t", &event.table)?;
+    state.serialize_field("o", &event.op)?;
+    state.serialize_field("ts", &event.commit_ts_ms)?;
+    if let Some(pk) = &event.pk {
+        let pk = pk.iter().map(cdc_lit_to_plain_json).collect::<Vec<_>>();
+        state.serialize_field("k", &pk)?;
+    }
+    if let Some(before) = &event.before {
+        state.serialize_field("b", &cdc_row_to_plain_json(before))?;
+    }
+    if let Some(after) = &event.after {
+        state.serialize_field("a", &cdc_row_to_plain_json(after))?;
+    }
+    if let Some(query_id) = &event.query_id {
+        state.serialize_field("q", query_id)?;
+    }
+    if let Some(etag) = &event.etag {
+        state.serialize_field("e", etag)?;
+    }
+    if let Some(lsn) = event.lsn {
+        state.serialize_field("l", &lsn)?;
+    }
+    state.end()
 }
 
 pub fn cdc_event_delivery_value(
@@ -2053,13 +2147,20 @@ impl Engine {
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
             storage_recovery: StorageRecoveryRuntime::default(),
+            storage_reads: Mutex::new(StorageReadRuntime::default()),
+            cdc_delivery: Mutex::new(CdcDeliveryRuntime::default()),
             dirty_tables: HashSet::new(),
             next_storage_txn_id: 1,
         };
 
         engine.load_storage_recovery_meta_best_effort();
         engine.load_encryption_state_best_effort();
+        let startup_materialization_started = Instant::now();
         engine.load_tables_best_effort();
+        if let Ok(mut storage_reads) = engine.storage_reads.lock() {
+            storage_reads.startup_materialization_ms =
+                startup_materialization_started.elapsed().as_millis() as u64;
+        }
         engine.recover_storage_wal()?;
         engine.rebuild_value_store_from_tables_best_effort();
         engine.load_changes_best_effort();
@@ -2088,8 +2189,11 @@ impl Engine {
         let mut total_rows = 0u64;
         let mut mvcc_versions = 0u64;
         let mut seen_ids = HashSet::<ValueId>::new();
+        let mut materialized_row_estimate = 0u64;
 
         for tdata in self.tables.values() {
+            materialized_row_estimate =
+                materialized_row_estimate.saturating_add(tdata.rows.len() as u64);
             for entry in tdata.rows.iter() {
                 mvcc_versions = mvcc_versions.saturating_add(entry.version.max(1));
                 if entry.deleted {
@@ -2127,6 +2231,32 @@ impl Engine {
             .unwrap_or((0, 0));
 
         let disk_bytes = data_dir_size_bytes(&self.data_dir);
+        let (
+            streaming_read_tables,
+            streamed_row_estimate,
+            startup_materialization_ms,
+            scan_read_amplification_estimate,
+        ) = self
+            .storage_reads
+            .lock()
+            .map(|runtime| {
+                let amp = if runtime.streamed_output_rows == 0 {
+                    if runtime.streamed_rows == 0 {
+                        0.0
+                    } else {
+                        runtime.streamed_rows as f64
+                    }
+                } else {
+                    runtime.streamed_rows as f64 / runtime.streamed_output_rows as f64
+                };
+                (
+                    runtime.streaming_tables.len() as u64,
+                    runtime.streamed_rows,
+                    runtime.startup_materialization_ms,
+                    amp,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0.0));
 
         EngineStorageStats {
             wal_bytes: self.change_log_bytes(),
@@ -2147,6 +2277,12 @@ impl Engine {
             wal_truncated_torn_tail: self.storage_recovery.wal_truncated_torn_tail,
             last_checkpoint_ts_ms: self.storage_recovery.last_checkpoint_ts_ms,
             checkpoint_dirty_tables: self.dirty_tables.len() as u64,
+            streaming_read_tables,
+            materialized_table_count: total_tables,
+            materialized_row_estimate,
+            streamed_row_estimate,
+            startup_materialization_ms,
+            scan_read_amplification_estimate,
         }
     }
 
@@ -2234,6 +2370,18 @@ impl Engine {
             min_remaining_until_resnapshot = retention_limit;
         }
 
+        let (events_emitted, bytes_emitted, cursor_resume_count) = self
+            .cdc_delivery
+            .lock()
+            .map(|runtime| {
+                (
+                    runtime.events_emitted,
+                    runtime.bytes_emitted,
+                    runtime.cursor_resume_count,
+                )
+            })
+            .unwrap_or((0, 0, 0));
+
         CdcRuntimeStats {
             active_subscriptions: subs.subs.len() as u64,
             table_subscriptions,
@@ -2252,6 +2400,10 @@ impl Engine {
             warn_lag,
             throttle_lag,
             min_remaining_until_resnapshot,
+            events_emitted,
+            bytes_emitted,
+            cursor_resume_count,
+            backpressure_drops: earliest_offset.saturating_sub(1),
         }
     }
 
@@ -10698,8 +10850,13 @@ impl Engine {
             self.cdc_collect_events(&sub.target, &options, resume_offset, drain_limit)?;
 
         let delivered = events.len() as u64;
+        if resume_offset > 0 {
+            if let Ok(mut runtime) = self.cdc_delivery.lock() {
+                runtime.cursor_resume_count = runtime.cursor_resume_count.saturating_add(1);
+            }
+        }
         if delivered > 0 {
-            match &sink {
+            let emitted_bytes = match &sink {
                 CdcSinkConfig::File { path } => {
                     use std::io::Write as _;
                     let mut payload = String::new();
@@ -10707,6 +10864,7 @@ impl Engine {
                         payload.push_str(&cdc_event_delivery_string(event, format)?);
                         payload.push('\n');
                     }
+                    let emitted_bytes = payload.len() as u64;
                     let path = PathBuf::from(path);
                     if let Some(parent) = path.parent() {
                         if !parent.as_os_str().is_empty() {
@@ -10719,7 +10877,12 @@ impl Engine {
                         .open(&path)?;
                     file.write_all(payload.as_bytes())?;
                     file.flush()?;
+                    emitted_bytes
                 }
+            };
+            if let Ok(mut runtime) = self.cdc_delivery.lock() {
+                runtime.events_emitted = runtime.events_emitted.saturating_add(delivered);
+                runtime.bytes_emitted = runtime.bytes_emitted.saturating_add(emitted_bytes);
             }
         }
 
@@ -10739,6 +10902,16 @@ impl Engine {
             sub_id: sub_id.to_string(),
             delivered,
             sink_offset,
+            cursor_handoff: CdcCursorHandoff {
+                sub_id: sub_id.to_string(),
+                next_offset: sink_offset,
+                format: match format {
+                    CdcEventFormat::ObjectsJson => "objects_json",
+                    CdcEventFormat::PlainJson => "plain_json",
+                    CdcEventFormat::CompactJson => "compact_json",
+                }
+                .to_string(),
+            },
         })
     }
 
@@ -14580,6 +14753,153 @@ where
     }
 }
 
+const STREAMING_READ_ROW_THRESHOLD: usize = 4096;
+
+fn streaming_read_row_threshold() -> usize {
+    std::env::var("SKEINDB_STREAMING_READ_ROW_THRESHOLD")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(STREAMING_READ_ROW_THRESHOLD)
+}
+
+fn table_prefers_streaming_read(engine: &Engine, base: &BaseTableRef, tdata: &TableData) -> bool {
+    engine.storage_mode.uses_segment()
+        && tdata.rows.len() >= streaming_read_row_threshold()
+        && engine.table_segment_path(&base.db, &base.table).exists()
+}
+
+fn decode_row_entry_disk_streaming(
+    row: RowEntryDisk,
+    seeds: &mut HashMap<ValueId, Lit>,
+    enc: Option<&RowEncryptionCodec<'_>>,
+) -> anyhow::Result<RowEntry> {
+    let mut decoded = RowObject::new();
+    for (k, v) in row.row.into_iter() {
+        if let Some(payload) = decode_encrypted_cell_payload(&v) {
+            let codec = enc.ok_or_else(|| {
+                anyhow::Error::from(EncryptionLockedError {
+                    db: String::new(),
+                    table: String::new(),
+                    detail: "database master key is not registered".to_string(),
+                })
+            })?;
+            let lit = codec
+                .decrypt_cell(&payload.column, &payload.kind, &payload.env_b64)
+                .map_err(|e| {
+                    anyhow::Error::from(EncryptionLockedError {
+                        db: codec.db.clone(),
+                        table: codec.table.clone(),
+                        detail: e.to_string(),
+                    })
+                })?;
+            decoded.insert(k, lit);
+            continue;
+        }
+        let lit = if let Some(refv) = decode_value_ref_payload(&v) {
+            let _kind = value_kind_from_label(&refv.kind);
+            if let Some(inline) = refv.lit {
+                match serde_json::from_value::<Lit>(inline) {
+                    Ok(lit) => {
+                        if let Some(id) = parse_hex16(&refv.id) {
+                            seeds.insert(id, lit.clone());
+                        }
+                        Some(lit)
+                    }
+                    Err(_) => None,
+                }
+            } else if let Some(id) = parse_hex16(&refv.id) {
+                seeds.get(&id).cloned()
+            } else {
+                None
+            }
+        } else {
+            serde_json::from_value::<Lit>(v).ok()
+        }
+        .unwrap_or(Lit::Null);
+        decoded.insert(k, lit);
+    }
+    Ok(RowEntry {
+        row: decoded,
+        version: row.version,
+        schema_version: row.schema_version,
+        deleted: row.deleted,
+        commit_ts_ms: row.commit_ts_ms,
+    })
+}
+
+fn for_each_persisted_segment_row<F>(
+    engine: &Engine,
+    base: &BaseTableRef,
+    mut visitor: F,
+) -> anyhow::Result<u64>
+where
+    F: FnMut(RowEntry) -> anyhow::Result<()>,
+{
+    let path = engine.table_segment_path(&base.db, &base.table);
+    let bytes = fs::read(&path)?;
+    if bytes.len() < 24 {
+        anyhow::bail!("segment file too small");
+    }
+    if bytes[0..8] != TABLE_ROWS_SEGMENT_MAGIC {
+        anyhow::bail!("segment magic mismatch");
+    }
+    let mut offset = 8usize;
+    let segment_version = read_u32_le_chunk(&bytes, &mut offset)?;
+    if segment_version != 1 && segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+        anyhow::bail!("unsupported segment format version: {segment_version}");
+    }
+    let table_format_version = read_u32_le_chunk(&bytes, &mut offset)?;
+    if segment_version >= 2 {
+        let _ = read_u64_le_chunk(&bytes, &mut offset)?;
+    }
+    if table_format_version != 2
+        && table_format_version != 3
+        && table_format_version != 4
+        && table_format_version != TABLE_ROWS_FORMAT_VERSION
+    {
+        anyhow::bail!("unsupported table format version: {}", table_format_version);
+    }
+    let row_count = read_u64_le_chunk(&bytes, &mut offset)?;
+    let codec = engine.row_encryption_codec(&base.db, &base.table);
+    let enc = codec.active().then_some(&codec);
+    let mut seeds = HashMap::<ValueId, Lit>::new();
+    let mut scanned = 0u64;
+
+    for _ in 0..row_count {
+        let payload_len = usize::try_from(read_u32_le_chunk(&bytes, &mut offset)?)
+            .map_err(|_| anyhow::anyhow!("payload length overflow"))?;
+        if offset.saturating_add(payload_len) > bytes.len() {
+            anyhow::bail!("segment payload truncated");
+        }
+        let payload = &bytes[offset..offset + payload_len];
+        let row: RowEntryDisk = serde_json::from_slice(payload)?;
+        offset += payload_len;
+        scanned = scanned.saturating_add(1);
+        visitor(decode_row_entry_disk_streaming(row, &mut seeds, enc)?)?;
+    }
+    if offset != bytes.len() {
+        anyhow::bail!("segment file contains trailing bytes");
+    }
+    Ok(scanned)
+}
+
+fn record_streaming_read(
+    engine: &Engine,
+    base: &BaseTableRef,
+    rows_scanned: u64,
+    output_rows: u64,
+) {
+    if let Ok(mut runtime) = engine.storage_reads.lock() {
+        runtime.streaming_tables.insert(TableKey {
+            db: base.db.clone(),
+            table: base.table.clone(),
+        });
+        runtime.streamed_rows = runtime.streamed_rows.saturating_add(rows_scanned);
+        runtime.streamed_output_rows = runtime.streamed_output_rows.saturating_add(output_rows);
+    }
+}
+
 fn scan_row_entries_batch(
     schema: &TableSchema,
     rows: &[RowEntry],
@@ -14759,6 +15079,119 @@ fn execute_select_batches(
     Ok((rows, rows_scanned))
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn try_execute_select_base_table_streaming(
+    engine: &Engine,
+    query: &Query,
+    base: &BaseTableRef,
+    distinct: bool,
+    projection: &[SelectItem],
+    predicate: Option<&Expr>,
+    args: &[Lit],
+    as_of_ms: Option<u64>,
+) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if engine.views.contains_key(&key) || engine.oblivious_policy_for(base).level != "off" {
+        return Ok(None);
+    }
+    let (schema, tdata) = engine.get_table(base)?;
+    if !table_prefers_streaming_read(engine, base, tdata) {
+        return Ok(None);
+    }
+
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let columns = projection_columns(projection);
+    let order = &query.order_by;
+    let predicate_plan = compile_interned_predicate_for_base(engine, base, predicate, args);
+    let query_ctx_columns =
+        collect_single_table_query_columns(&alias, projection, predicate, order);
+    let batch_columns = query_ctx_columns.clone().unwrap_or_else(|| {
+        schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    });
+    let materialized_ctx_columns = if predicate_plan.is_some() {
+        collect_single_table_projection_order_columns(&alias, projection, order)
+            .unwrap_or_else(|| batch_columns.clone())
+    } else {
+        batch_columns.clone()
+    };
+
+    let mut rows = Vec::new();
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+    let mut rows_scanned = 0u64;
+    for_each_persisted_segment_row(engine, base, |entry| {
+        if !row_visible_at(&entry, as_of_ms) {
+            return Ok(());
+        }
+        rows_scanned = rows_scanned.saturating_add(1);
+
+        let mut ctx = None;
+        if let Some(pred) = predicate {
+            if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                compiled_interned_predicate_matches_table_row(plan, schema, &entry.row)
+            }) {
+                if !matches {
+                    return Ok(());
+                }
+            } else {
+                let built =
+                    build_table_row_ctx(&alias, schema, &entry.row, Some(batch_columns.as_slice()));
+                if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
+                    return Ok(());
+                }
+                ctx = Some(built);
+            }
+        }
+
+        let ctx = ctx.unwrap_or_else(|| {
+            build_table_row_ctx(
+                &alias,
+                schema,
+                &entry.row,
+                Some(materialized_ctx_columns.as_slice()),
+            )
+        });
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        if order.is_empty() {
+            rows.push(out_row);
+        } else {
+            let keys = eval_order_keys(order, &ctx, args)?;
+            items.push((keys, out_row));
+        }
+        Ok(())
+    })?;
+
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+        rows = items.into_iter().map(|(_, row)| row).collect();
+    }
+    if distinct {
+        rows = dedup_select_rows(rows);
+    }
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+        let end = (off + lim).min(rows.len());
+        rows = if off >= rows.len() {
+            Vec::new()
+        } else {
+            rows[off..end].to_vec()
+        };
+    }
+
+    record_streaming_read(engine, base, rows_scanned, rows.len() as u64);
+    Ok(Some((columns, rows, rows_scanned)))
+}
+
 fn index_prefilter_candidates(
     engine: &Engine,
     base: &BaseTableRef,
@@ -14809,6 +15242,11 @@ fn try_execute_select_base_table(
     args: &[Lit],
     as_of_ms: Option<u64>,
 ) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
+    if let Some(result) = try_execute_select_base_table_streaming(
+        engine, query, base, distinct, projection, predicate, args, as_of_ms,
+    )? {
+        return Ok(Some(result));
+    }
     let key = TableKey {
         db: base.db.clone(),
         table: base.table.clone(),
@@ -17951,6 +18389,18 @@ fn scan_table(
     }
 
     let (schema, tdata) = engine.get_table(base)?;
+    if table_prefers_streaming_read(engine, base, tdata) {
+        let mut out = Vec::new();
+        let rows_scanned = for_each_persisted_segment_row(engine, base, |entry| {
+            if !row_visible_at(&entry, as_of_ms) {
+                return Ok(());
+            }
+            out.push(table_row_ctx_from_row(&alias, schema, &entry.row));
+            Ok(())
+        })?;
+        record_streaming_read(engine, base, rows_scanned, out.len() as u64);
+        return Ok(out);
+    }
     let mut out = Vec::new();
     for entry in tdata.rows.iter() {
         if !row_visible_at(entry, as_of_ms) {
@@ -40185,6 +40635,38 @@ mod tests {
     }
 
     #[test]
+    fn cdc_compact_json_format_serializes_short_keys() -> anyhow::Result<()> {
+        let event = ChangeEvent {
+            seq: 7,
+            db: "app".to_string(),
+            table: "events".to_string(),
+            op: "insert".to_string(),
+            pk: Some(vec![Lit::U64 { v: 1 }]),
+            before: None,
+            after: Some(row(&[(
+                "data",
+                Lit::Str {
+                    v: "value".to_string(),
+                },
+            )])),
+            query_id: None,
+            etag: Some("etag-1".to_string()),
+            commit_ts_ms: 42,
+            lsn: Some(7),
+        };
+        let payload = cdc_event_delivery_value(&event, CdcEventFormat::CompactJson)?;
+        assert_eq!(payload.get("s").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(payload.get("d").and_then(|v| v.as_str()), Some("app"));
+        assert_eq!(payload.get("t").and_then(|v| v.as_str()), Some("events"));
+        assert_eq!(payload.get("o").and_then(|v| v.as_str()), Some("insert"));
+        assert_eq!(payload.get("ts").and_then(|v| v.as_u64()), Some(42));
+        assert!(payload.get("k").is_some());
+        assert!(payload.get("a").is_some());
+        assert!(payload.get("e").is_some());
+        Ok(())
+    }
+
+    #[test]
     fn cdc_poll_requires_resnapshot_after_retention_horizon() -> anyhow::Result<()> {
         let dir = temp_dir("cdc_resnapshot_horizon");
         let mut engine = Engine::open(&dir)?;
@@ -40396,6 +40878,8 @@ mod tests {
         let drained = engine.cdc_sink_drain(&mut subs, &subscribe.sub_id, 10)?;
         assert_eq!(drained.delivered, 2);
         assert_eq!(drained.sink_offset, 2);
+        assert_eq!(drained.cursor_handoff.next_offset, 2);
+        assert_eq!(drained.cursor_handoff.format, "objects_json");
 
         let contents = fs::read_to_string(&sink_path)?;
         let lines: Vec<&str> = contents.lines().collect();
@@ -40421,6 +40905,10 @@ mod tests {
         assert_eq!(drained_after_restart.delivered, 1);
         assert_eq!(drained_after_restart.sink_offset, 3);
         assert_eq!(fs::read_to_string(&sink_path)?.lines().count(), 3);
+        let cdc_stats = reopened.cdc_runtime_stats_snapshot(&reopened_subs);
+        assert!(cdc_stats.events_emitted >= 1);
+        assert!(cdc_stats.bytes_emitted >= 1);
+        assert!(cdc_stats.cursor_resume_count >= 1);
 
         // A subscription without a sink rejects drains.
         let plain = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
@@ -49837,6 +50325,76 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn storage_streaming_read_stats_increment_for_large_segment_scans() -> anyhow::Result<()> {
+        std::env::set_var("SKEINDB_STREAMING_READ_ROW_THRESHOLD", "128");
+        let dir = temp_dir("storage_streaming_read_stats");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        let rows = (0..256u64)
+            .map(|id| {
+                row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: format!("row-{id}"),
+                        },
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table, rows, None)?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 256);
+
+        let stats = engine.storage_stats_snapshot();
+        assert_eq!(stats.streaming_read_tables, 1);
+        assert!(stats.streamed_row_estimate >= 256);
+        assert_eq!(stats.materialized_table_count, 1);
+        assert!(stats.materialized_row_estimate >= 256);
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("SKEINDB_STREAMING_READ_ROW_THRESHOLD");
         Ok(())
     }
 

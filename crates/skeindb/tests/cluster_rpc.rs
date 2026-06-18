@@ -13050,6 +13050,67 @@ async fn pg_admin_fixture_dbeaver_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn pg_framework_fixture_psycopg_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_framework_fixture_psycopg")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.framework_users (id BIGINT NOT NULL, email VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_framework_users_email ON app.framework_users (email)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_framework_psycopg.sql")
+    {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "psycopg fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_framework_fixture_sqlalchemy_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_framework_fixture_sqlalchemy")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.framework_posts (id BIGINT NOT NULL, title VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_framework_posts_title ON app.framework_posts (title)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in
+        pg_fixture_statements_from_path("../../tests/compat/pg_framework_sqlalchemy.sql")
+    {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "SQLAlchemy fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pg_simple_query_pg_catalog_class_attribute_index_constraint() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_catalog_class_attr")?;

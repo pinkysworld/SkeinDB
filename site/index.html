@@ -623,7 +623,7 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
       <h3>Content-Addressed Deduplication</h3>
-      <p>Every cell is hashed to a stable ValueID in the ValueStore. Identical values across rows, versions, tables, and replicas share one physical representation — automatic storage and replication savings with zero app changes. Live <code>dedup_ratio</code> and bytes-saved metrics in <code>stats.snapshot</code> and the admin dashboard (no flags required). Default segment-backed <code>.rseg</code> storage now has a WAL-backed recovery bridge for committed row mutations between checkpoints.</p>
+      <p>Every cell is hashed to a stable ValueID in the ValueStore. Identical values across rows, versions, tables, and replicas share one physical representation — automatic storage and replication savings with zero app changes. Live <code>dedup_ratio</code> and bytes-saved metrics in <code>stats.snapshot</code> and the admin dashboard (no flags required). Default segment-backed <code>.rseg</code> storage now has a WAL-backed recovery bridge for committed row mutations between checkpoints plus a streaming large-table scan path with read-path observability.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -635,7 +635,7 @@
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables for tables/views, roles/users, indexes, tablespaces, sequences, statistics, and database health, plus common bootstrap probes like <code>SHOW server_version</code> and <code>current_setting(...)</code> backed by the shared engine. Recent hardening adds pgAdmin/DBeaver-style introspection coverage and typed empty <code>pg_stat_*</code>/<code>pg_locks</code> surfaces where SkeinDB does not yet expose a real runtime statistic.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables for tables/views, roles/users, indexes, tablespaces, sequences, statistics, and database health, plus common bootstrap probes like <code>SHOW server_version</code> and <code>current_setting(...)</code> backed by the shared engine. Recent hardening adds pgAdmin/DBeaver plus psycopg/SQLAlchemy-style introspection coverage and typed empty <code>pg_stat_*</code>/<code>pg_locks</code> surfaces where SkeinDB does not yet expose a real runtime statistic.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -703,7 +703,7 @@
       <span class="status-badge status-prototype">Partial (Strong Local)</span>
       <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">📡</div>
       <h3>Query-Aware CDC Changefeeds</h3>
-      <p>Table and prepared-query subscriptions with durable cursors, row images (before/after opt-in), source-op / exact-PK / inclusive-PK-range / changed-column filters, and <code>objects_json</code> or <code>plain_json</code> formats. Dependency expansion automatically maps views, CTEs, UNIONs, and set-ops to real base tables for correct invalidations. Polling + SSE + WebSocket streams, pause/resume, backpressure, resnapshot signaling. Live lag/pressure in stats and SkeinAdmin CDC panel. See <a href="../docs/site/guide/cdc-changefeed.html">cdc-changefeed</a> and <a href="../docs/site/guide/cdc-with-sse.html">SSE tutorial</a>.</p>
+      <p>Table and prepared-query subscriptions with durable cursors, row images (before/after opt-in), source-op / exact-PK / inclusive-PK-range / changed-column filters, and <code>objects_json</code>, <code>plain_json</code>, or <code>compact_json</code> formats. Dependency expansion automatically maps views, CTEs, UNIONs, and set-ops to real base tables for correct invalidations. Polling + SSE + WebSocket streams, file-sink drains with deterministic cursor handoff, pause/resume, backpressure, resnapshot signaling. Live lag/pressure and delivery counters in stats and SkeinAdmin CDC panel. See <a href="../docs/site/guide/cdc-changefeed.html">cdc-changefeed</a> and <a href="../docs/site/guide/cdc-with-sse.html">SSE tutorial</a>.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Hardened (R08)</span>
