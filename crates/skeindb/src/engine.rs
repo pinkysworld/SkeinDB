@@ -1951,6 +1951,8 @@ impl Engine {
     ) -> anyhow::Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
+        // Clean up any temp files a prior crash left mid-rename before loading state.
+        sweep_stale_temp_files(&data_dir);
 
         let catalog = load_json::<Catalog>(&data_dir.join("catalog.json")).unwrap_or_default();
         let advisor_persist = advisor_persist_enabled();
@@ -33431,6 +33433,29 @@ fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Recursively remove stale atomic-write temp files (`*.skein-tmp.*`) left behind if a
+/// crash happened between creating the temp file and the rename in `durable_write_bytes`.
+/// The loaders never read them (they don't match the `.json`/`.rseg` suffixes), but
+/// sweeping them when the data dir is opened keeps it clean and bounds disk usage across
+/// repeated crashes. Best-effort: unreadable directories and files are skipped.
+fn sweep_stale_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            sweep_stale_temp_files(&path);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".skein-tmp."))
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     durable_write_bytes(path, &bytes)
@@ -33612,6 +33637,42 @@ mod tests {
         save_json(&path, &value)?;
         let read: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(read, value);
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_stale_temp_files_removes_temps_and_keeps_real_files() -> anyhow::Result<()> {
+        let dir = temp_dir("sweep_temps");
+        let sub = dir.join("tables").join("1");
+        fs::create_dir_all(&sub)?;
+        let real = sub.join("test.rseg");
+        fs::write(&real, b"committed")?;
+        // A torn temp left by a crash mid-rename, in a nested table dir.
+        let stale = sub.join("test.rseg.skein-tmp.4242");
+        fs::write(&stale, b"torn-partial")?;
+        sweep_stale_temp_files(&dir);
+        assert!(real.exists(), "committed file must survive the sweep");
+        assert_eq!(fs::read(&real)?, b"committed");
+        assert!(!stale.exists(), "stale temp file must be swept");
+        Ok(())
+    }
+
+    #[test]
+    fn engine_open_sweeps_leftover_temp_files() -> anyhow::Result<()> {
+        let dir = temp_dir("open_sweeps_temps");
+        let tdir = dir.join("tables").join("1");
+        fs::create_dir_all(&tdir)?;
+        // Plant crash-leftover temps at the data root and inside a table dir.
+        let stale_root = dir.join("catalog.json.skein-tmp.1");
+        let stale_tbl = tdir.join("test.rseg.skein-tmp.2");
+        fs::write(&stale_root, b"x")?;
+        fs::write(&stale_tbl, b"y")?;
+        let _engine = Engine::open(&dir)?;
+        assert!(!stale_root.exists(), "open() must sweep the root temp file");
+        assert!(
+            !stale_tbl.exists(),
+            "open() must sweep the table-dir temp file"
+        );
         Ok(())
     }
 
