@@ -2,7 +2,8 @@ target/
 target_*/
 dist/
 .DS_Store
-data/.replay_workspaces/
+# Runtime data dir created by `skeindb serve --data ./data`; not source.
+data/
 AGENTS.md
 **/AGENTS.md
 .codex/
