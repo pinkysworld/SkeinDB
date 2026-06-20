@@ -33,6 +33,10 @@ use wasmtime::{
 };
 
 use crate::storage_mode::TableStorageMode;
+
+mod forensic_helpers;
+use forensic_helpers::*;
+
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
@@ -11149,7 +11153,7 @@ impl Engine {
                 fs::create_dir_all(parent)?;
             }
             let bytes = encode_table_rows_segment(&disk)?;
-            fs::write(segment_path, bytes)?;
+            durable_write_bytes(&segment_path, &bytes)?;
             if matches!(self.storage_mode, TableStorageMode::Dual) {
                 save_json(&path, &disk)?;
             }
@@ -23730,388 +23734,6 @@ fn shuffle_rows(rows: &mut [RowCtx], seed: u64) {
 }
 
 // -----------------------------
-// Forensic helpers
-// -----------------------------
-
-fn forensic_genesis_hash() -> String {
-    "genesis".to_string()
-}
-
-fn forensic_index_by_id(records: &[ForensicRecord], id: u64) -> Option<usize> {
-    records.iter().position(|r| r.id == id)
-}
-
-fn forensic_filter_matches(
-    rec: &ForensicRecord,
-    filter: &serde_json::Value,
-) -> anyhow::Result<bool> {
-    if filter.is_null() {
-        return Ok(true);
-    }
-    let Some(obj) = filter.as_object() else {
-        anyhow::bail!("invalid_request: forensic filter must be a JSON object");
-    };
-    let looks_like_expr = obj
-        .get("op")
-        .and_then(|v| v.as_str())
-        .map(|op| forensic_filter_operator(op).is_some())
-        .unwrap_or(false)
-        && (obj.contains_key("a") || obj.contains_key("b") || obj.contains_key("args"));
-
-    if !looks_like_expr {
-        for (field, expected) in obj {
-            let actual = forensic_filter_field_value(rec, field)?;
-            let expected = forensic_filter_literal_value(expected)?;
-            if actual != expected {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
-    }
-
-    let op = obj
-        .get("op")
-        .and_then(|v| v.as_str())
-        .and_then(forensic_filter_operator)
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown forensic filter operator"))?;
-    match op {
-        "and" => {
-            for arg in forensic_filter_args(obj)? {
-                if !forensic_filter_matches(rec, arg)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        "or" => {
-            for arg in forensic_filter_args(obj)? {
-                if forensic_filter_matches(rec, arg)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        "not" => {
-            let arg = obj.get("a").or_else(|| obj.get("arg")).ok_or_else(|| {
-                anyhow::anyhow!("invalid_request: not filter requires an operand")
-            })?;
-            Ok(!forensic_filter_matches(rec, arg)?)
-        }
-        "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "contains" => {
-            let left = forensic_filter_operand_value(rec, obj.get("a"))?;
-            let right = forensic_filter_operand_value(rec, obj.get("b"))?;
-            let matched = match op {
-                "eq" => left == right,
-                "ne" => left != right,
-                "contains" => forensic_value_contains(&left, &right),
-                "gt" | "ge" | "lt" | "le" => forensic_compare_values(&left, &right, op)?,
-                _ => false,
-            };
-            Ok(matched)
-        }
-        _ => anyhow::bail!("invalid_request: unknown forensic filter operator"),
-    }
-}
-
-fn forensic_filter_operator(op: &str) -> Option<&'static str> {
-    match op.to_ascii_lowercase().as_str() {
-        "and" => Some("and"),
-        "or" => Some("or"),
-        "not" => Some("not"),
-        "eq" | "=" => Some("eq"),
-        "ne" | "!=" | "<>" => Some("ne"),
-        "gt" | ">" => Some("gt"),
-        "ge" | ">=" => Some("ge"),
-        "lt" | "<" => Some("lt"),
-        "le" | "<=" => Some("le"),
-        "contains" => Some("contains"),
-        _ => None,
-    }
-}
-
-fn forensic_filter_args(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<Vec<&serde_json::Value>> {
-    if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-        return Ok(args.iter().collect());
-    }
-    let mut args = Vec::new();
-    if let Some(a) = obj.get("a") {
-        args.push(a);
-    }
-    if let Some(b) = obj.get("b") {
-        args.push(b);
-    }
-    if args.is_empty() {
-        anyhow::bail!("invalid_request: forensic boolean filter requires args");
-    }
-    Ok(args)
-}
-
-fn forensic_filter_operand_value(
-    rec: &ForensicRecord,
-    operand: Option<&serde_json::Value>,
-) -> anyhow::Result<serde_json::Value> {
-    let operand = operand
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: forensic filter missing operand"))?;
-    if let Some(obj) = operand.as_object() {
-        if let Some(col) = obj.get("col").and_then(|v| v.as_str()) {
-            return forensic_filter_field_value(rec, col);
-        }
-        if let Some(lit) = obj.get("lit") {
-            return forensic_filter_literal_value(lit);
-        }
-        if let Some(value) = obj.get("value") {
-            return forensic_filter_literal_value(value);
-        }
-    }
-    forensic_filter_literal_value(operand)
-}
-
-fn forensic_filter_literal_value(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    if value.get("t").is_some() {
-        let lit: Lit = serde_json::from_value(value.clone())?;
-        return Ok(forensic_lit_plain_value(&lit));
-    }
-    Ok(value.clone())
-}
-
-fn forensic_filter_field_value(
-    rec: &ForensicRecord,
-    field: &str,
-) -> anyhow::Result<serde_json::Value> {
-    match field.to_ascii_lowercase().as_str() {
-        "id" => Ok(serde_json::json!(rec.id)),
-        "ts" | "ts_ms" | "time" => Ok(serde_json::json!(rec.ts_ms)),
-        "db" | "schema" => Ok(serde_json::json!(rec.db)),
-        "table" => Ok(serde_json::json!(rec.table)),
-        "op" | "operation" => Ok(serde_json::json!(rec.op)),
-        "change_seq" | "seq" => Ok(serde_json::json!(rec.change_seq)),
-        "prev_hash" => Ok(serde_json::json!(rec.prev_hash)),
-        "hash" => Ok(serde_json::json!(rec.hash)),
-        "pk" => serde_json::to_value(&rec.pk).map_err(|e| anyhow::anyhow!(e)),
-        other => anyhow::bail!("invalid_request: unknown forensic filter field {other}"),
-    }
-}
-
-fn forensic_lit_plain_value(lit: &Lit) -> serde_json::Value {
-    match lit {
-        Lit::Null => serde_json::Value::Null,
-        Lit::Bool { v } => serde_json::json!(v),
-        Lit::I64 { v } => serde_json::json!(v),
-        Lit::U64 { v } => serde_json::json!(v),
-        Lit::F64 { v } => serde_json::json!(v),
-        Lit::Dec { v } | Lit::Str { v } | Lit::Uuid { v } => serde_json::json!(v),
-        Lit::Bytes { b64 } => serde_json::json!(b64),
-        Lit::Json { v } => v.clone(),
-        Lit::Embedding { dims, v, model } => serde_json::json!({
-            "dims": dims,
-            "v": v,
-            "model": model,
-        }),
-        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => serde_json::json!(iso),
-    }
-}
-
-fn forensic_value_contains(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    match (left, right) {
-        (serde_json::Value::String(left), serde_json::Value::String(right)) => left.contains(right),
-        (serde_json::Value::Array(items), needle) => items.iter().any(|item| item == needle),
-        _ => false,
-    }
-}
-
-fn forensic_compare_values(
-    left: &serde_json::Value,
-    right: &serde_json::Value,
-    op: &str,
-) -> anyhow::Result<bool> {
-    if let (Some(left), Some(right)) = (left.as_f64(), right.as_f64()) {
-        return Ok(match op {
-            "gt" => left > right,
-            "ge" => left >= right,
-            "lt" => left < right,
-            "le" => left <= right,
-            _ => false,
-        });
-    }
-    let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
-        anyhow::bail!("invalid_request: forensic comparison requires numeric or string operands");
-    };
-    Ok(match op {
-        "gt" => left > right,
-        "ge" => left >= right,
-        "lt" => left < right,
-        "le" => left <= right,
-        _ => false,
-    })
-}
-
-fn forensic_inclusion_proofs(
-    chain: &[ForensicRecord],
-    records: &[ForensicRecord],
-) -> Vec<serde_json::Value> {
-    records
-        .iter()
-        .filter_map(|rec| {
-            let chain_index = forensic_index_by_id(chain, rec.id)?;
-            let siblings = forensic_merkle_proof(chain, chain_index)
-                .into_iter()
-                .map(|(hash, sibling_is_right)| {
-                    serde_json::json!({
-                        "hash": hash,
-                        "sibling_side": if sibling_is_right { "right" } else { "left" },
-                    })
-                })
-                .collect::<Vec<_>>();
-            Some(serde_json::json!({
-                "record_id": rec.id,
-                "chain_index": chain_index,
-                "record_hash": rec.hash,
-                "siblings": siblings,
-            }))
-        })
-        .collect()
-}
-
-fn forensic_index_summary(
-    chain: &[ForensicRecord],
-    records: &[ForensicRecord],
-) -> serde_json::Value {
-    let mut by_table: BTreeMap<String, u64> = BTreeMap::new();
-    let mut by_op: BTreeMap<String, u64> = BTreeMap::new();
-    let mut by_actor: BTreeMap<String, u64> = BTreeMap::new();
-    let mut first_id = None;
-    let mut last_id = None;
-    let mut min_ts_ms = None;
-    let mut max_ts_ms = None;
-
-    for rec in records {
-        *by_table
-            .entry(format!("{}.{}", rec.db, rec.table))
-            .or_default() += 1;
-        *by_op.entry(rec.op.clone()).or_default() += 1;
-        *by_actor.entry("unknown".to_string()).or_default() += 1;
-        first_id = Some(first_id.map_or(rec.id, |v: u64| v.min(rec.id)));
-        last_id = Some(last_id.map_or(rec.id, |v: u64| v.max(rec.id)));
-        min_ts_ms = Some(min_ts_ms.map_or(rec.ts_ms, |v: u64| v.min(rec.ts_ms)));
-        max_ts_ms = Some(max_ts_ms.map_or(rec.ts_ms, |v: u64| v.max(rec.ts_ms)));
-    }
-
-    serde_json::json!({
-        "format": "skein.forensic.index.v1",
-        "chain_records": chain.len(),
-        "matched_records": records.len(),
-        "first_id": first_id,
-        "last_id": last_id,
-        "min_ts_ms": min_ts_ms,
-        "max_ts_ms": max_ts_ms,
-        "by_table": by_table,
-        "by_op": by_op,
-        "by_actor": by_actor,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn forensic_record_hash(
-    prev_hash: &str,
-    id: u64,
-    ts_ms: u64,
-    db: &str,
-    table: &str,
-    op: &str,
-    pk: Option<&Vec<Lit>>,
-    change_seq: u64,
-) -> String {
-    let payload = serde_json::json!({
-        "prev_hash": prev_hash,
-        "id": id,
-        "ts_ms": ts_ms,
-        "db": db,
-        "table": table,
-        "op": op,
-        "pk": pk,
-        "change_seq": change_seq
-    });
-    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    let hash = audit_hash256(&bytes);
-    hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
-}
-
-/// Compute a Merkle tree root over a sequence of forensic records.
-/// The tree is constructed as a binary hash tree over the record hashes.
-/// This provides O(log n) proof of inclusion for any record in the chain.
-fn forensic_merkle_root(records: &[ForensicRecord]) -> Option<String> {
-    if records.is_empty() {
-        return None;
-    }
-    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
-    // Iteratively combine pairs until we reach a single root.
-    while hashes.len() > 1 {
-        let mut next = Vec::new();
-        let mut i = 0;
-        while i < hashes.len() {
-            if i + 1 < hashes.len() {
-                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
-                let id = value_id(combined.as_bytes());
-                next.push(hex16(&id));
-                i += 2;
-            } else {
-                // Odd element: promote unchanged.
-                next.push(hashes[i].clone());
-                i += 1;
-            }
-        }
-        hashes = next;
-    }
-    hashes.into_iter().next()
-}
-
-/// Generate a Merkle inclusion proof for a specific record index.
-/// Returns the sibling hashes needed to reconstruct the root.
-#[cfg_attr(not(test), allow(dead_code))]
-fn forensic_merkle_proof(records: &[ForensicRecord], target_idx: usize) -> Vec<(String, bool)> {
-    if records.is_empty() || target_idx >= records.len() {
-        return Vec::new();
-    }
-    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
-    let mut proof = Vec::new();
-    let mut idx = target_idx;
-
-    while hashes.len() > 1 {
-        let mut next = Vec::new();
-        let mut i = 0;
-        let mut new_idx = 0;
-        while i < hashes.len() {
-            if i + 1 < hashes.len() {
-                if i == idx {
-                    // Target is left child; sibling is right.
-                    proof.push((hashes[i + 1].clone(), true));
-                    new_idx = next.len();
-                } else if i + 1 == idx {
-                    // Target is right child; sibling is left.
-                    proof.push((hashes[i].clone(), false));
-                    new_idx = next.len();
-                }
-                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
-                let id = value_id(combined.as_bytes());
-                next.push(hex16(&id));
-                i += 2;
-            } else {
-                if i == idx {
-                    new_idx = next.len();
-                }
-                next.push(hashes[i].clone());
-                i += 1;
-            }
-        }
-        hashes = next;
-        idx = new_idx;
-    }
-    proof
-}
-
-// -----------------------------
 // Wire encodings
 // -----------------------------
 
@@ -30443,7 +30065,7 @@ fn write_snapshot_cseg(
         bytes.extend_from_slice(&payload);
     }
 
-    fs::write(path, bytes)?;
+    durable_write_bytes(path, &bytes)?;
     Ok(ColumnSnapshotSegmentDisk {
         column: column.to_string(),
         is_pk,
@@ -33754,13 +33376,64 @@ fn canonical_schema_column_name<'a>(schema: &'a TableSchema, column: &str) -> Op
         .map(|candidate| candidate.name.as_str())
 }
 
-fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+/// Build a unique temp path next to `path` for atomic writes. Includes the pid and a
+/// process-global counter so concurrent writers — and any temp files left behind by a
+/// previously crashed run — never collide. The `.skein-tmp.` infix keeps these files
+/// from matching the `.json`/`.rseg` suffixes the loaders scan for.
+fn durable_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".skein-tmp.{pid}.{seq}"));
+    path.with_file_name(name)
+}
+
+/// Atomically and durably write `bytes` to `path`.
+///
+/// Writes to a uniquely-named sibling temp file, fsyncs it, then renames it over the
+/// destination. A crash at any point leaves either the prior file fully intact or the
+/// new contents fully in place — never a torn/partial file. The parent directory is
+/// fsynced afterwards so the rename itself survives a crash. This replaces bare
+/// `fs::write`, which overwrote files in place with no durability guarantee and could
+/// corrupt a whole table or metadata file on a mid-write crash.
+fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(value)?;
-    fs::write(path, bytes)?;
+    let tmp = durable_tmp_path(path);
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    // fsync the directory so the rename is durable (best-effort: not every platform or
+    // filesystem requires or supports directory fsync, so failures here are ignored).
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
+}
+
+fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    durable_write_bytes(path, &bytes)
 }
 
 fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
@@ -33883,6 +33556,63 @@ mod tests {
         dir.push(unique);
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[test]
+    fn durable_write_bytes_roundtrips_and_leaves_no_temp_files() -> anyhow::Result<()> {
+        let dir = temp_dir("durable_write_roundtrip");
+        // Parent dir does not exist yet: durable_write_bytes must create it.
+        let path = dir.join("tables").join("7").join("value.rseg");
+        durable_write_bytes(&path, b"hello world")?;
+        assert_eq!(fs::read(&path)?, b"hello world");
+        // The atomic-rename temp file must be cleaned up, never left in the data dir.
+        let leftovers: Vec<String> = fs::read_dir(path.parent().unwrap())?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".skein-tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected temp files: {leftovers:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn durable_write_bytes_overwrites_existing_file_fully() -> anyhow::Result<()> {
+        let dir = temp_dir("durable_write_overwrite");
+        let path = dir.join("table.rseg");
+        durable_write_bytes(&path, b"OLD-CONTENTS-THAT-ARE-LONGER")?;
+        durable_write_bytes(&path, b"NEW")?;
+        // Replacement is whole-file: no trailing bytes from the longer prior write
+        // survive (which an in-place fs::write of fewer bytes would have left behind).
+        assert_eq!(fs::read(&path)?, b"NEW");
+        Ok(())
+    }
+
+    #[test]
+    fn durable_tmp_path_is_unique_and_does_not_shadow_loader_suffixes() {
+        let target = Path::new("/data/tables/1/test.rseg");
+        let a = durable_tmp_path(target);
+        let b = durable_tmp_path(target);
+        assert_ne!(a, b, "temp paths must be unique across calls");
+        for p in [&a, &b] {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.contains(".skein-tmp."), "missing temp infix: {name}");
+            // Must not end in a suffix the table/segment loaders scan for, so a temp
+            // file left by a crash is never mistaken for committed data.
+            assert!(!name.ends_with(".rseg"), "temp shadows .rseg: {name}");
+            assert!(!name.ends_with(".json"), "temp shadows .json: {name}");
+            assert_eq!(p.parent(), target.parent(), "temp must stay in dest dir");
+        }
+    }
+
+    #[test]
+    fn save_json_persists_durably_and_roundtrips() -> anyhow::Result<()> {
+        let dir = temp_dir("save_json_durable");
+        let path = dir.join("settings.json");
+        let value = serde_json::json!({"server_name": "skeindb", "max_connections": 256});
+        save_json(&path, &value)?;
+        let read: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(read, value);
+        Ok(())
     }
 
     #[test]
