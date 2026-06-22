@@ -31433,14 +31433,34 @@ fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// The loaders never read them (they don't match the `.json`/`.rseg` suffixes), but
 /// sweeping them when the data dir is opened keeps it clean and bounds disk usage across
 /// repeated crashes. Best-effort: unreadable directories and files are skipped.
+///
+/// Symlinks are never followed and recursion depth is bounded, so a symlink that points
+/// outside the data dir can't have files deleted through it and a symlink cycle can't
+/// hang `open()`.
 fn sweep_stale_temp_files(dir: &Path) {
+    sweep_stale_temp_files_depth(dir, 0);
+}
+
+fn sweep_stale_temp_files_depth(dir: &Path, depth: u32) {
+    const MAX_SWEEP_DEPTH: u32 = 16;
+    if depth >= MAX_SWEEP_DEPTH {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        // Use the directory entry's own type so symlinks are detected without following
+        // them (unlike Path::is_dir, which traverses the link target).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
-            sweep_stale_temp_files(&path);
+        if file_type.is_dir() {
+            sweep_stale_temp_files_depth(&path, depth + 1);
         } else if path
             .file_name()
             .and_then(|n| n.to_str())
