@@ -38012,7 +38012,7 @@ mod tests {
         let secret_b = "top-secret-payload-B";
 
         {
-            let mut engine = Engine::open(&dir)?;
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             engine
                 .settings_encryption_register_key(
                     skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -38067,7 +38067,7 @@ mod tests {
         // Reopen WITHOUT registering the key: the table must be locked (loaded empty) and
         // writes/persist must be refused so the ciphertext is never overwritten.
         {
-            let engine = Engine::open(&dir)?;
+            let engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             let key = TableKey {
                 db: "app".to_string(),
                 table: "events".to_string(),
@@ -38085,7 +38085,7 @@ mod tests {
 
         // Reopen and register the key: the encrypted table unlocks and decrypts.
         {
-            let mut engine = Engine::open(&dir)?;
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             engine
                 .settings_encryption_register_key(
                     skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -38119,7 +38119,7 @@ mod tests {
 
         let dir = temp_dir("encrypted_at_rest_mle");
         let master_key_b64 = BASE64_STANDARD.encode([3u8; ENCRYPTION_MASTER_KEY_LEN]);
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine
             .settings_encryption_register_key(
                 skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -38201,7 +38201,7 @@ mod tests {
         let k1 = BASE64_STANDARD.encode([5u8; ENCRYPTION_MASTER_KEY_LEN]);
         let k2 = BASE64_STANDARD.encode([6u8; ENCRYPTION_MASTER_KEY_LEN]);
 
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine
             .settings_encryption_register_key(
                 skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -47057,7 +47057,7 @@ mod tests {
     #[test]
     fn table_rows_file_stores_value_refs() -> anyhow::Result<()> {
         let dir = temp_dir("table_rows_value_refs");
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         let large_payload = "same".repeat(80);
         engine.create_table(
             "app",
@@ -47150,7 +47150,7 @@ mod tests {
 
         drop(engine);
 
-        let reopened = Engine::open(&dir)?;
+        let reopened = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         let row = reopened
             .data_get(
                 &BaseTableRef {
@@ -47170,7 +47170,7 @@ mod tests {
     #[test]
     fn table_rows_file_skips_unprofitable_value_refs() -> anyhow::Result<()> {
         let dir = temp_dir("table_rows_skip_small_refs");
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine.create_table(
             "app",
             "events",
