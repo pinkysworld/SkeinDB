@@ -761,6 +761,46 @@ Rules:
 - `keys` map the JSON-encoded composite key to row indexes inside the current table snapshot.
 - Missing files or unknown `format_version` values are ignored and fall back to rebuilding from row data.
 
+### 11.11 Row-redo WAL (`wal-000001.log`)
+
+A single engine-level write-ahead log at `<data_dir>/wal-000001.log` provides crash
+recovery for committed table data. It uses the core WAL file framing from §9 (64-byte
+file header + length-prefixed records, grouped into `begin` / `mutation` / `commit`
+transactions), one transaction per committed DML statement.
+
+Each `mutation` record's payload is a JSON-encoded **row redo record** — the full final
+state of one changed row:
+
+```json
+{
+  "db": "app",
+  "table": "items",
+  "pk": [{"t": "u64", "v": 1}],
+  "row": { "id": {"t": "u64", "v": 1} },
+  "version": 7,
+  "schema_version": 1,
+  "deleted": false,
+  "commit_ts_ms": 1718900000000
+}
+```
+
+Semantics:
+
+- **Ordering.** On every committed `data_insert` / `data_update` / `data_delete`, the
+  affected rows' redo records are appended and **fsynced before** the table snapshot
+  (`.rseg`/`.json`) is written. A crash at any point therefore leaves a state the next
+  open can reconstruct.
+- **Replay.** On `Engine::open`, after snapshots are loaded, committed records are
+  replayed. Redo is **idempotent**: a record is applied only when its `version` exceeds
+  the row already present (by primary key), so records the snapshot already reflects are
+  skipped and a mutation lost between its WAL commit and the snapshot write is restored.
+  Deletes replay as tombstones (`deleted: true`).
+- **Truncation.** After a successful replay — and at every checkpoint, once all table
+  snapshots are durable — the WAL is deleted and reopened lazily on the next mutation, so
+  it only ever holds mutations since the last checkpoint.
+
+No existing on-disk record format changes; this is an additional, self-contained file.
+
 ---
 
 # Appendix A) v0.2/v0.3 extensions

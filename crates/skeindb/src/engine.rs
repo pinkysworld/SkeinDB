@@ -14,7 +14,7 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,10 +40,14 @@ use forensic_helpers::*;
 mod migration_intent;
 use migration_intent::*;
 
+mod wal;
+use wal::WalRowRecord;
+
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
 };
+use skeindb_core::wal::WalWriter;
 use skeindb_core::wasm_catalog::{
     WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
     WASM_UDF_ABI_V1,
@@ -391,6 +395,13 @@ pub struct Engine {
     /// would otherwise overwrite the ciphertext with empty/plaintext data). They are
     /// transparently reloaded once the matching key is registered.
     encrypted_locked_tables: HashSet<TableKey>,
+
+    /// Global write-ahead log writer for row-level redo (crash recovery of table data),
+    /// opened lazily on the first mutation and truncated at each checkpoint. See
+    /// `engine/wal.rs`.
+    wal: Option<WalWriter>,
+    /// Monotonic transaction id stamped on WAL records.
+    wal_next_txn: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2009,6 +2020,8 @@ impl Engine {
             encryption_audit: Vec::new(),
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
+            wal: None,
+            wal_next_txn: 0,
         };
 
         engine.load_encryption_state_best_effort();
@@ -2029,6 +2042,10 @@ impl Engine {
         engine.load_schema_flags_best_effort();
         engine.load_advisor_best_effort();
         engine.restore_advisor_indexes();
+
+        // Replay any committed row mutations a crash left in the WAL but not yet in the
+        // table snapshots, then truncate the WAL to a clean checkpoint.
+        engine.wal_recover();
 
         Ok(engine)
     }
@@ -3510,6 +3527,7 @@ impl Engine {
         let mut change_rows: Vec<(Vec<Lit>, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let table_key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3548,13 +3566,20 @@ impl Engine {
 
                 let version = next_row_version(schema);
                 let idx = tdata.rows.len();
-                tdata.rows.push(RowEntry {
+                let entry = RowEntry {
                     row: row.clone(),
                     version,
                     schema_version: row_schema_version,
                     deleted: false,
                     commit_ts_ms: now_millis(),
-                });
+                };
+                wal_records.push(WalRowRecord::from_entry(
+                    &table.db,
+                    &table.table,
+                    pk.clone(),
+                    &entry,
+                ));
+                tdata.rows.push(entry);
                 tdata.pk_index.insert(pk_key_s, idx);
                 secondary_index_add_row(tdata, idx, &row)?;
 
@@ -3603,6 +3628,9 @@ impl Engine {
             );
         }
         self.persist_catalog()?;
+        // Durably log the row redo records before writing the snapshot, so a crash
+        // between here and the snapshot write is recoverable on the next open.
+        self.wal_log_rows(&wal_records)?;
         self.persist_table(&table.db, &table.table)?;
         self.persist_changes_best_effort();
 
@@ -3647,6 +3675,7 @@ impl Engine {
         let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3717,6 +3746,14 @@ impl Engine {
                 affected += 1;
 
                 let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
+                if let Some(pk_vals) = pk.clone() {
+                    wal_records.push(WalRowRecord::from_entry(
+                        &table.db,
+                        &table.table,
+                        pk_vals,
+                        &tdata.rows[idx],
+                    ));
+                }
                 change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
                 collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
                 snapshot_rows.push(tdata.rows[idx].row.clone());
@@ -3761,6 +3798,7 @@ impl Engine {
 
         if affected > 0 {
             self.persist_catalog()?;
+            self.wal_log_rows(&wal_records)?;
             self.persist_table(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
@@ -3783,6 +3821,7 @@ impl Engine {
         let mut affected = 0u64;
         let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject)> = Vec::new();
         let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3821,6 +3860,12 @@ impl Engine {
                 let pk = extract_pk(schema, &row_before_delete).ok();
                 if let Some(ref pk) = pk {
                     snapshot_pks.push(pk.clone());
+                    wal_records.push(WalRowRecord::from_entry(
+                        &table.db,
+                        &table.table,
+                        pk.clone(),
+                        &tdata.rows[idx],
+                    ));
                 }
                 change_rows.push((pk, row_before_delete));
                 if let Some(lim) = limit {
@@ -3850,6 +3895,7 @@ impl Engine {
 
         if affected > 0 {
             self.persist_catalog()?;
+            self.wal_log_rows(&wal_records)?;
             self.persist_table(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
@@ -11237,6 +11283,8 @@ impl Engine {
         self.persist_oblivious_best_effort();
         self.persist_advisor_patterns_best_effort();
         self.persist_advisor_history_best_effort();
+        // Every table snapshot is now durable, so the WAL is redundant: reset it.
+        self.wal_truncate();
         Ok(())
     }
 
@@ -31624,6 +31672,61 @@ mod tests {
     }
 
     #[test]
+    fn wal_recovers_committed_rows_after_lost_snapshot() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_recovery");
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(
+                &table_ref,
+                vec![
+                    row(&[("id", Lit::U64 { v: 1 })]),
+                    row(&[("id", Lit::U64 { v: 2 })]),
+                ],
+                None,
+            )?;
+            // Drop without checkpoint: the committed mutations stay in the WAL on disk,
+            // simulating a crash before a clean shutdown.
+        }
+        assert!(
+            dir.join("wal-000001.log").exists(),
+            "committed mutations must be durably logged in the WAL"
+        );
+        // Simulate the table snapshot writes being lost in the crash while the catalog
+        // and the WAL survive.
+        fs::remove_dir_all(dir.join("tables")).ok();
+
+        // Reopen: recovery must replay the WAL and restore both rows.
+        let engine = Engine::open(&dir)?;
+        let (_, tdata) = engine.get_table(&table_ref)?;
+        let live = tdata.rows.iter().filter(|r| !r.deleted).count();
+        assert_eq!(live, 2, "both inserted rows must be recovered from the WAL");
+        // A successful recovery truncates the WAL back to a clean checkpoint.
+        assert!(
+            !dir.join("wal-000001.log").exists(),
+            "WAL must be truncated after a successful recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn shard_object_manifest_deduplicates_interned_values() -> anyhow::Result<()> {
         let dir = temp_dir("shard_object_manifest");
         let mut engine = Engine::open(&dir)?;
@@ -50277,6 +50380,11 @@ mod tests {
             save_json(&json_path, &legacy_rows)?;
             remove_file_if_exists(&segment_path)?;
         }
+
+        // This test fabricates a legacy on-disk table that predates the WAL, so drop any
+        // WAL the setup inserts produced; otherwise recovery would (correctly) replay the
+        // originally committed rows over the hand-written legacy snapshot.
+        remove_file_if_exists(&dir.join("wal-000001.log"))?;
 
         let reopened = Engine::open(&dir)?;
         let (_, tdata) = reopened.get_table(&table)?;
