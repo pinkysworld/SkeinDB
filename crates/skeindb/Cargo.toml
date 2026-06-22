@@ -59,4 +59,4 @@ skeindb-skeinql = { path = "../skeindb-skeinql" }
 [dev-dependencies]
 http-body-util = "0.1"
 rcgen = "0.14"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
