@@ -18,6 +18,11 @@
 use super::*;
 use skeindb_core::wal::{WalReader, WalWriter};
 
+/// Number of row mutations to absorb into the WAL before flushing dirty table snapshots
+/// and truncating the log. Bounds both the on-disk WAL size and crash-recovery replay
+/// time while keeping the per-mutation hot path free of full-table snapshot rewrites.
+pub(crate) const WAL_FLUSH_THRESHOLD: u64 = 128;
+
 /// One row redo record: the full committed state of a single row after a mutation.
 /// `deleted` rows are logged too (a delete is a redo that tombstones the row).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +105,12 @@ impl Engine {
                 }
             }
         }
+        if !touched.is_empty() {
+            // Re-intern recovered cell values into the content-addressed ValueStore: the
+            // store was built from the (stale) snapshots before replay, so without this
+            // dedup/value-ref stats and value-ref planning would omit recovered rows.
+            self.rebuild_value_store_from_tables_best_effort();
+        }
         let mut all_persisted = true;
         for (db, table) in &touched {
             // Rebuild pk/secondary indexes from the recovered rows, then re-persist.
@@ -156,5 +167,45 @@ impl Engine {
     pub(crate) fn wal_truncate(&mut self) {
         self.wal = None;
         let _ = fs::remove_file(self.wal_path());
+    }
+
+    /// Record a committed row mutation's snapshot write as deferred: the WAL already made
+    /// it durable, so the full-table snapshot rewrite is batched until the next flush
+    /// instead of running on every mutation. Tables that are encryption-locked or corrupt
+    /// are routed straight to `persist_table`, which correctly refuses the write (the only
+    /// way those states reject a mutation), preserving the pre-deferral behavior.
+    pub(crate) fn persist_table_deferred(&mut self, db: &str, table: &str) -> anyhow::Result<()> {
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+        if self.encrypted_locked_tables.contains(&key) || self.corrupt_tables.contains(&key) {
+            return self.persist_table(db, table);
+        }
+        self.dirty_tables.insert(key);
+        self.mutations_since_flush = self.mutations_since_flush.saturating_add(1);
+        if self.mutations_since_flush >= WAL_FLUSH_THRESHOLD {
+            self.flush_dirty_tables()?;
+        }
+        Ok(())
+    }
+
+    /// Persist every dirty table's snapshot, then truncate the WAL. After this the
+    /// snapshots contain everything the WAL held, so the redo log is reset. If a persist
+    /// fails the error propagates with the still-dirty tables retained and the WAL left
+    /// intact, so nothing is lost (the next flush or `open()` replay recovers it).
+    pub(crate) fn flush_dirty_tables(&mut self) -> anyhow::Result<()> {
+        if self.dirty_tables.is_empty() {
+            self.mutations_since_flush = 0;
+            return Ok(());
+        }
+        let targets: Vec<TableKey> = self.dirty_tables.iter().cloned().collect();
+        for key in &targets {
+            self.persist_table(&key.db, &key.table)?;
+            self.dirty_tables.remove(key);
+        }
+        self.mutations_since_flush = 0;
+        self.wal_truncate();
+        Ok(())
     }
 }

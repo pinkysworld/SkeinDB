@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Deferred snapshot flush (storage Slice 3).** Row mutations (`insert`/`update`/`delete`) no longer rewrite the full table snapshot on every commit. Durability comes from the WAL fsync; the table is marked dirty and its snapshot is flushed in a batch once `WAL_FLUSH_THRESHOLD` mutations accumulate (and at every checkpoint), which removes the O(rows) write amplification per mutation while bounding WAL size and crash-recovery replay time. WAL replay on open now also re-interns recovered cell values into the content-addressed ValueStore so dedup/value-ref stats are correct after recovery. Encryption-locked and corrupt tables still route through `persist_table`, preserving their write-refusal.
+- Bumps `wasmtime` 45→46 and `getrandom` 0.3→0.4 (plus the grouped minor/patch dependency updates) on top of v0.3.21.
+
 ## v0.3.21 - 2026-06-24
 
 Storage durability hardening, segment-default persistence, dependency modernization, and PostgreSQL admin/framework compatibility.
