@@ -13063,7 +13063,8 @@ async fn pg_framework_fixture_psycopg_roundtrip() -> anyhow::Result<()> {
         assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
     }
 
-    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_framework_psycopg.sql") {
+    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_framework_psycopg.sql")
+    {
         let msgs = pg_simple_query(&mut stream, &statement).await?;
         let tags = pg_message_tags(&msgs);
         assert!(
