@@ -407,6 +407,15 @@ pub struct Engine {
     wal: Option<WalWriter>,
     /// Monotonic transaction id stamped on WAL records.
     wal_next_txn: u64,
+
+    /// Tables mutated since the last snapshot flush. With the WAL providing per-commit
+    /// durability, row mutations defer their full-table snapshot rewrite: the table is
+    /// marked dirty here and flushed in a batch (see `flush_dirty_tables`), removing the
+    /// O(rows) write amplification of persisting on every single mutation.
+    dirty_tables: HashSet<TableKey>,
+    /// Row mutations since the last flush; when it reaches `WAL_FLUSH_THRESHOLD` the dirty
+    /// tables are flushed and the WAL is truncated, bounding WAL size and replay time.
+    mutations_since_flush: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2028,6 +2037,8 @@ impl Engine {
             corrupt_tables: HashSet::new(),
             wal: None,
             wal_next_txn: 0,
+            dirty_tables: HashSet::new(),
+            mutations_since_flush: 0,
         };
 
         engine.load_encryption_state_best_effort();
@@ -3637,7 +3648,7 @@ impl Engine {
         // Durably log the row redo records before writing the snapshot, so a crash
         // between here and the snapshot write is recoverable on the next open.
         self.wal_log_rows(&wal_records)?;
-        self.persist_table(&table.db, &table.table)?;
+        self.persist_table_deferred(&table.db, &table.table)?;
         self.persist_changes_best_effort();
 
         Ok(WriteResult {
@@ -3823,7 +3834,7 @@ impl Engine {
         if affected > 0 {
             self.persist_catalog()?;
             self.wal_log_rows(&wal_records)?;
-            self.persist_table(&table.db, &table.table)?;
+            self.persist_table_deferred(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
 
@@ -3920,7 +3931,7 @@ impl Engine {
         if affected > 0 {
             self.persist_catalog()?;
             self.wal_log_rows(&wal_records)?;
-            self.persist_table(&table.db, &table.table)?;
+            self.persist_table_deferred(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
 
@@ -11330,7 +11341,10 @@ impl Engine {
         self.persist_oblivious_best_effort();
         self.persist_advisor_patterns_best_effort();
         self.persist_advisor_history_best_effort();
-        // Every table snapshot is now durable, so the WAL is redundant: reset it.
+        // Every table snapshot is now durable (the loop above persisted them all), so the
+        // deferred-flush dirty set is fully covered and the WAL is redundant: reset both.
+        self.dirty_tables.clear();
+        self.mutations_since_flush = 0;
         self.wal_truncate();
         Ok(())
     }
@@ -31931,6 +31945,84 @@ mod tests {
     }
 
     #[test]
+    fn deferred_snapshot_flush_defers_recovers_and_flushes_at_threshold() -> anyhow::Result<()> {
+        let dir = temp_dir("deferred_flush");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "t".to_string(),
+            r#as: None,
+        };
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "t".to_string(),
+        };
+        let make_table = |engine: &mut Engine| -> anyhow::Result<()> {
+            engine.create_table(
+                "app",
+                "t",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            Ok(())
+        };
+
+        {
+            let mut engine = Engine::open(&dir)?;
+            make_table(&mut engine)?;
+            // A couple of inserts, well under the flush threshold: the snapshot write is
+            // deferred (table marked dirty), durability comes from the WAL.
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None)?;
+            assert!(
+                engine.dirty_tables.contains(&key),
+                "snapshot should be deferred (table left dirty, not persisted per-mutation)"
+            );
+            assert_eq!(engine.mutations_since_flush, 2);
+            assert!(
+                dir.join("wal-000001.log").exists(),
+                "WAL must hold the deferred mutations"
+            );
+            // Dropped without checkpoint: the snapshot never captured the rows.
+        }
+
+        // Reopen: WAL replay recovers the deferred-but-never-flushed rows.
+        {
+            let engine = Engine::open(&dir)?;
+            let (_, tdata) = engine.get_table(&table)?;
+            assert_eq!(
+                tdata.rows.iter().filter(|r| !r.deleted).count(),
+                2,
+                "deferred mutations must be recovered from the WAL on open"
+            );
+        }
+
+        // Crossing the flush threshold triggers a batch flush + WAL truncation.
+        {
+            let mut engine = Engine::open(&dir)?;
+            for i in 3..=(wal::WAL_FLUSH_THRESHOLD + 2) {
+                engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
+            }
+            assert!(
+                !engine.dirty_tables.contains(&key),
+                "crossing the threshold should flush dirty tables"
+            );
+            assert_eq!(engine.mutations_since_flush, 0);
+            assert!(
+                !dir.join("wal-000001.log").exists(),
+                "threshold flush should truncate the WAL"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn shard_object_manifest_deduplicates_interned_values() -> anyhow::Result<()> {
         let dir = temp_dir("shard_object_manifest");
         let mut engine = Engine::open(&dir)?;
@@ -38239,6 +38331,7 @@ mod tests {
             seed_events_table(&mut engine, secret_a, secret_b)?;
 
             // The plaintext secret must not appear anywhere in the on-disk table file.
+            engine.flush_dirty_tables()?;
             let table_bytes = fs::read(engine.table_path("app", "events"))
                 .or_else(|_| fs::read(engine.table_segment_path("app", "events")))?;
             assert!(
@@ -38346,6 +38439,7 @@ mod tests {
         // Both rows share the same payload; MLE mode must produce identical ciphertext.
         seed_events_table(&mut engine, "same-secret", "same-secret")?;
 
+        engine.flush_dirty_tables()?;
         let disk: TableRowsDisk = load_json(&engine.table_path("app", "events"))
             .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
         let env_b64s: Vec<String> = disk
@@ -38427,6 +38521,7 @@ mod tests {
         seed_events_table(&mut engine, secret_a, secret_b)?;
 
         // Rows are initially sealed under k1.
+        engine.flush_dirty_tables()?;
         let disk: TableRowsDisk = load_json(&engine.table_path("app", "events"))
             .ok_or_else(|| anyhow::anyhow!("missing events table json"))?;
         assert!(disk_rows_contain_encrypted_cells(&disk));
@@ -46316,6 +46411,7 @@ mod tests {
             None,
         )?;
 
+        engine.flush_dirty_tables()?;
         let index_cache_path = engine.table_secondary_index_path("app", "users");
         let disk = load_json::<SecondaryIndexCacheDisk>(&index_cache_path)
             .expect("secondary index cache should be persisted");
@@ -47233,6 +47329,7 @@ mod tests {
             None,
         )?;
 
+        engine.flush_dirty_tables()?;
         let before = engine.storage_stats_snapshot();
         assert!(before.logical_bytes > before.unique_bytes);
         assert!(before.duplicate_bytes > 0);
@@ -47313,6 +47410,7 @@ mod tests {
             None,
         )?;
 
+        engine.flush_dirty_tables()?;
         let path = engine.table_path("app", "events");
         let raw = fs::read_to_string(&path)?;
         let doc: serde_json::Value = serde_json::from_str(&raw)?;
@@ -47459,6 +47557,7 @@ mod tests {
         let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
         seed_events_table(&mut engine, "seg-a", "seg-b")?;
 
+        engine.flush_dirty_tables()?;
         let json_path = engine.table_path("app", "events");
         let segment_path = engine.table_segment_path("app", "events");
         assert!(!json_path.exists());
@@ -47499,6 +47598,7 @@ mod tests {
         let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
         seed_events_table(&mut engine, "dual-a", "dual-b")?;
 
+        engine.flush_dirty_tables()?;
         let json_path = engine.table_path("app", "events");
         let segment_path = engine.table_segment_path("app", "events");
         assert!(json_path.exists());
