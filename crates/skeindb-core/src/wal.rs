@@ -346,6 +346,7 @@ struct ScanResult {
     tail_error: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct WalWriter {
     path: PathBuf,
     file: File,

@@ -14,7 +14,7 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,10 +33,21 @@ use wasmtime::{
 };
 
 use crate::storage_mode::TableStorageMode;
+
+mod forensic_helpers;
+use forensic_helpers::*;
+
+mod migration_intent;
+use migration_intent::*;
+
+mod wal;
+use wal::WalRowRecord;
+
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
 };
+use skeindb_core::wal::WalWriter;
 use skeindb_core::wasm_catalog::{
     WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
     WASM_UDF_ABI_V1,
@@ -384,6 +395,18 @@ pub struct Engine {
     /// would otherwise overwrite the ciphertext with empty/plaintext data). They are
     /// transparently reloaded once the matching key is registered.
     encrypted_locked_tables: HashSet<TableKey>,
+
+    /// Tables whose primary on-disk file is present but unreadable (corrupt/truncated).
+    /// Loaded empty and blocked from being persisted so the corrupt bytes are preserved
+    /// for recovery rather than silently overwritten with an empty table.
+    corrupt_tables: HashSet<TableKey>,
+
+    /// Global write-ahead log writer for row-level redo (crash recovery of table data),
+    /// opened lazily on the first mutation and truncated at each checkpoint. See
+    /// `engine/wal.rs`.
+    wal: Option<WalWriter>,
+    /// Monotonic transaction id stamped on WAL records.
+    wal_next_txn: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1947,6 +1970,8 @@ impl Engine {
     ) -> anyhow::Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
+        // Clean up any temp files a prior crash left mid-rename before loading state.
+        sweep_stale_temp_files(&data_dir);
 
         let catalog = load_json::<Catalog>(&data_dir.join("catalog.json")).unwrap_or_default();
         let advisor_persist = advisor_persist_enabled();
@@ -2000,6 +2025,9 @@ impl Engine {
             encryption_audit: Vec::new(),
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
+            corrupt_tables: HashSet::new(),
+            wal: None,
+            wal_next_txn: 0,
         };
 
         engine.load_encryption_state_best_effort();
@@ -2020,6 +2048,10 @@ impl Engine {
         engine.load_schema_flags_best_effort();
         engine.load_advisor_best_effort();
         engine.restore_advisor_indexes();
+
+        // Replay any committed row mutations a crash left in the WAL but not yet in the
+        // table snapshots, then truncate the WAL to a clean checkpoint.
+        engine.wal_recover();
 
         Ok(engine)
     }
@@ -3501,6 +3533,7 @@ impl Engine {
         let mut change_rows: Vec<(Vec<Lit>, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let table_key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3539,13 +3572,20 @@ impl Engine {
 
                 let version = next_row_version(schema);
                 let idx = tdata.rows.len();
-                tdata.rows.push(RowEntry {
+                let entry = RowEntry {
                     row: row.clone(),
                     version,
                     schema_version: row_schema_version,
                     deleted: false,
                     commit_ts_ms: now_millis(),
-                });
+                };
+                wal_records.push(WalRowRecord::from_entry(
+                    &table.db,
+                    &table.table,
+                    pk.clone(),
+                    &entry,
+                ));
+                tdata.rows.push(entry);
                 tdata.pk_index.insert(pk_key_s, idx);
                 secondary_index_add_row(tdata, idx, &row)?;
 
@@ -3594,6 +3634,9 @@ impl Engine {
             );
         }
         self.persist_catalog()?;
+        // Durably log the row redo records before writing the snapshot, so a crash
+        // between here and the snapshot write is recoverable on the next open.
+        self.wal_log_rows(&wal_records)?;
         self.persist_table(&table.db, &table.table)?;
         self.persist_changes_best_effort();
 
@@ -3638,6 +3681,7 @@ impl Engine {
         let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject, RowObject)> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3698,7 +3742,8 @@ impl Engine {
                 secondary_index_remove_row(tdata, idx, &current_row)?;
                 tdata.rows[idx].row = new_row;
                 secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
-                if current_pk_key != new_pk_key {
+                let pk_changed = current_pk_key != new_pk_key;
+                if pk_changed {
                     tdata.pk_index.remove(&current_pk_key);
                     tdata.pk_index.insert(new_pk_key, idx);
                 }
@@ -3708,6 +3753,31 @@ impl Engine {
                 affected += 1;
 
                 let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
+                if let Some(pk_vals) = pk.clone() {
+                    wal_records.push(WalRowRecord::from_entry(
+                        &table.db,
+                        &table.table,
+                        pk_vals,
+                        &tdata.rows[idx],
+                    ));
+                }
+                // If the update moved the primary key, also log a tombstone for the OLD
+                // key so WAL replay removes the pre-update row instead of leaving a
+                // phantom live row under the old key on recovery.
+                if pk_changed {
+                    if let Ok(old_pk) = extract_pk(schema, &current_row) {
+                        wal_records.push(WalRowRecord {
+                            db: table.db.clone(),
+                            table: table.table.clone(),
+                            pk: old_pk,
+                            row: current_row.clone(),
+                            version: tdata.rows[idx].version,
+                            schema_version: tdata.rows[idx].schema_version,
+                            deleted: true,
+                            commit_ts_ms: tdata.rows[idx].commit_ts_ms,
+                        });
+                    }
+                }
                 change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
                 collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
                 snapshot_rows.push(tdata.rows[idx].row.clone());
@@ -3752,6 +3822,7 @@ impl Engine {
 
         if affected > 0 {
             self.persist_catalog()?;
+            self.wal_log_rows(&wal_records)?;
             self.persist_table(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
@@ -3774,6 +3845,7 @@ impl Engine {
         let mut affected = 0u64;
         let mut change_rows: Vec<(Option<Vec<Lit>>, RowObject)> = Vec::new();
         let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
+        let mut wal_records: Vec<WalRowRecord> = Vec::new();
         let key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -3812,6 +3884,12 @@ impl Engine {
                 let pk = extract_pk(schema, &row_before_delete).ok();
                 if let Some(ref pk) = pk {
                     snapshot_pks.push(pk.clone());
+                    wal_records.push(WalRowRecord::from_entry(
+                        &table.db,
+                        &table.table,
+                        pk.clone(),
+                        &tdata.rows[idx],
+                    ));
                 }
                 change_rows.push((pk, row_before_delete));
                 if let Some(lim) = limit {
@@ -3841,6 +3919,7 @@ impl Engine {
 
         if affected > 0 {
             self.persist_catalog()?;
+            self.wal_log_rows(&wal_records)?;
             self.persist_table(&table.db, &table.table)?;
             self.persist_changes_best_effort();
         }
@@ -10947,9 +11026,14 @@ impl Engine {
                 Err(_) => {}
             }
         }
-        match load_json::<Vec<RowEntry>>(path) {
-            Some(rows) => LoadedTableRows::Rows(rows),
-            None => LoadedTableRows::Missing,
+        if let Some(rows) = load_json::<Vec<RowEntry>>(path) {
+            return LoadedTableRows::Rows(rows);
+        }
+        // Nothing parsed. A present-but-unparseable file is corrupt, not missing.
+        if path.exists() {
+            LoadedTableRows::Corrupt
+        } else {
+            LoadedTableRows::Missing
         }
     }
 
@@ -10961,21 +11045,28 @@ impl Engine {
         let Ok(bytes) = fs::read(path) else {
             return LoadedTableRows::Missing;
         };
+        // The file exists; from here a decode failure means it is corrupt, not missing.
         let Ok(disk) = decode_table_rows_segment(&bytes) else {
-            return LoadedTableRows::Missing;
+            return LoadedTableRows::Corrupt;
         };
         match decode_table_rows_disk(disk, Some(codec)) {
             Ok(rows) => LoadedTableRows::Rows(rows),
             Err(err) if is_encryption_locked_error(&err) => LoadedTableRows::Locked,
-            Err(_) => LoadedTableRows::Missing,
+            Err(_) => LoadedTableRows::Corrupt,
         }
     }
 
     /// Load a table's rows, decrypting encrypted-at-rest cells when the database key is
-    /// registered. Returns `(rows, locked)` where `locked` is true if encrypted cells were
-    /// present but could not be decrypted (the table is then loaded empty and blocked from
-    /// being persisted until the key is registered).
-    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> (Vec<RowEntry>, bool) {
+    /// registered. Returns `(rows, locked, corrupt)`. `locked` is true if encrypted cells
+    /// were present but could not be decrypted; `corrupt` is true if the primary file is
+    /// present but unreadable and no usable fallback exists. In both cases the table is
+    /// loaded empty and blocked from being persisted (so the on-disk bytes are preserved
+    /// until the key is registered / the corruption is resolved).
+    fn load_table_rows_best_effort_for_mode(
+        &self,
+        db: &str,
+        table: &str,
+    ) -> (Vec<RowEntry>, bool, bool) {
         let json_path = self.table_path(db, table);
         let segment_path = self.table_segment_path(db, table);
         let codec = self.row_encryption_codec(db, table);
@@ -10986,13 +11077,18 @@ impl Engine {
         } else {
             (from_json(), from_segment())
         };
+        // Only the primary being corrupt (with no usable fallback) marks the table corrupt.
+        let primary_corrupt = matches!(first, LoadedTableRows::Corrupt);
         match first {
-            LoadedTableRows::Rows(rows) => (rows, false),
-            LoadedTableRows::Locked => (Vec::new(), true),
-            LoadedTableRows::Missing => match second {
-                LoadedTableRows::Rows(rows) => (rows, false),
-                LoadedTableRows::Locked => (Vec::new(), true),
-                LoadedTableRows::Missing => (Vec::new(), false),
+            LoadedTableRows::Rows(rows) => (rows, false, false),
+            LoadedTableRows::Locked => (Vec::new(), true, false),
+            // Primary missing or corrupt: try the secondary file before giving up.
+            LoadedTableRows::Corrupt | LoadedTableRows::Missing => match second {
+                LoadedTableRows::Rows(rows) => (rows, false, false),
+                LoadedTableRows::Locked => (Vec::new(), true, false),
+                LoadedTableRows::Corrupt | LoadedTableRows::Missing => {
+                    (Vec::new(), false, primary_corrupt)
+                }
             },
         }
     }
@@ -11110,6 +11206,12 @@ impl Engine {
                  register the database key before writing"
             );
         }
+        if self.corrupt_tables.contains(&key) {
+            anyhow::bail!(
+                "storage_corrupt: table '{db}.{table}' has an unreadable on-disk file; \
+                 refusing to overwrite it (back up and remove the corrupt file to recover)"
+            );
+        }
         let Some(tdata) = self.tables.get(&key) else {
             return Ok(());
         };
@@ -11149,7 +11251,7 @@ impl Engine {
                 fs::create_dir_all(parent)?;
             }
             let bytes = encode_table_rows_segment(&disk)?;
-            fs::write(segment_path, bytes)?;
+            durable_write_bytes(&segment_path, &bytes)?;
             if matches!(self.storage_mode, TableStorageMode::Dual) {
                 save_json(&path, &disk)?;
             }
@@ -11193,7 +11295,7 @@ impl Engine {
                 db: db.clone(),
                 table: table.clone(),
             };
-            if self.encrypted_locked_tables.contains(&key) {
+            if self.encrypted_locked_tables.contains(&key) || self.corrupt_tables.contains(&key) {
                 continue;
             }
             self.persist_table(&db, &table)?;
@@ -11228,6 +11330,8 @@ impl Engine {
         self.persist_oblivious_best_effort();
         self.persist_advisor_patterns_best_effort();
         self.persist_advisor_history_best_effort();
+        // Every table snapshot is now durable, so the WAL is redundant: reset it.
+        self.wal_truncate();
         Ok(())
     }
 
@@ -11243,7 +11347,7 @@ impl Engine {
             })
             .collect();
         for (db, table) in targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&db, &table);
+            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             let key = TableKey {
                 db: db.clone(),
                 table: table.clone(),
@@ -11252,6 +11356,11 @@ impl Engine {
                 self.encrypted_locked_tables.insert(key.clone());
             } else {
                 self.encrypted_locked_tables.remove(&key);
+            }
+            if corrupt {
+                self.corrupt_tables.insert(key.clone());
+            } else {
+                self.corrupt_tables.remove(&key);
             }
             let secondary_indexes =
                 self.load_table_secondary_indexes_best_effort(&db, &table, rows.len());
@@ -11289,8 +11398,9 @@ impl Engine {
             .cloned()
             .collect();
         for key in locked_targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
-            if locked {
+            let (rows, locked, corrupt) =
+                self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
+            if locked || corrupt {
                 continue;
             }
             self.encrypted_locked_tables.remove(&key);
@@ -13013,6 +13123,11 @@ impl Engine {
         if self.encrypted_locked_tables.contains(&key) {
             return Err(format!(
                 "encryption key required: table '{db}.{table}' is locked at rest; register the database key first"
+            ));
+        }
+        if self.corrupt_tables.contains(&key) {
+            return Err(format!(
+                "storage_corrupt: table '{db}.{table}' has an unreadable on-disk file; refusing to overwrite it"
             ));
         }
         let Some(tdata) = self.tables.get(&key) else {
@@ -23730,388 +23845,6 @@ fn shuffle_rows(rows: &mut [RowCtx], seed: u64) {
 }
 
 // -----------------------------
-// Forensic helpers
-// -----------------------------
-
-fn forensic_genesis_hash() -> String {
-    "genesis".to_string()
-}
-
-fn forensic_index_by_id(records: &[ForensicRecord], id: u64) -> Option<usize> {
-    records.iter().position(|r| r.id == id)
-}
-
-fn forensic_filter_matches(
-    rec: &ForensicRecord,
-    filter: &serde_json::Value,
-) -> anyhow::Result<bool> {
-    if filter.is_null() {
-        return Ok(true);
-    }
-    let Some(obj) = filter.as_object() else {
-        anyhow::bail!("invalid_request: forensic filter must be a JSON object");
-    };
-    let looks_like_expr = obj
-        .get("op")
-        .and_then(|v| v.as_str())
-        .map(|op| forensic_filter_operator(op).is_some())
-        .unwrap_or(false)
-        && (obj.contains_key("a") || obj.contains_key("b") || obj.contains_key("args"));
-
-    if !looks_like_expr {
-        for (field, expected) in obj {
-            let actual = forensic_filter_field_value(rec, field)?;
-            let expected = forensic_filter_literal_value(expected)?;
-            if actual != expected {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
-    }
-
-    let op = obj
-        .get("op")
-        .and_then(|v| v.as_str())
-        .and_then(forensic_filter_operator)
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown forensic filter operator"))?;
-    match op {
-        "and" => {
-            for arg in forensic_filter_args(obj)? {
-                if !forensic_filter_matches(rec, arg)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        "or" => {
-            for arg in forensic_filter_args(obj)? {
-                if forensic_filter_matches(rec, arg)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        "not" => {
-            let arg = obj.get("a").or_else(|| obj.get("arg")).ok_or_else(|| {
-                anyhow::anyhow!("invalid_request: not filter requires an operand")
-            })?;
-            Ok(!forensic_filter_matches(rec, arg)?)
-        }
-        "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "contains" => {
-            let left = forensic_filter_operand_value(rec, obj.get("a"))?;
-            let right = forensic_filter_operand_value(rec, obj.get("b"))?;
-            let matched = match op {
-                "eq" => left == right,
-                "ne" => left != right,
-                "contains" => forensic_value_contains(&left, &right),
-                "gt" | "ge" | "lt" | "le" => forensic_compare_values(&left, &right, op)?,
-                _ => false,
-            };
-            Ok(matched)
-        }
-        _ => anyhow::bail!("invalid_request: unknown forensic filter operator"),
-    }
-}
-
-fn forensic_filter_operator(op: &str) -> Option<&'static str> {
-    match op.to_ascii_lowercase().as_str() {
-        "and" => Some("and"),
-        "or" => Some("or"),
-        "not" => Some("not"),
-        "eq" | "=" => Some("eq"),
-        "ne" | "!=" | "<>" => Some("ne"),
-        "gt" | ">" => Some("gt"),
-        "ge" | ">=" => Some("ge"),
-        "lt" | "<" => Some("lt"),
-        "le" | "<=" => Some("le"),
-        "contains" => Some("contains"),
-        _ => None,
-    }
-}
-
-fn forensic_filter_args(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<Vec<&serde_json::Value>> {
-    if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-        return Ok(args.iter().collect());
-    }
-    let mut args = Vec::new();
-    if let Some(a) = obj.get("a") {
-        args.push(a);
-    }
-    if let Some(b) = obj.get("b") {
-        args.push(b);
-    }
-    if args.is_empty() {
-        anyhow::bail!("invalid_request: forensic boolean filter requires args");
-    }
-    Ok(args)
-}
-
-fn forensic_filter_operand_value(
-    rec: &ForensicRecord,
-    operand: Option<&serde_json::Value>,
-) -> anyhow::Result<serde_json::Value> {
-    let operand = operand
-        .ok_or_else(|| anyhow::anyhow!("invalid_request: forensic filter missing operand"))?;
-    if let Some(obj) = operand.as_object() {
-        if let Some(col) = obj.get("col").and_then(|v| v.as_str()) {
-            return forensic_filter_field_value(rec, col);
-        }
-        if let Some(lit) = obj.get("lit") {
-            return forensic_filter_literal_value(lit);
-        }
-        if let Some(value) = obj.get("value") {
-            return forensic_filter_literal_value(value);
-        }
-    }
-    forensic_filter_literal_value(operand)
-}
-
-fn forensic_filter_literal_value(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    if value.get("t").is_some() {
-        let lit: Lit = serde_json::from_value(value.clone())?;
-        return Ok(forensic_lit_plain_value(&lit));
-    }
-    Ok(value.clone())
-}
-
-fn forensic_filter_field_value(
-    rec: &ForensicRecord,
-    field: &str,
-) -> anyhow::Result<serde_json::Value> {
-    match field.to_ascii_lowercase().as_str() {
-        "id" => Ok(serde_json::json!(rec.id)),
-        "ts" | "ts_ms" | "time" => Ok(serde_json::json!(rec.ts_ms)),
-        "db" | "schema" => Ok(serde_json::json!(rec.db)),
-        "table" => Ok(serde_json::json!(rec.table)),
-        "op" | "operation" => Ok(serde_json::json!(rec.op)),
-        "change_seq" | "seq" => Ok(serde_json::json!(rec.change_seq)),
-        "prev_hash" => Ok(serde_json::json!(rec.prev_hash)),
-        "hash" => Ok(serde_json::json!(rec.hash)),
-        "pk" => serde_json::to_value(&rec.pk).map_err(|e| anyhow::anyhow!(e)),
-        other => anyhow::bail!("invalid_request: unknown forensic filter field {other}"),
-    }
-}
-
-fn forensic_lit_plain_value(lit: &Lit) -> serde_json::Value {
-    match lit {
-        Lit::Null => serde_json::Value::Null,
-        Lit::Bool { v } => serde_json::json!(v),
-        Lit::I64 { v } => serde_json::json!(v),
-        Lit::U64 { v } => serde_json::json!(v),
-        Lit::F64 { v } => serde_json::json!(v),
-        Lit::Dec { v } | Lit::Str { v } | Lit::Uuid { v } => serde_json::json!(v),
-        Lit::Bytes { b64 } => serde_json::json!(b64),
-        Lit::Json { v } => v.clone(),
-        Lit::Embedding { dims, v, model } => serde_json::json!({
-            "dims": dims,
-            "v": v,
-            "model": model,
-        }),
-        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => serde_json::json!(iso),
-    }
-}
-
-fn forensic_value_contains(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    match (left, right) {
-        (serde_json::Value::String(left), serde_json::Value::String(right)) => left.contains(right),
-        (serde_json::Value::Array(items), needle) => items.iter().any(|item| item == needle),
-        _ => false,
-    }
-}
-
-fn forensic_compare_values(
-    left: &serde_json::Value,
-    right: &serde_json::Value,
-    op: &str,
-) -> anyhow::Result<bool> {
-    if let (Some(left), Some(right)) = (left.as_f64(), right.as_f64()) {
-        return Ok(match op {
-            "gt" => left > right,
-            "ge" => left >= right,
-            "lt" => left < right,
-            "le" => left <= right,
-            _ => false,
-        });
-    }
-    let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
-        anyhow::bail!("invalid_request: forensic comparison requires numeric or string operands");
-    };
-    Ok(match op {
-        "gt" => left > right,
-        "ge" => left >= right,
-        "lt" => left < right,
-        "le" => left <= right,
-        _ => false,
-    })
-}
-
-fn forensic_inclusion_proofs(
-    chain: &[ForensicRecord],
-    records: &[ForensicRecord],
-) -> Vec<serde_json::Value> {
-    records
-        .iter()
-        .filter_map(|rec| {
-            let chain_index = forensic_index_by_id(chain, rec.id)?;
-            let siblings = forensic_merkle_proof(chain, chain_index)
-                .into_iter()
-                .map(|(hash, sibling_is_right)| {
-                    serde_json::json!({
-                        "hash": hash,
-                        "sibling_side": if sibling_is_right { "right" } else { "left" },
-                    })
-                })
-                .collect::<Vec<_>>();
-            Some(serde_json::json!({
-                "record_id": rec.id,
-                "chain_index": chain_index,
-                "record_hash": rec.hash,
-                "siblings": siblings,
-            }))
-        })
-        .collect()
-}
-
-fn forensic_index_summary(
-    chain: &[ForensicRecord],
-    records: &[ForensicRecord],
-) -> serde_json::Value {
-    let mut by_table: BTreeMap<String, u64> = BTreeMap::new();
-    let mut by_op: BTreeMap<String, u64> = BTreeMap::new();
-    let mut by_actor: BTreeMap<String, u64> = BTreeMap::new();
-    let mut first_id = None;
-    let mut last_id = None;
-    let mut min_ts_ms = None;
-    let mut max_ts_ms = None;
-
-    for rec in records {
-        *by_table
-            .entry(format!("{}.{}", rec.db, rec.table))
-            .or_default() += 1;
-        *by_op.entry(rec.op.clone()).or_default() += 1;
-        *by_actor.entry("unknown".to_string()).or_default() += 1;
-        first_id = Some(first_id.map_or(rec.id, |v: u64| v.min(rec.id)));
-        last_id = Some(last_id.map_or(rec.id, |v: u64| v.max(rec.id)));
-        min_ts_ms = Some(min_ts_ms.map_or(rec.ts_ms, |v: u64| v.min(rec.ts_ms)));
-        max_ts_ms = Some(max_ts_ms.map_or(rec.ts_ms, |v: u64| v.max(rec.ts_ms)));
-    }
-
-    serde_json::json!({
-        "format": "skein.forensic.index.v1",
-        "chain_records": chain.len(),
-        "matched_records": records.len(),
-        "first_id": first_id,
-        "last_id": last_id,
-        "min_ts_ms": min_ts_ms,
-        "max_ts_ms": max_ts_ms,
-        "by_table": by_table,
-        "by_op": by_op,
-        "by_actor": by_actor,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn forensic_record_hash(
-    prev_hash: &str,
-    id: u64,
-    ts_ms: u64,
-    db: &str,
-    table: &str,
-    op: &str,
-    pk: Option<&Vec<Lit>>,
-    change_seq: u64,
-) -> String {
-    let payload = serde_json::json!({
-        "prev_hash": prev_hash,
-        "id": id,
-        "ts_ms": ts_ms,
-        "db": db,
-        "table": table,
-        "op": op,
-        "pk": pk,
-        "change_seq": change_seq
-    });
-    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    let hash = audit_hash256(&bytes);
-    hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
-}
-
-/// Compute a Merkle tree root over a sequence of forensic records.
-/// The tree is constructed as a binary hash tree over the record hashes.
-/// This provides O(log n) proof of inclusion for any record in the chain.
-fn forensic_merkle_root(records: &[ForensicRecord]) -> Option<String> {
-    if records.is_empty() {
-        return None;
-    }
-    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
-    // Iteratively combine pairs until we reach a single root.
-    while hashes.len() > 1 {
-        let mut next = Vec::new();
-        let mut i = 0;
-        while i < hashes.len() {
-            if i + 1 < hashes.len() {
-                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
-                let id = value_id(combined.as_bytes());
-                next.push(hex16(&id));
-                i += 2;
-            } else {
-                // Odd element: promote unchanged.
-                next.push(hashes[i].clone());
-                i += 1;
-            }
-        }
-        hashes = next;
-    }
-    hashes.into_iter().next()
-}
-
-/// Generate a Merkle inclusion proof for a specific record index.
-/// Returns the sibling hashes needed to reconstruct the root.
-#[cfg_attr(not(test), allow(dead_code))]
-fn forensic_merkle_proof(records: &[ForensicRecord], target_idx: usize) -> Vec<(String, bool)> {
-    if records.is_empty() || target_idx >= records.len() {
-        return Vec::new();
-    }
-    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
-    let mut proof = Vec::new();
-    let mut idx = target_idx;
-
-    while hashes.len() > 1 {
-        let mut next = Vec::new();
-        let mut i = 0;
-        let mut new_idx = 0;
-        while i < hashes.len() {
-            if i + 1 < hashes.len() {
-                if i == idx {
-                    // Target is left child; sibling is right.
-                    proof.push((hashes[i + 1].clone(), true));
-                    new_idx = next.len();
-                } else if i + 1 == idx {
-                    // Target is right child; sibling is left.
-                    proof.push((hashes[i].clone(), false));
-                    new_idx = next.len();
-                }
-                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
-                let id = value_id(combined.as_bytes());
-                next.push(hex16(&id));
-                i += 2;
-            } else {
-                if i == idx {
-                    new_idx = next.len();
-                }
-                next.push(hashes[i].clone());
-                i += 1;
-            }
-        }
-        hashes = next;
-        idx = new_idx;
-    }
-    proof
-}
-
-// -----------------------------
 // Wire encodings
 // -----------------------------
 
@@ -26548,6 +26281,9 @@ enum LoadedTableRows {
     Rows(Vec<RowEntry>),
     /// Encrypted-at-rest cells are present but the database key is not registered.
     Locked,
+    /// A file is present on disk but could not be decoded (truncated/corrupt). The table
+    /// must NOT be silently loaded empty and then overwritten, or the on-disk data is lost.
+    Corrupt,
     /// No usable file was found / could be parsed.
     Missing,
 }
@@ -30443,7 +30179,7 @@ fn write_snapshot_cseg(
         bytes.extend_from_slice(&payload);
     }
 
-    fs::write(path, bytes)?;
+    durable_write_bytes(path, &bytes)?;
     Ok(ColumnSnapshotSegmentDisk {
         column: column.to_string(),
         is_pk,
@@ -31568,2062 +31304,6 @@ fn expr_simple_value(expr: &Expr) -> bool {
 }
 
 // -----------------------------
-// Migration intent inference (R17)
-// -----------------------------
-
-#[derive(Debug, Clone)]
-enum ComparisonValue {
-    Lit(Lit),
-    Param(u32),
-}
-
-#[derive(Debug, Clone)]
-struct Comparison {
-    col: String,
-    op: String,
-    value: ComparisonValue,
-}
-
-#[derive(Debug, Clone)]
-struct ColumnRef {
-    table: Option<String>,
-    col: String,
-}
-
-#[derive(Debug, Clone)]
-struct PaginationSignal {
-    table: Option<BaseTableRef>,
-    order_col: Option<String>,
-    limit: Option<u64>,
-    offset: u64,
-}
-
-#[derive(Debug, Clone)]
-struct PollingSignal {
-    table: Option<BaseTableRef>,
-    column: String,
-    value: Option<Lit>,
-    order_match: bool,
-    limit: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-struct SoftDeleteSignal {
-    table: Option<BaseTableRef>,
-    column: String,
-}
-
-#[derive(Debug, Clone)]
-struct HierarchySignal {
-    table: BaseTableRef,
-    columns: Vec<String>,
-    parent_col: Option<String>,
-    id_col: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct RecursiveCteSignal {
-    cte_name: String,
-    table: Option<BaseTableRef>,
-    parent_col: Option<String>,
-    id_col: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ExistsSignal {
-    outer_table: Option<BaseTableRef>,
-    inner_table: Option<BaseTableRef>,
-    inner_column: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CoalesceSignal {
-    table: Option<BaseTableRef>,
-    column: String,
-    default_value: Option<Lit>,
-    arg_count: usize,
-}
-
-fn detect_migration_intents(samples: &[MigrationIntentSample]) -> Vec<MigrationIntentSuggestion> {
-    let mut suggestions = Vec::new();
-
-    let mut pagination_evidence = Vec::new();
-    let mut pagination_offsets = Vec::new();
-    let mut pagination_best: Option<PaginationSignal> = None;
-
-    let mut polling_evidence = Vec::new();
-    let mut polling_values: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut polling_best: Option<PollingSignal> = None;
-
-    let mut soft_delete_evidence = Vec::new();
-    let mut soft_delete_best: Option<SoftDeleteSignal> = None;
-
-    let mut hierarchy_evidence = Vec::new();
-    let mut hierarchy_best: Option<HierarchySignal> = None;
-
-    let mut recursive_evidence = Vec::new();
-    let mut recursive_best: Option<RecursiveCteSignal> = None;
-
-    let mut exists_evidence = Vec::new();
-    let mut exists_best: Option<ExistsSignal> = None;
-
-    let mut coalesce_evidence = Vec::new();
-    let mut coalesce_best: Option<CoalesceSignal> = None;
-
-    for (idx, sample) in samples.iter().enumerate() {
-        if let Some(signal) = detect_pagination_signal(&sample.query) {
-            pagination_offsets.push(signal.offset);
-            let mut columns = Vec::new();
-            if let Some(col) = signal.order_col.clone() {
-                columns.push(col);
-            }
-            pagination_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal.table.clone(),
-                columns,
-                note: Some(format!("limit={:?} offset={}", signal.limit, signal.offset)),
-            });
-            let prefer_signal = match pagination_best.as_ref() {
-                None => true,
-                Some(best) => best.order_col.is_none() && signal.order_col.is_some(),
-            };
-            if prefer_signal {
-                pagination_best = Some(signal);
-            }
-        }
-
-        if let Some(signal) = detect_polling_signal(&sample.query, &sample.args) {
-            if let Some(value) = signal.value.as_ref().and_then(lit_to_f64) {
-                polling_values
-                    .entry(signal.column.clone())
-                    .or_default()
-                    .push(value);
-            }
-            polling_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal.table.clone(),
-                columns: vec![signal.column.clone()],
-                note: Some(format!(
-                    "order_match={} limit={:?}",
-                    signal.order_match, signal.limit
-                )),
-            });
-            let prefer_signal = match polling_best.as_ref() {
-                None => true,
-                Some(best) => !best.order_match && signal.order_match,
-            };
-            if prefer_signal {
-                polling_best = Some(signal);
-            }
-        }
-
-        if let Some(signal) = detect_soft_delete_signal(&sample.query, &sample.args) {
-            soft_delete_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal.table.clone(),
-                columns: vec![signal.column.clone()],
-                note: Some("soft delete predicate".to_string()),
-            });
-            if soft_delete_best.is_none() {
-                soft_delete_best = Some(signal);
-            }
-        }
-
-        for signal in detect_hierarchy_signals(&sample.query).into_iter() {
-            let mut columns = signal.columns.clone();
-            if columns.is_empty() {
-                if let Some(parent) = signal.parent_col.clone() {
-                    columns.push(parent);
-                }
-                if let Some(id_col) = signal.id_col.clone() {
-                    columns.push(id_col);
-                }
-            }
-            hierarchy_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: Some(signal.table.clone()),
-                columns,
-                note: Some("self join hierarchy".to_string()),
-            });
-            let prefer_signal = match hierarchy_best.as_ref() {
-                None => true,
-                Some(best) => best.parent_col.is_none() && signal.parent_col.is_some(),
-            };
-            if prefer_signal {
-                hierarchy_best = Some(signal);
-            }
-        }
-
-        for signal in detect_recursive_cte_signals(&sample.query).into_iter() {
-            let mut columns = Vec::new();
-            if let Some(parent) = signal.parent_col.clone() {
-                columns.push(parent);
-            }
-            if let Some(id_col) = signal.id_col.clone() {
-                columns.push(id_col);
-            }
-            recursive_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal.table.clone(),
-                columns,
-                note: Some(format!("recursive cte: {}", signal.cte_name)),
-            });
-            let prefer_signal = match recursive_best.as_ref() {
-                None => true,
-                Some(best) => best.parent_col.is_none() && signal.parent_col.is_some(),
-            };
-            if prefer_signal {
-                recursive_best = Some(signal);
-            }
-        }
-
-        for signal in detect_exists_signals(&sample.query).into_iter() {
-            let mut columns = Vec::new();
-            if let Some(col) = signal.inner_column.clone() {
-                columns.push(col);
-            }
-            exists_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal
-                    .inner_table
-                    .clone()
-                    .or_else(|| signal.outer_table.clone()),
-                columns,
-                note: Some("exists subquery".to_string()),
-            });
-            let prefer_signal = match exists_best.as_ref() {
-                None => true,
-                Some(best) => best.inner_table.is_none() && signal.inner_table.is_some(),
-            };
-            if prefer_signal {
-                exists_best = Some(signal);
-            }
-        }
-
-        for signal in detect_coalesce_signals(&sample.query).into_iter() {
-            let mut note = format!("coalesce args={}", signal.arg_count);
-            if let Some(default_value) = signal.default_value.as_ref() {
-                note.push_str(&format!(" default={}", render_lit_summary(default_value)));
-            }
-            coalesce_evidence.push(MigrationIntentEvidence {
-                query_index: idx as u64,
-                table: signal.table.clone(),
-                columns: vec![signal.column.clone()],
-                note: Some(note),
-            });
-            let prefer_signal = match coalesce_best.as_ref() {
-                None => true,
-                Some(best) => best.default_value.is_none() && signal.default_value.is_some(),
-            };
-            if prefer_signal {
-                coalesce_best = Some(signal);
-            }
-        }
-    }
-
-    if !pagination_evidence.is_empty() {
-        let distinct_offsets = pagination_offsets
-            .iter()
-            .cloned()
-            .filter(|v| *v > 0)
-            .collect::<HashSet<_>>()
-            .len();
-        let mut confidence = 0.55;
-        if pagination_best
-            .as_ref()
-            .and_then(|sig| sig.order_col.as_ref())
-            .is_some()
-        {
-            confidence += 0.2;
-        }
-        if distinct_offsets >= 2 {
-            confidence += 0.1;
-        }
-        if pagination_evidence.len() > 1 {
-            confidence += ((pagination_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        if pagination_best
-            .as_ref()
-            .map(|sig| sig.offset > 0)
-            .unwrap_or(false)
-        {
-            confidence += 0.05;
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, order_col, limit) = pagination_best
-            .as_ref()
-            .map(|sig| (sig.table.clone(), sig.order_col.clone(), sig.limit))
-            .unwrap_or((None, None, None));
-        let table_label = table_hint
-            .as_ref()
-            .map(|t| format!("{}.{}", t.db, t.table))
-            .unwrap_or_else(|| "<table>".to_string());
-        let order_label = order_col.unwrap_or_else(|| "<cursor_column>".to_string());
-        let limit_label = limit.unwrap_or(50);
-        let skeinql_snippet = format!(
-            "cursor pagination:\nquery.select {{ query: SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {} }}",
-            table_label, order_label, order_label, limit_label
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "pagination.offset_limit".to_string(),
-            confidence,
-            title: "Offset pagination detected".to_string(),
-            recommendation: "Replace LIMIT/OFFSET pagination with cursor-based pagination on a stable ordering column.".to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: pagination_evidence,
-        });
-    }
-
-    if !polling_evidence.is_empty() {
-        let mut confidence = 0.45;
-        if polling_best
-            .as_ref()
-            .map(|sig| sig.order_match)
-            .unwrap_or(false)
-        {
-            confidence += 0.2;
-        }
-        if polling_best
-            .as_ref()
-            .and_then(|sig| sig.limit)
-            .map(|limit| limit <= 100)
-            .unwrap_or(false)
-        {
-            confidence += 0.1;
-        }
-        let has_sequence = polling_values
-            .values()
-            .any(|values| has_increasing_sequence(values));
-        if has_sequence {
-            confidence += 0.2;
-        }
-        if polling_evidence.len() > 1 {
-            confidence += ((polling_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, column) = polling_best
-            .as_ref()
-            .map(|sig| (sig.table.clone(), sig.column.clone()))
-            .unwrap_or((None, "<cursor_column>".to_string()));
-        let skeinql_snippet = format!(
-            "polling detected:\ncdc.subscribe_table {{ db: \"{}\", table: \"{}\" }} then cdc.poll {{ sub_id, from_offset }} (cursor: {})",
-            table_hint
-                .as_ref()
-                .map(|t| t.db.as_str())
-                .unwrap_or("<db>"),
-            table_hint
-                .as_ref()
-                .map(|t| t.table.as_str())
-                .unwrap_or("<table>"),
-            column
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "polling.incremental".to_string(),
-            confidence,
-            title: "Incremental polling detected".to_string(),
-            recommendation:
-                "Replace polling SELECTs with CDC subscriptions to reduce load and latency."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: polling_evidence,
-        });
-    }
-
-    if !soft_delete_evidence.is_empty() {
-        let mut confidence = 0.5;
-        if soft_delete_evidence.len() > 1 {
-            confidence += ((soft_delete_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, column) = soft_delete_best
-            .as_ref()
-            .map(|sig| (sig.table.clone(), sig.column.clone()))
-            .unwrap_or((None, "<deleted_column>".to_string()));
-        let table_label = table_hint
-            .as_ref()
-            .map(|t| format!("{}.{}", t.db, t.table))
-            .unwrap_or_else(|| "<table>".to_string());
-        let skeinql_snippet = format!(
-            "soft delete filter:\nview.create {{ name: \"active_{}\", query: SELECT ... FROM {} WHERE {} IS NULL }}",
-            table_hint
-                .as_ref()
-                .map(|t| t.table.as_str())
-                .unwrap_or("table"),
-            table_label,
-            column
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "soft_delete.filter".to_string(),
-            confidence,
-            title: "Soft delete filter detected".to_string(),
-            recommendation:
-                "Consider a filtered view for active rows to centralize soft-delete logic."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: soft_delete_evidence,
-        });
-    }
-
-    if !hierarchy_evidence.is_empty() {
-        let mut confidence = 0.45;
-        if hierarchy_best
-            .as_ref()
-            .and_then(|sig| sig.parent_col.as_ref())
-            .is_some()
-        {
-            confidence += 0.15;
-        }
-        if hierarchy_best
-            .as_ref()
-            .and_then(|sig| sig.id_col.as_ref())
-            .is_some()
-        {
-            confidence += 0.1;
-        }
-        if hierarchy_evidence.len() > 1 {
-            confidence += ((hierarchy_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, parent_col, id_col) = hierarchy_best
-            .as_ref()
-            .map(|sig| {
-                let (parent_col, id_col) = hierarchy_columns_from_signal(sig);
-                (sig.table.clone(), parent_col, id_col)
-            })
-            .unwrap_or_else(|| {
-                (
-                    BaseTableRef {
-                        db: "<db>".to_string(),
-                        table: "<table>".to_string(),
-                        r#as: None,
-                    },
-                    "<parent_id>".to_string(),
-                    "<id>".to_string(),
-                )
-            });
-        let table_label = format!("{}.{}", table_hint.db, table_hint.table);
-        let skeinql_snippet = format!(
-            "hierarchy traversal:\nroots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
-            id_col,
-            table_label,
-            parent_col,
-            table_hint.db,
-            table_hint.table,
-            parent_col,
-            id_col
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "hierarchy.adjacency".to_string(),
-            confidence,
-            title: "Hierarchy self-join detected".to_string(),
-            recommendation:
-                "Consider a graph traversal or hierarchy view to model parent/child relationships."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: hierarchy_evidence,
-        });
-    }
-
-    if !recursive_evidence.is_empty() {
-        let mut confidence = 0.5;
-        if recursive_best
-            .as_ref()
-            .and_then(|sig| sig.parent_col.as_ref())
-            .is_some()
-        {
-            confidence += 0.15;
-        }
-        if recursive_best
-            .as_ref()
-            .and_then(|sig| sig.id_col.as_ref())
-            .is_some()
-        {
-            confidence += 0.1;
-        }
-        if recursive_evidence.len() > 1 {
-            confidence += ((recursive_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, parent_col, id_col) = recursive_best
-            .as_ref()
-            .map(|sig| {
-                let (parent_col, id_col) = recursive_columns_from_signal(sig);
-                (
-                    sig.table.clone().unwrap_or(BaseTableRef {
-                        db: "<db>".to_string(),
-                        table: "<table>".to_string(),
-                        r#as: None,
-                    }),
-                    parent_col,
-                    id_col,
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    BaseTableRef {
-                        db: "<db>".to_string(),
-                        table: "<table>".to_string(),
-                        r#as: None,
-                    },
-                    "<parent_id>".to_string(),
-                    "<id>".to_string(),
-                )
-            });
-        let table_label = format!("{}.{}", table_hint.db, table_hint.table);
-        let skeinql_snippet = format!(
-            "hierarchy traversal:\nroots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
-            id_col,
-            table_label,
-            parent_col,
-            table_hint.db,
-            table_hint.table,
-            parent_col,
-            id_col
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "hierarchy.recursive_cte".to_string(),
-            confidence,
-            title: "Recursive hierarchy CTE detected".to_string(),
-            recommendation:
-                "Consider graph traversal helpers for recursive parent/child structures."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: recursive_evidence,
-        });
-    }
-
-    if !exists_evidence.is_empty() {
-        let mut confidence = 0.45;
-        if exists_best
-            .as_ref()
-            .and_then(|sig| sig.inner_table.as_ref())
-            .is_some()
-        {
-            confidence += 0.1;
-        }
-        if exists_best
-            .as_ref()
-            .and_then(|sig| sig.inner_column.as_ref())
-            .is_some()
-        {
-            confidence += 0.05;
-        }
-        if exists_evidence.len() > 1 {
-            confidence += ((exists_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (outer_table, inner_table, inner_column) = exists_best
-            .as_ref()
-            .map(|sig| {
-                (
-                    sig.outer_table.clone(),
-                    sig.inner_table.clone(),
-                    sig.inner_column.clone(),
-                )
-            })
-            .unwrap_or((None, None, None));
-        let outer_label = outer_table
-            .as_ref()
-            .map(|t| format!("{}.{}", t.db, t.table))
-            .unwrap_or_else(|| "<outer_table>".to_string());
-        let inner_label = inner_table
-            .as_ref()
-            .map(|t| format!("{}.{}", t.db, t.table))
-            .unwrap_or_else(|| "<inner_table>".to_string());
-        let inner_column = inner_column.unwrap_or_else(|| "<inner_id>".to_string());
-        let skeinql_snippet = format!(
-            "membership join:\nquery.select {{ query: SELECT ... FROM {} JOIN {} ON {}.{} = {}.<outer_id> }}",
-            outer_label, inner_label, inner_label, inner_column, outer_label
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "exists.membership".to_string(),
-            confidence,
-            title: "Membership EXISTS detected".to_string(),
-            recommendation:
-                "Replace EXISTS subqueries with explicit joins or a membership view for reuse."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: exists_evidence,
-        });
-    }
-
-    if !coalesce_evidence.is_empty() {
-        let mut confidence = 0.4;
-        if coalesce_best
-            .as_ref()
-            .and_then(|sig| sig.default_value.as_ref())
-            .is_some()
-        {
-            confidence += 0.1;
-        }
-        if coalesce_evidence.len() > 1 {
-            confidence += ((coalesce_evidence.len() - 1) as f64 * 0.05).min(0.2);
-        }
-        confidence = confidence.min(1.0);
-
-        let (table_hint, column, default_value) = coalesce_best
-            .as_ref()
-            .map(|sig| {
-                (
-                    sig.table.clone(),
-                    sig.column.clone(),
-                    sig.default_value.clone(),
-                )
-            })
-            .unwrap_or((None, "<column>".to_string(), None));
-        let table_label = table_hint
-            .as_ref()
-            .map(|t| format!("{}.{}", t.db, t.table))
-            .unwrap_or_else(|| "<table>".to_string());
-        let view_name = table_hint
-            .as_ref()
-            .map(|t| format!("defaults_{}", t.table))
-            .unwrap_or_else(|| "defaults_table".to_string());
-        let default_label = default_value
-            .as_ref()
-            .map(render_lit_summary)
-            .unwrap_or_else(|| "<default>".to_string());
-        let skeinql_snippet = format!(
-            "default normalization:\nview.create {{ name: \"{}\", query: SELECT ..., coalesce({}, {}) AS {} FROM {} }}",
-            view_name, column, default_label, column, table_label
-        );
-
-        suggestions.push(MigrationIntentSuggestion {
-            intent: "defaults.coalesce".to_string(),
-            confidence,
-            title: "Coalesce defaults detected".to_string(),
-            recommendation:
-                "Consider a view to centralize default value logic for nullable columns."
-                    .to_string(),
-            skeinql_snippet: Some(skeinql_snippet),
-            evidence: coalesce_evidence,
-        });
-    }
-
-    suggestions
-}
-
-fn rewrite_preview_from_suggestion(
-    suggestion: &MigrationIntentSuggestion,
-    samples: &[MigrationIntentSample],
-) -> MigrationRewritePreview {
-    let (before, after) = rewrite_snippets_for_intent(suggestion, samples);
-    MigrationRewritePreview {
-        intent: suggestion.intent.clone(),
-        confidence: suggestion.confidence,
-        title: suggestion.title.clone(),
-        before,
-        after,
-        evidence: suggestion.evidence.clone(),
-    }
-}
-
-fn rewrite_snippets_for_intent(
-    suggestion: &MigrationIntentSuggestion,
-    samples: &[MigrationIntentSample],
-) -> (String, String) {
-    let table_ref = evidence_table_ref(&suggestion.evidence).or_else(|| {
-        sample_from_evidence(samples, &suggestion.evidence)
-            .and_then(|sample| query_single_base_table(&sample.query))
-    });
-    let mut table_label = table_ref
-        .as_ref()
-        .map(|table| format!("{}.{}", table.db, table.table))
-        .unwrap_or_else(|| "<table>".to_string());
-    let column_hint =
-        evidence_column_label(&suggestion.evidence).unwrap_or_else(|| "<column>".to_string());
-    let sample = sample_from_evidence(samples, &suggestion.evidence);
-
-    match suggestion.intent.as_str() {
-        "pagination.offset_limit" => {
-            let mut order_col = column_hint.clone();
-            let mut limit = 50u64;
-            let mut offset = 0u64;
-            if let Some(sample) = sample {
-                if let Some(signal) = detect_pagination_signal(&sample.query) {
-                    if let Some(col) = signal.order_col {
-                        order_col = col;
-                    }
-                    if let Some(sig_limit) = signal.limit {
-                        limit = sig_limit;
-                    }
-                    offset = signal.offset;
-                }
-            }
-            let before = format!(
-                "SELECT ... FROM {} ORDER BY {} LIMIT {} OFFSET {}",
-                table_label, order_col, limit, offset
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                format!(
-                    "cursor pagination:\nquery.select {{ query: SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {} }}",
-                    table_label, order_col, order_col, limit
-                )
-            });
-            (before, after)
-        }
-        "polling.incremental" => {
-            let mut column = column_hint.clone();
-            let mut limit = 100u64;
-            if let Some(sample) = sample {
-                if let Some(signal) = detect_polling_signal(&sample.query, &sample.args) {
-                    column = signal.column;
-                    if let Some(sig_limit) = signal.limit {
-                        limit = sig_limit;
-                    }
-                }
-            }
-            let before = format!(
-                "SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {}",
-                table_label, column, column, limit
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                let db = table_ref
-                    .as_ref()
-                    .map(|table| table.db.as_str())
-                    .unwrap_or("<db>");
-                let table = table_ref
-                    .as_ref()
-                    .map(|table| table.table.as_str())
-                    .unwrap_or("<table>");
-                format!(
-                    "cdc.subscribe_table {{ db: \"{}\", table: \"{}\" }} then cdc.poll {{ sub_id, from_offset }}",
-                    db, table
-                )
-            });
-            (before, after)
-        }
-        "soft_delete.filter" => {
-            let mut column = column_hint.clone();
-            if let Some(sample) = sample {
-                if let Some(signal) = detect_soft_delete_signal(&sample.query, &sample.args) {
-                    column = signal.column;
-                }
-            }
-            let before = format!("SELECT ... FROM {} WHERE {} IS NULL", table_label, column);
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                format!(
-                    "view.create {{ name: \"active_<table>\", query: SELECT ... FROM {} WHERE {} IS NULL }}",
-                    table_label, column
-                )
-            });
-            (before, after)
-        }
-        "hierarchy.adjacency" => {
-            let (parent_col, id_col) = sample
-                .and_then(|sample| detect_hierarchy_signals(&sample.query).into_iter().next())
-                .map(|signal| hierarchy_columns_from_signal(&signal))
-                .unwrap_or_else(|| ("<parent_id>".to_string(), "<id>".to_string()));
-            let before = format!(
-                "SELECT ... FROM {} AS child JOIN {} AS parent ON child.{} = parent.{}",
-                table_label, table_label, parent_col, id_col
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                let db = table_ref
-                    .as_ref()
-                    .map(|table| table.db.as_str())
-                    .unwrap_or("<db>");
-                let table = table_ref
-                    .as_ref()
-                    .map(|table| table.table.as_str())
-                    .unwrap_or("<table>");
-                format!(
-                    "graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }} }}",
-                    db, table, parent_col, id_col
-                )
-            });
-            (before, after)
-        }
-        "hierarchy.recursive_cte" => {
-            let mut cte_name = "<cte>".to_string();
-            let mut parent_col = "<parent_id>".to_string();
-            let mut id_col = "<id>".to_string();
-            if let Some(sample) = sample {
-                if let Some(signal) = detect_recursive_cte_signals(&sample.query)
-                    .into_iter()
-                    .next()
-                {
-                    cte_name = signal.cte_name.clone();
-                    let (parent_hint, id_hint) = recursive_columns_from_signal(&signal);
-                    parent_col = parent_hint;
-                    id_col = id_hint;
-                    if let Some(table) = signal.table.as_ref() {
-                        table_label = format!("{}.{}", table.db, table.table);
-                    }
-                }
-            }
-            let cte_cols = format!("{}, {}", id_col, parent_col);
-            let before = format!(
-                "WITH RECURSIVE {} ({}) AS (\n  SELECT {}, {} FROM {} WHERE {} IS NULL\n  UNION ALL\n  SELECT child.{}, child.{} FROM {} AS child JOIN {} AS parent ON child.{} = parent.{}\n)\nSELECT ... FROM {}",
-                cte_name,
-                cte_cols,
-                id_col,
-                parent_col,
-                table_label,
-                parent_col,
-                id_col,
-                parent_col,
-                table_label,
-                cte_name,
-                parent_col,
-                id_col,
-                cte_name
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                let db = table_ref
-                    .as_ref()
-                    .map(|table| table.db.as_str())
-                    .unwrap_or("<db>");
-                let table = table_ref
-                    .as_ref()
-                    .map(|table| table.table.as_str())
-                    .unwrap_or("<table>");
-                format!(
-                    "roots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
-                    id_col, table_label, parent_col, db, table, parent_col, id_col
-                )
-            });
-            (before, after)
-        }
-        "exists.membership" => {
-            let outer_label = sample
-                .and_then(|sample| query_single_base_table(&sample.query))
-                .map(|table| format!("{}.{}", table.db, table.table))
-                .unwrap_or_else(|| "<outer_table>".to_string());
-            let inner_label = evidence_table_ref(&suggestion.evidence)
-                .map(|table| format!("{}.{}", table.db, table.table))
-                .unwrap_or_else(|| "<inner_table>".to_string());
-            let inner_column = column_hint.clone();
-            let before = format!(
-                "SELECT ... FROM {} WHERE EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.<outer_id>)",
-                outer_label, inner_label, inner_label, inner_column, outer_label
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                format!(
-                    "query.select {{ query: SELECT ... FROM {} JOIN {} ON {}.{} = {}.<outer_id> }}",
-                    outer_label, inner_label, inner_label, inner_column, outer_label
-                )
-            });
-            (before, after)
-        }
-        "defaults.coalesce" => {
-            let mut column = column_hint.clone();
-            let mut default_label = "<default>".to_string();
-            if let Some(sample) = sample {
-                if let Some(signal) = detect_coalesce_signals(&sample.query).into_iter().next() {
-                    column = signal.column;
-                    if let Some(lit) = signal.default_value {
-                        default_label = render_lit_summary(&lit);
-                    }
-                }
-            }
-            let before = format!(
-                "SELECT ..., COALESCE({}, {}) AS {} FROM {}",
-                column, default_label, column, table_label
-            );
-            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
-                format!(
-                    "view.create {{ name: \"defaults_<table>\", query: SELECT ..., coalesce({}, {}) AS {} FROM {} }}",
-                    column, default_label, column, table_label
-                )
-            });
-            (before, after)
-        }
-        _ => {
-            let after = suggestion
-                .skeinql_snippet
-                .clone()
-                .unwrap_or_else(|| "no rewrite available".to_string());
-            ("unknown".to_string(), after)
-        }
-    }
-}
-
-fn migration_report_markdown(
-    title: &str,
-    generated_at_ms: u64,
-    rewrites: &[MigrationRewritePreview],
-) -> String {
-    let mut out = vec![
-        format!("# {}", title),
-        String::new(),
-        format!("Generated at ms: {}", generated_at_ms),
-        String::new(),
-    ];
-    if rewrites.is_empty() {
-        out.push("No migration rewrites were detected.".to_string());
-        return out.join("\n");
-    }
-
-    for (idx, rewrite) in rewrites.iter().enumerate() {
-        out.push(format!("## {}", rewrite.title));
-        out.push(String::new());
-        out.push(format!("- Intent: {}", rewrite.intent));
-        out.push(format!(
-            "- Confidence: {}%",
-            (rewrite.confidence * 100.0).round()
-        ));
-        out.push(format!("- Evidence items: {}", rewrite.evidence.len()));
-        out.push(String::new());
-        out.push("Before:".to_string());
-        out.push("```sql".to_string());
-        out.push(rewrite.before.clone());
-        out.push("```".to_string());
-        out.push(String::new());
-        out.push("After:".to_string());
-        out.push("```text".to_string());
-        out.push(rewrite.after.clone());
-        out.push("```".to_string());
-        if idx + 1 < rewrites.len() {
-            out.push(String::new());
-        }
-    }
-
-    out.join("\n")
-}
-
-fn evidence_table_ref(evidence: &[MigrationIntentEvidence]) -> Option<BaseTableRef> {
-    evidence
-        .iter()
-        .find_map(|entry| entry.table.as_ref().cloned())
-}
-
-fn evidence_column_label(evidence: &[MigrationIntentEvidence]) -> Option<String> {
-    evidence
-        .iter()
-        .find_map(|entry| entry.columns.first().cloned())
-}
-
-fn sample_from_evidence<'a>(
-    samples: &'a [MigrationIntentSample],
-    evidence: &[MigrationIntentEvidence],
-) -> Option<&'a MigrationIntentSample> {
-    let index = evidence.first()?.query_index as usize;
-    samples.get(index)
-}
-
-fn hierarchy_columns_from_signal(signal: &HierarchySignal) -> (String, String) {
-    let mut parent = signal.parent_col.clone();
-    let mut id_col = signal.id_col.clone();
-    if parent.is_none() || id_col.is_none() {
-        for col in signal.columns.iter() {
-            if parent.is_none() && is_parent_like_column(col) {
-                parent = Some(col.clone());
-            }
-            if id_col.is_none() && is_id_like_column(col) {
-                id_col = Some(col.clone());
-            }
-        }
-    }
-    if (parent.is_none() || id_col.is_none()) && signal.columns.len() >= 2 {
-        if parent.is_none() {
-            parent = Some(signal.columns[0].clone());
-        }
-        if id_col.is_none() {
-            id_col = Some(signal.columns[1].clone());
-        }
-    }
-    let parent = parent.unwrap_or_else(|| "<parent_id>".to_string());
-    let id_col = id_col.unwrap_or_else(|| "<id>".to_string());
-    (parent, id_col)
-}
-
-fn recursive_columns_from_signal(signal: &RecursiveCteSignal) -> (String, String) {
-    let parent = signal
-        .parent_col
-        .clone()
-        .unwrap_or_else(|| "<parent_id>".to_string());
-    let id_col = signal.id_col.clone().unwrap_or_else(|| "<id>".to_string());
-    (parent, id_col)
-}
-
-fn detect_pagination_signal(query: &Query) -> Option<PaginationSignal> {
-    let limit = query.limit.as_ref()?.limit?;
-    let offset = query.limit.as_ref()?.offset?;
-    let order_col = order_by_cols(query).first().cloned();
-    Some(PaginationSignal {
-        table: query_single_base_table(query),
-        order_col,
-        limit: Some(limit),
-        offset,
-    })
-}
-
-fn detect_polling_signal(query: &Query, args: &[Lit]) -> Option<PollingSignal> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return None;
-    };
-    let predicate = select.r#where.as_ref()?;
-    let mut comparisons = Vec::new();
-    collect_comparisons(predicate, &mut comparisons);
-    let order_cols = order_by_cols(query);
-    let limit = query.limit.as_ref().and_then(|l| l.limit);
-    let offset = query.limit.as_ref().and_then(|l| l.offset).unwrap_or(0);
-
-    for comp in comparisons.into_iter() {
-        if !matches!(comp.op.as_str(), "gt" | "ge") {
-            continue;
-        }
-        let value = comparison_value_lit(&comp.value, args);
-        let order_match = order_cols.iter().any(|col| col == &comp.col);
-        if offset > 0 {
-            continue;
-        }
-        return Some(PollingSignal {
-            table: query_single_base_table(query),
-            column: comp.col,
-            value,
-            order_match,
-            limit,
-        });
-    }
-
-    None
-}
-
-fn detect_soft_delete_signal(query: &Query, args: &[Lit]) -> Option<SoftDeleteSignal> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return None;
-    };
-    let predicate = select.r#where.as_ref()?;
-    let mut comparisons = Vec::new();
-    collect_comparisons(predicate, &mut comparisons);
-
-    for comp in comparisons.into_iter() {
-        if !is_soft_delete_column(&comp.col) {
-            continue;
-        }
-        match comp.op.as_str() {
-            "eq" => {
-                let value = comparison_value_lit(&comp.value, args)?;
-                if lit_is_false(&value) || matches!(value, Lit::Null) {
-                    return Some(SoftDeleteSignal {
-                        table: query_single_base_table(query),
-                        column: comp.col,
-                    });
-                }
-            }
-            "is_null" => {
-                return Some(SoftDeleteSignal {
-                    table: query_single_base_table(query),
-                    column: comp.col,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn detect_hierarchy_signals(query: &Query) -> Vec<HierarchySignal> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return Vec::new();
-    };
-    let from = match select.from.as_ref() {
-        Some(from) => from,
-        None => return Vec::new(),
-    };
-
-    let mut alias_map = HashMap::new();
-    for tref in from.iter() {
-        if !collect_table_aliases(tref, &mut alias_map) {
-            return Vec::new();
-        }
-    }
-
-    let mut joins = Vec::new();
-    for tref in from.iter() {
-        collect_join_refs(tref, &mut joins);
-    }
-
-    let mut signals = Vec::new();
-    for join in joins.into_iter() {
-        let Some(left) = base_table_from_ref(&join.left) else {
-            continue;
-        };
-        let Some(right) = base_table_from_ref(&join.right) else {
-            continue;
-        };
-        if left.db != right.db || left.table != right.table {
-            continue;
-        }
-
-        let Some(on_expr) = join.on.as_ref() else {
-            continue;
-        };
-        let mut comparisons = Vec::new();
-        collect_column_comparisons(on_expr, &mut comparisons);
-
-        let mut best_parent = None;
-        let mut best_id = None;
-        let mut best_cols: Option<(String, String)> = None;
-        for (left_ref, right_ref) in comparisons.into_iter() {
-            let Some((left_alias, left_col)) = resolve_column_ref(&left_ref) else {
-                continue;
-            };
-            let Some((right_alias, right_col)) = resolve_column_ref(&right_ref) else {
-                continue;
-            };
-            if left_alias == right_alias {
-                continue;
-            }
-            let forward = alias_map.get(&left_alias) == Some(&left)
-                && alias_map.get(&right_alias) == Some(&right);
-            let swapped = alias_map.get(&left_alias) == Some(&right)
-                && alias_map.get(&right_alias) == Some(&left);
-            if !forward && !swapped {
-                continue;
-            }
-            best_cols.get_or_insert_with(|| (left_col.clone(), right_col.clone()));
-            let (parent, id_col) = classify_hierarchy_columns(&left_col, &right_col);
-            if parent.is_some() {
-                best_parent = parent;
-                best_id = id_col;
-                break;
-            }
-            if best_id.is_none() && id_col.is_some() {
-                best_id = id_col;
-            }
-        }
-
-        let columns = best_cols
-            .map(|(left_col, right_col)| vec![left_col, right_col])
-            .unwrap_or_default();
-        signals.push(HierarchySignal {
-            table: left.clone(),
-            columns,
-            parent_col: best_parent,
-            id_col: best_id,
-        });
-    }
-
-    signals
-}
-
-fn detect_recursive_cte_signals(query: &Query) -> Vec<RecursiveCteSignal> {
-    if query.with.is_empty() {
-        return Vec::new();
-    }
-    let mut signals = Vec::new();
-    for cte in query.with.iter() {
-        if !query_body_references_table(cte.query.body.as_ref(), &cte.name) {
-            continue;
-        }
-        let table = first_non_cte_table(cte.query.body.as_ref(), &cte.name);
-        let (parent_col, id_col) = infer_hierarchy_columns_from_cte(&cte.query, &cte.name);
-        signals.push(RecursiveCteSignal {
-            cte_name: cte.name.clone(),
-            table,
-            parent_col,
-            id_col,
-        });
-    }
-    signals
-}
-
-fn detect_exists_signals(query: &Query) -> Vec<ExistsSignal> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return Vec::new();
-    };
-    let mut exists_exprs = Vec::new();
-    if let Some(predicate) = select.r#where.as_ref() {
-        collect_exists_exprs(predicate, &mut exists_exprs);
-    }
-    if let Some(predicate) = select.having.as_ref() {
-        collect_exists_exprs(predicate, &mut exists_exprs);
-    }
-
-    let outer_table = query_single_base_table(query);
-    exists_exprs
-        .into_iter()
-        .map(|exists| ExistsSignal {
-            outer_table: outer_table.clone(),
-            inner_table: query_single_base_table(&exists.query),
-            inner_column: exists_inner_column(&exists.query),
-        })
-        .collect()
-}
-
-fn detect_coalesce_signals(query: &Query) -> Vec<CoalesceSignal> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return Vec::new();
-    };
-    let table = query_single_base_table(query);
-    let mut signals = Vec::new();
-
-    for item in select.projection.iter() {
-        collect_coalesce_calls(&item.expr, &table, &mut signals);
-    }
-    if let Some(predicate) = select.r#where.as_ref() {
-        collect_coalesce_calls(predicate, &table, &mut signals);
-    }
-    if let Some(predicate) = select.having.as_ref() {
-        collect_coalesce_calls(predicate, &table, &mut signals);
-    }
-    for ob in query.order_by.iter() {
-        collect_coalesce_calls(&ob.expr, &table, &mut signals);
-    }
-
-    signals
-}
-
-fn query_body_references_table(body: &QueryBody, table_name: &str) -> bool {
-    let mut tables = Vec::new();
-    collect_tables_recursive(body, &mut tables);
-    tables.iter().any(|(_, table)| table == table_name)
-}
-
-fn collect_tables_recursive(body: &QueryBody, out: &mut Vec<(String, String)>) {
-    match body {
-        QueryBody::Select { select } => {
-            if let Some(from) = select.from.as_ref() {
-                for tref in from.iter() {
-                    collect_tables_recursive_from_ref(tref, out);
-                }
-            }
-        }
-        QueryBody::Setop { setop } => {
-            collect_tables_recursive(&setop.left, out);
-            collect_tables_recursive(&setop.right, out);
-        }
-    }
-}
-
-fn collect_tables_recursive_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
-    match tref {
-        TableRef::Base(base) => out.push((base.db.clone(), base.table.clone())),
-        TableRef::Join(join) => {
-            collect_tables_recursive_from_ref(&join.join.left, out);
-            collect_tables_recursive_from_ref(&join.join.right, out);
-        }
-        TableRef::Subquery(sub) => {
-            collect_tables_recursive(&sub.subquery.query.body, out);
-        }
-    }
-}
-
-fn collect_table_aliases_from_body(
-    body: &QueryBody,
-    alias_map: &mut HashMap<String, BaseTableRef>,
-) -> bool {
-    match body {
-        QueryBody::Select { select } => {
-            let mut ok = true;
-            if let Some(from) = select.from.as_ref() {
-                for tref in from.iter() {
-                    if !collect_table_aliases(tref, alias_map) {
-                        ok = false;
-                    }
-                }
-            }
-            ok
-        }
-        QueryBody::Setop { setop } => {
-            collect_table_aliases_from_body(&setop.left, alias_map)
-                && collect_table_aliases_from_body(&setop.right, alias_map)
-        }
-    }
-}
-
-fn collect_column_comparisons_from_body(body: &QueryBody, out: &mut Vec<(ColumnRef, ColumnRef)>) {
-    match body {
-        QueryBody::Select { select } => {
-            if let Some(from) = select.from.as_ref() {
-                for tref in from.iter() {
-                    collect_join_comparisons_from_ref(tref, out);
-                }
-            }
-            if let Some(predicate) = select.r#where.as_ref() {
-                collect_column_comparisons(predicate, out);
-            }
-            if let Some(predicate) = select.having.as_ref() {
-                collect_column_comparisons(predicate, out);
-            }
-        }
-        QueryBody::Setop { setop } => {
-            collect_column_comparisons_from_body(&setop.left, out);
-            collect_column_comparisons_from_body(&setop.right, out);
-        }
-    }
-}
-
-fn collect_join_comparisons_from_ref(tref: &TableRef, out: &mut Vec<(ColumnRef, ColumnRef)>) {
-    match tref {
-        TableRef::Join(join) => {
-            if let Some(on) = join.join.on.as_ref() {
-                collect_column_comparisons(on, out);
-            }
-            collect_join_comparisons_from_ref(&join.join.left, out);
-            collect_join_comparisons_from_ref(&join.join.right, out);
-        }
-        TableRef::Subquery(sub) => {
-            collect_column_comparisons_from_body(&sub.subquery.query.body, out);
-        }
-        TableRef::Base(_) => {}
-    }
-}
-
-fn collect_base_tables_from_body(body: &QueryBody, out: &mut Vec<BaseTableRef>) {
-    match body {
-        QueryBody::Select { select } => {
-            if let Some(from) = select.from.as_ref() {
-                for tref in from.iter() {
-                    collect_base_tables_from_ref(tref, out);
-                }
-            }
-        }
-        QueryBody::Setop { setop } => {
-            collect_base_tables_from_body(&setop.left, out);
-            collect_base_tables_from_body(&setop.right, out);
-        }
-    }
-}
-
-fn collect_base_tables_from_ref(tref: &TableRef, out: &mut Vec<BaseTableRef>) {
-    match tref {
-        TableRef::Base(base) => out.push(base.clone()),
-        TableRef::Join(join) => {
-            collect_base_tables_from_ref(&join.join.left, out);
-            collect_base_tables_from_ref(&join.join.right, out);
-        }
-        TableRef::Subquery(sub) => {
-            collect_base_tables_from_body(&sub.subquery.query.body, out);
-        }
-    }
-}
-
-fn first_non_cte_table(body: &QueryBody, cte_name: &str) -> Option<BaseTableRef> {
-    let mut alias_map = HashMap::new();
-    collect_table_aliases_from_body(body, &mut alias_map);
-    if let Some((_, table)) = alias_map.iter().find(|(_, table)| table.table != cte_name) {
-        return Some(table.clone());
-    }
-
-    let mut tables = Vec::new();
-    collect_base_tables_from_body(body, &mut tables);
-    tables.into_iter().find(|table| table.table != cte_name)
-}
-
-fn infer_hierarchy_columns_from_cte(
-    query: &Query,
-    cte_name: &str,
-) -> (Option<String>, Option<String>) {
-    let mut alias_map = HashMap::new();
-    collect_table_aliases_from_body(query.body.as_ref(), &mut alias_map);
-    let mut base_aliases = HashSet::new();
-    for (alias, table) in alias_map.iter() {
-        if table.table != cte_name {
-            base_aliases.insert(alias.clone());
-        }
-    }
-
-    let mut comparisons = Vec::new();
-    collect_column_comparisons_from_body(query.body.as_ref(), &mut comparisons);
-
-    let mut parent = None;
-    let mut id_col = None;
-    let consider = |col: &ColumnRef, parent: &mut Option<String>, id_col: &mut Option<String>| {
-        if parent.is_none() && is_parent_like_column(&col.col) {
-            *parent = Some(col.col.clone());
-        }
-        if id_col.is_none() && is_id_like_column(&col.col) {
-            *id_col = Some(col.col.clone());
-        }
-    };
-
-    if !base_aliases.is_empty() {
-        for (left, right) in comparisons.iter() {
-            if let Some(table) = left.table.as_ref() {
-                if base_aliases.contains(table) {
-                    consider(left, &mut parent, &mut id_col);
-                }
-            }
-            if let Some(table) = right.table.as_ref() {
-                if base_aliases.contains(table) {
-                    consider(right, &mut parent, &mut id_col);
-                }
-            }
-        }
-    }
-
-    if parent.is_none() || id_col.is_none() {
-        for (left, right) in comparisons.iter() {
-            consider(left, &mut parent, &mut id_col);
-            consider(right, &mut parent, &mut id_col);
-        }
-    }
-
-    (parent, id_col)
-}
-
-fn collect_comparisons(expr: &Expr, out: &mut Vec<Comparison>) {
-    match expr {
-        Expr::Op {
-            op,
-            a,
-            b,
-            args,
-            list,
-            lo,
-            hi,
-        } => match op.as_str() {
-            "and" | "or" => {
-                if let Some(items) = args.as_ref() {
-                    for item in items.iter() {
-                        collect_comparisons(item, out);
-                    }
-                } else {
-                    if let Some(left) = a.as_deref() {
-                        collect_comparisons(left, out);
-                    }
-                    if let Some(right) = b.as_deref() {
-                        collect_comparisons(right, out);
-                    }
-                }
-            }
-            "eq" | "gt" | "ge" | "lt" | "le" => {
-                if let (Some(left), Some(right)) = (a.as_deref(), b.as_deref()) {
-                    if let Some((col, value)) = extract_col_value(left, right) {
-                        out.push(Comparison {
-                            col,
-                            op: op.clone(),
-                            value,
-                        });
-                    } else if let Some((col, value)) = extract_col_value(right, left) {
-                        out.push(Comparison {
-                            col,
-                            op: op.clone(),
-                            value,
-                        });
-                    }
-                }
-            }
-            "between" => {
-                if let (Some(expr), Some(lo), Some(hi)) =
-                    (a.as_deref(), lo.as_deref(), hi.as_deref())
-                {
-                    if let Some((col, value)) = extract_col_value(expr, lo) {
-                        out.push(Comparison {
-                            col,
-                            op: "ge".to_string(),
-                            value,
-                        });
-                    }
-                    if let Some((col, value)) = extract_col_value(expr, hi) {
-                        out.push(Comparison {
-                            col,
-                            op: "le".to_string(),
-                            value,
-                        });
-                    }
-                }
-            }
-            "is_null" => {
-                if let Some(Expr::Col { col, .. }) = a.as_deref() {
-                    out.push(Comparison {
-                        col: col.clone(),
-                        op: op.clone(),
-                        value: ComparisonValue::Lit(Lit::Null),
-                    });
-                }
-            }
-            _ => {
-                if let Some(expr) = a.as_deref() {
-                    collect_comparisons(expr, out);
-                }
-                if let Some(expr) = b.as_deref() {
-                    collect_comparisons(expr, out);
-                }
-                if let Some(items) = args.as_ref() {
-                    for item in items.iter() {
-                        collect_comparisons(item, out);
-                    }
-                }
-                if let Some(items) = list.as_ref() {
-                    for item in items.iter() {
-                        collect_comparisons(item, out);
-                    }
-                }
-                if let Some(expr) = lo.as_deref() {
-                    collect_comparisons(expr, out);
-                }
-                if let Some(expr) = hi.as_deref() {
-                    collect_comparisons(expr, out);
-                }
-            }
-        },
-        Expr::Func { args, .. } => {
-            for item in args.iter() {
-                collect_comparisons(item, out);
-            }
-        }
-        Expr::Cast { cast } => {
-            collect_comparisons(&cast.expr, out);
-        }
-        Expr::Case { case_ } => {
-            for when in case_.when.iter() {
-                collect_comparisons(&when.r#if, out);
-                collect_comparisons(&when.then, out);
-            }
-            if let Some(other) = case_.r#else.as_ref() {
-                collect_comparisons(other, out);
-            }
-        }
-        Expr::Subquery { .. }
-        | Expr::Exists { .. }
-        | Expr::Col { .. }
-        | Expr::Lit { .. }
-        | Expr::Param { .. } => {}
-    }
-}
-
-fn collect_column_comparisons(expr: &Expr, out: &mut Vec<(ColumnRef, ColumnRef)>) {
-    match expr {
-        Expr::Op {
-            op,
-            a,
-            b,
-            args,
-            list,
-            lo,
-            hi,
-        } => match op.as_str() {
-            "and" | "or" => {
-                if let Some(items) = args.as_ref() {
-                    for item in items.iter() {
-                        collect_column_comparisons(item, out);
-                    }
-                } else {
-                    if let Some(left) = a.as_deref() {
-                        collect_column_comparisons(left, out);
-                    }
-                    if let Some(right) = b.as_deref() {
-                        collect_column_comparisons(right, out);
-                    }
-                }
-            }
-            "eq" => {
-                if let (Some(left), Some(right)) = (a.as_deref(), b.as_deref()) {
-                    if let (Some(left_col), Some(right_col)) =
-                        (column_ref_from_expr(left), column_ref_from_expr(right))
-                    {
-                        out.push((left_col, right_col));
-                    }
-                }
-            }
-            _ => {
-                if let Some(expr) = a.as_deref() {
-                    collect_column_comparisons(expr, out);
-                }
-                if let Some(expr) = b.as_deref() {
-                    collect_column_comparisons(expr, out);
-                }
-                if let Some(items) = args.as_ref() {
-                    for item in items.iter() {
-                        collect_column_comparisons(item, out);
-                    }
-                }
-                if let Some(items) = list.as_ref() {
-                    for item in items.iter() {
-                        collect_column_comparisons(item, out);
-                    }
-                }
-                if let Some(expr) = lo.as_deref() {
-                    collect_column_comparisons(expr, out);
-                }
-                if let Some(expr) = hi.as_deref() {
-                    collect_column_comparisons(expr, out);
-                }
-            }
-        },
-        Expr::Func { args, .. } => {
-            for item in args.iter() {
-                collect_column_comparisons(item, out);
-            }
-        }
-        Expr::Cast { cast } => {
-            collect_column_comparisons(&cast.expr, out);
-        }
-        Expr::Case { case_ } => {
-            for when in case_.when.iter() {
-                collect_column_comparisons(&when.r#if, out);
-                collect_column_comparisons(&when.then, out);
-            }
-            if let Some(other) = case_.r#else.as_ref() {
-                collect_column_comparisons(other, out);
-            }
-        }
-        Expr::Subquery { .. }
-        | Expr::Exists { .. }
-        | Expr::Col { .. }
-        | Expr::Lit { .. }
-        | Expr::Param { .. } => {}
-    }
-}
-
-fn column_ref_from_expr(expr: &Expr) -> Option<ColumnRef> {
-    match expr {
-        Expr::Col { col, table } => Some(ColumnRef {
-            table: table.clone(),
-            col: col.clone(),
-        }),
-        _ => None,
-    }
-}
-
-fn collect_join_refs(tref: &TableRef, out: &mut Vec<JoinRef>) {
-    let TableRef::Join(join) = tref else {
-        return;
-    };
-    out.push(join.join.clone());
-    collect_join_refs(&join.join.left, out);
-    collect_join_refs(&join.join.right, out);
-}
-
-fn base_table_from_ref(tref: &TableRef) -> Option<BaseTableRef> {
-    match tref {
-        TableRef::Base(base) => Some(base.clone()),
-        _ => None,
-    }
-}
-
-fn resolve_column_ref(col: &ColumnRef) -> Option<(String, String)> {
-    let alias = col.table.clone()?;
-    Some((alias, col.col.clone()))
-}
-
-fn classify_hierarchy_columns(left: &str, right: &str) -> (Option<String>, Option<String>) {
-    if is_parent_like_column(left) && is_id_like_column(right) {
-        return (Some(left.to_string()), Some(right.to_string()));
-    }
-    if is_parent_like_column(right) && is_id_like_column(left) {
-        return (Some(right.to_string()), Some(left.to_string()));
-    }
-    if is_parent_like_column(left) {
-        return (Some(left.to_string()), None);
-    }
-    if is_parent_like_column(right) {
-        return (Some(right.to_string()), None);
-    }
-    if is_id_like_column(left) {
-        return (None, Some(left.to_string()));
-    }
-    if is_id_like_column(right) {
-        return (None, Some(right.to_string()));
-    }
-    (None, None)
-}
-
-fn collect_exists_exprs(expr: &Expr, out: &mut Vec<ExistsExpr>) {
-    match expr {
-        Expr::Exists { exists } => {
-            out.push(exists.clone());
-        }
-        Expr::Op {
-            a,
-            b,
-            args,
-            list,
-            lo,
-            hi,
-            ..
-        } => {
-            if let Some(left) = a.as_deref() {
-                collect_exists_exprs(left, out);
-            }
-            if let Some(right) = b.as_deref() {
-                collect_exists_exprs(right, out);
-            }
-            if let Some(items) = args.as_ref() {
-                for item in items.iter() {
-                    collect_exists_exprs(item, out);
-                }
-            }
-            if let Some(items) = list.as_ref() {
-                for item in items.iter() {
-                    collect_exists_exprs(item, out);
-                }
-            }
-            if let Some(expr) = lo.as_deref() {
-                collect_exists_exprs(expr, out);
-            }
-            if let Some(expr) = hi.as_deref() {
-                collect_exists_exprs(expr, out);
-            }
-        }
-        Expr::Func { args, .. } => {
-            for arg in args.iter() {
-                collect_exists_exprs(arg, out);
-            }
-        }
-        Expr::Cast { cast } => {
-            collect_exists_exprs(&cast.expr, out);
-        }
-        Expr::Case { case_ } => {
-            for when in case_.when.iter() {
-                collect_exists_exprs(&when.r#if, out);
-                collect_exists_exprs(&when.then, out);
-            }
-            if let Some(other) = case_.r#else.as_deref() {
-                collect_exists_exprs(other, out);
-            }
-        }
-        Expr::Subquery { .. } => {}
-        Expr::Col { .. } | Expr::Lit { .. } | Expr::Param { .. } => {}
-    }
-}
-
-fn collect_coalesce_calls(
-    expr: &Expr,
-    table: &Option<BaseTableRef>,
-    out: &mut Vec<CoalesceSignal>,
-) {
-    match expr {
-        Expr::Func { name, args, .. } => {
-            if is_coalesce_name(name) {
-                if let Some(signal) = coalesce_signal_from_args(args, table) {
-                    out.push(signal);
-                }
-            }
-            for arg in args.iter() {
-                collect_coalesce_calls(arg, table, out);
-            }
-        }
-        Expr::Op {
-            a,
-            b,
-            args,
-            list,
-            lo,
-            hi,
-            ..
-        } => {
-            if let Some(left) = a.as_deref() {
-                collect_coalesce_calls(left, table, out);
-            }
-            if let Some(right) = b.as_deref() {
-                collect_coalesce_calls(right, table, out);
-            }
-            if let Some(items) = args.as_ref() {
-                for item in items.iter() {
-                    collect_coalesce_calls(item, table, out);
-                }
-            }
-            if let Some(items) = list.as_ref() {
-                for item in items.iter() {
-                    collect_coalesce_calls(item, table, out);
-                }
-            }
-            if let Some(expr) = lo.as_deref() {
-                collect_coalesce_calls(expr, table, out);
-            }
-            if let Some(expr) = hi.as_deref() {
-                collect_coalesce_calls(expr, table, out);
-            }
-        }
-        Expr::Cast { cast } => {
-            collect_coalesce_calls(&cast.expr, table, out);
-        }
-        Expr::Case { case_ } => {
-            for when in case_.when.iter() {
-                collect_coalesce_calls(&when.r#if, table, out);
-                collect_coalesce_calls(&when.then, table, out);
-            }
-            if let Some(other) = case_.r#else.as_deref() {
-                collect_coalesce_calls(other, table, out);
-            }
-        }
-        Expr::Subquery { .. } | Expr::Exists { .. } => {}
-        Expr::Col { .. } | Expr::Lit { .. } | Expr::Param { .. } => {}
-    }
-}
-
-fn coalesce_signal_from_args(
-    args: &[Expr],
-    table: &Option<BaseTableRef>,
-) -> Option<CoalesceSignal> {
-    if args.len() < 2 {
-        return None;
-    }
-    let column = match &args[0] {
-        Expr::Col { col, .. } => col.clone(),
-        _ => return None,
-    };
-    let default_value = match &args[1] {
-        Expr::Lit { lit } => Some(lit.clone()),
-        _ => None,
-    };
-    Some(CoalesceSignal {
-        table: table.clone(),
-        column,
-        default_value,
-        arg_count: args.len(),
-    })
-}
-
-fn is_coalesce_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(lower.as_str(), "coalesce" | "ifnull" | "nvl")
-}
-
-fn exists_inner_column(query: &Query) -> Option<String> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return None;
-    };
-    if let Some(predicate) = select.r#where.as_ref() {
-        if let Some(col) = first_column_in_expr(predicate) {
-            return Some(col);
-        }
-    }
-    if let Some(predicate) = select.having.as_ref() {
-        if let Some(col) = first_column_in_expr(predicate) {
-            return Some(col);
-        }
-    }
-    for item in select.projection.iter() {
-        if let Some(col) = first_column_in_expr(&item.expr) {
-            return Some(col);
-        }
-    }
-    None
-}
-
-fn first_column_in_expr(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Col { col, .. } => Some(col.clone()),
-        Expr::Op {
-            a,
-            b,
-            args,
-            list,
-            lo,
-            hi,
-            ..
-        } => {
-            if let Some(left) = a.as_deref() {
-                if let Some(col) = first_column_in_expr(left) {
-                    return Some(col);
-                }
-            }
-            if let Some(right) = b.as_deref() {
-                if let Some(col) = first_column_in_expr(right) {
-                    return Some(col);
-                }
-            }
-            if let Some(items) = args.as_ref() {
-                for item in items.iter() {
-                    if let Some(col) = first_column_in_expr(item) {
-                        return Some(col);
-                    }
-                }
-            }
-            if let Some(items) = list.as_ref() {
-                for item in items.iter() {
-                    if let Some(col) = first_column_in_expr(item) {
-                        return Some(col);
-                    }
-                }
-            }
-            if let Some(expr) = lo.as_deref() {
-                if let Some(col) = first_column_in_expr(expr) {
-                    return Some(col);
-                }
-            }
-            if let Some(expr) = hi.as_deref() {
-                if let Some(col) = first_column_in_expr(expr) {
-                    return Some(col);
-                }
-            }
-            None
-        }
-        Expr::Func { args, .. } => {
-            for arg in args.iter() {
-                if let Some(col) = first_column_in_expr(arg) {
-                    return Some(col);
-                }
-            }
-            None
-        }
-        Expr::Cast { cast } => first_column_in_expr(&cast.expr),
-        Expr::Case { case_ } => {
-            for when in case_.when.iter() {
-                if let Some(col) = first_column_in_expr(&when.r#if) {
-                    return Some(col);
-                }
-                if let Some(col) = first_column_in_expr(&when.then) {
-                    return Some(col);
-                }
-            }
-            case_.r#else.as_deref().and_then(first_column_in_expr)
-        }
-        Expr::Subquery { .. } | Expr::Exists { .. } => None,
-        Expr::Lit { .. } | Expr::Param { .. } => None,
-    }
-}
-
-fn extract_col_value(left: &Expr, right: &Expr) -> Option<(String, ComparisonValue)> {
-    let Expr::Col { col, .. } = left else {
-        return None;
-    };
-    let value = match right {
-        Expr::Lit { lit } => ComparisonValue::Lit(lit.clone()),
-        Expr::Param { param } => ComparisonValue::Param(*param),
-        _ => return None,
-    };
-    Some((col.clone(), value))
-}
-
-fn comparison_value_lit(value: &ComparisonValue, args: &[Lit]) -> Option<Lit> {
-    match value {
-        ComparisonValue::Lit(lit) => Some(lit.clone()),
-        ComparisonValue::Param(param) => args.get(*param as usize).cloned(),
-    }
-}
-
-fn order_by_cols(query: &Query) -> Vec<String> {
-    let mut out = Vec::new();
-    for ob in query.order_by.iter() {
-        if let Expr::Col { col, .. } = &ob.expr {
-            out.push(col.clone());
-        }
-    }
-    out
-}
-
-fn query_single_base_table(query: &Query) -> Option<BaseTableRef> {
-    let QueryBody::Select { select } = query.body.as_ref() else {
-        return None;
-    };
-    let from = select.from.as_ref()?;
-    if from.len() != 1 {
-        return None;
-    }
-    match &from[0] {
-        TableRef::Base(base) => Some(base.clone()),
-        _ => None,
-    }
-}
-
-fn is_soft_delete_column(column: &str) -> bool {
-    let col = column.to_ascii_lowercase();
-    matches!(
-        col.as_str(),
-        "deleted" | "is_deleted" | "deleted_at" | "deleted_on" | "deleted_at_ms" | "deleted_on_ms"
-    ) || col.ends_with("_deleted")
-        || col.ends_with("_deleted_at")
-        || col.ends_with("_deleted_on")
-        || col.ends_with("_deleted_at_ms")
-        || col.ends_with("_deleted_on_ms")
-}
-
-fn lit_is_false(lit: &Lit) -> bool {
-    matches!(lit, Lit::Bool { v: false })
-        || matches!(lit, Lit::I64 { v: 0 })
-        || matches!(lit, Lit::U64 { v: 0 })
-        || matches!(lit, Lit::Str { v } if v == "false" || v == "0")
-}
-
-fn has_increasing_sequence(values: &[f64]) -> bool {
-    if values.len() < 2 {
-        return false;
-    }
-    let mut prev = values[0];
-    for v in values.iter().skip(1) {
-        if *v <= prev {
-            return false;
-        }
-        prev = *v;
-    }
-    true
-}
-
-fn expr_const_value(expr: &Expr, args: &[Lit]) -> Option<Lit> {
-    match expr {
-        Expr::Lit { lit } => Some(lit.clone()),
-        Expr::Param { param } => args.get(*param as usize).cloned(),
-        _ => None,
-    }
-}
-
-fn collect_index_eq_filters(
-    expr: &Expr,
-    single_alias: Option<&str>,
-    alias_map: &HashMap<String, BaseTableRef>,
-    args: &[Lit],
-    out: &mut Vec<(String, Lit)>,
-) -> bool {
-    let Expr::Op {
-        op,
-        a,
-        b,
-        args: vargs,
-        ..
-    } = expr
-    else {
-        return true;
-    };
-
-    match op.as_str() {
-        "and" => {
-            if let Some(items) = vargs.as_ref() {
-                for item in items.iter() {
-                    if !collect_index_eq_filters(item, single_alias, alias_map, args, out) {
-                        return false;
-                    }
-                }
-            } else {
-                if let Some(left) = a.as_deref() {
-                    if !collect_index_eq_filters(left, single_alias, alias_map, args, out) {
-                        return false;
-                    }
-                }
-                if let Some(right) = b.as_deref() {
-                    if !collect_index_eq_filters(right, single_alias, alias_map, args, out) {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-        "or" | "not" => false,
-        "eq" => {
-            let left = a
-                .as_deref()
-                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
-            let right = b
-                .as_deref()
-                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
-            if let (Some((_alias, col)), Some(value)) = (
-                left,
-                b.as_deref().and_then(|expr| expr_const_value(expr, args)),
-            ) {
-                out.push((col, value));
-            } else if let (Some((_alias, col)), Some(value)) = (
-                right,
-                a.as_deref().and_then(|expr| expr_const_value(expr, args)),
-            ) {
-                out.push((col, value));
-            }
-            true
-        }
-        _ => true,
-    }
-}
-
-// -----------------------------
 // Dependency extraction
 // -----------------------------
 
@@ -33754,13 +31434,107 @@ fn canonical_schema_column_name<'a>(schema: &'a TableSchema, column: &str) -> Op
         .map(|candidate| candidate.name.as_str())
 }
 
-fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+/// Build a unique temp path next to `path` for atomic writes. Includes the pid and a
+/// process-global counter so concurrent writers — and any temp files left behind by a
+/// previously crashed run — never collide. The `.skein-tmp.` infix keeps these files
+/// from matching the `.json`/`.rseg` suffixes the loaders scan for.
+fn durable_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".skein-tmp.{pid}.{seq}"));
+    path.with_file_name(name)
+}
+
+/// Atomically and durably write `bytes` to `path`.
+///
+/// Writes to a uniquely-named sibling temp file, fsyncs it, then renames it over the
+/// destination. A crash at any point leaves either the prior file fully intact or the
+/// new contents fully in place — never a torn/partial file. The parent directory is
+/// fsynced afterwards so the rename itself survives a crash. This replaces bare
+/// `fs::write`, which overwrote files in place with no durability guarantee and could
+/// corrupt a whole table or metadata file on a mid-write crash.
+fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(value)?;
-    fs::write(path, bytes)?;
+    let tmp = durable_tmp_path(path);
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    // fsync the directory so the rename is durable (best-effort: not every platform or
+    // filesystem requires or supports directory fsync, so failures here are ignored).
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
+}
+
+/// Recursively remove stale atomic-write temp files (`*.skein-tmp.*`) left behind if a
+/// crash happened between creating the temp file and the rename in `durable_write_bytes`.
+/// The loaders never read them (they don't match the `.json`/`.rseg` suffixes), but
+/// sweeping them when the data dir is opened keeps it clean and bounds disk usage across
+/// repeated crashes. Best-effort: unreadable directories and files are skipped.
+///
+/// Symlinks are never followed and recursion depth is bounded, so a symlink that points
+/// outside the data dir can't have files deleted through it and a symlink cycle can't
+/// hang `open()`.
+fn sweep_stale_temp_files(dir: &Path) {
+    sweep_stale_temp_files_depth(dir, 0);
+}
+
+fn sweep_stale_temp_files_depth(dir: &Path, depth: u32) {
+    const MAX_SWEEP_DEPTH: u32 = 16;
+    if depth >= MAX_SWEEP_DEPTH {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // Use the directory entry's own type so symlinks are detected without following
+        // them (unlike Path::is_dir, which traverses the link target).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            sweep_stale_temp_files_depth(&path, depth + 1);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".skein-tmp."))
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    durable_write_bytes(path, &bytes)
 }
 
 fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
@@ -33883,6 +31657,277 @@ mod tests {
         dir.push(unique);
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[test]
+    fn durable_write_bytes_roundtrips_and_leaves_no_temp_files() -> anyhow::Result<()> {
+        let dir = temp_dir("durable_write_roundtrip");
+        // Parent dir does not exist yet: durable_write_bytes must create it.
+        let path = dir.join("tables").join("7").join("value.rseg");
+        durable_write_bytes(&path, b"hello world")?;
+        assert_eq!(fs::read(&path)?, b"hello world");
+        // The atomic-rename temp file must be cleaned up, never left in the data dir.
+        let leftovers: Vec<String> = fs::read_dir(path.parent().unwrap())?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".skein-tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected temp files: {leftovers:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn durable_write_bytes_overwrites_existing_file_fully() -> anyhow::Result<()> {
+        let dir = temp_dir("durable_write_overwrite");
+        let path = dir.join("table.rseg");
+        durable_write_bytes(&path, b"OLD-CONTENTS-THAT-ARE-LONGER")?;
+        durable_write_bytes(&path, b"NEW")?;
+        // Replacement is whole-file: no trailing bytes from the longer prior write
+        // survive (which an in-place fs::write of fewer bytes would have left behind).
+        assert_eq!(fs::read(&path)?, b"NEW");
+        Ok(())
+    }
+
+    #[test]
+    fn durable_tmp_path_is_unique_and_does_not_shadow_loader_suffixes() {
+        let target = Path::new("/data/tables/1/test.rseg");
+        let a = durable_tmp_path(target);
+        let b = durable_tmp_path(target);
+        assert_ne!(a, b, "temp paths must be unique across calls");
+        for p in [&a, &b] {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.contains(".skein-tmp."), "missing temp infix: {name}");
+            // Must not end in a suffix the table/segment loaders scan for, so a temp
+            // file left by a crash is never mistaken for committed data.
+            assert!(!name.ends_with(".rseg"), "temp shadows .rseg: {name}");
+            assert!(!name.ends_with(".json"), "temp shadows .json: {name}");
+            assert_eq!(p.parent(), target.parent(), "temp must stay in dest dir");
+        }
+    }
+
+    #[test]
+    fn save_json_persists_durably_and_roundtrips() -> anyhow::Result<()> {
+        let dir = temp_dir("save_json_durable");
+        let path = dir.join("settings.json");
+        let value = serde_json::json!({"server_name": "skeindb", "max_connections": 256});
+        save_json(&path, &value)?;
+        let read: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(read, value);
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_stale_temp_files_removes_temps_and_keeps_real_files() -> anyhow::Result<()> {
+        let dir = temp_dir("sweep_temps");
+        let sub = dir.join("tables").join("1");
+        fs::create_dir_all(&sub)?;
+        let real = sub.join("test.rseg");
+        fs::write(&real, b"committed")?;
+        // A torn temp left by a crash mid-rename, in a nested table dir.
+        let stale = sub.join("test.rseg.skein-tmp.4242");
+        fs::write(&stale, b"torn-partial")?;
+        sweep_stale_temp_files(&dir);
+        assert!(real.exists(), "committed file must survive the sweep");
+        assert_eq!(fs::read(&real)?, b"committed");
+        assert!(!stale.exists(), "stale temp file must be swept");
+        Ok(())
+    }
+
+    #[test]
+    fn engine_open_sweeps_leftover_temp_files() -> anyhow::Result<()> {
+        let dir = temp_dir("open_sweeps_temps");
+        let tdir = dir.join("tables").join("1");
+        fs::create_dir_all(&tdir)?;
+        // Plant crash-leftover temps at the data root and inside a table dir.
+        let stale_root = dir.join("catalog.json.skein-tmp.1");
+        let stale_tbl = tdir.join("test.rseg.skein-tmp.2");
+        fs::write(&stale_root, b"x")?;
+        fs::write(&stale_tbl, b"y")?;
+        let _engine = Engine::open(&dir)?;
+        assert!(!stale_root.exists(), "open() must sweep the root temp file");
+        assert!(
+            !stale_tbl.exists(),
+            "open() must sweep the table-dir temp file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wal_recovers_committed_rows_after_lost_snapshot() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_recovery");
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(
+                &table_ref,
+                vec![
+                    row(&[("id", Lit::U64 { v: 1 })]),
+                    row(&[("id", Lit::U64 { v: 2 })]),
+                ],
+                None,
+            )?;
+            // Drop without checkpoint: the committed mutations stay in the WAL on disk,
+            // simulating a crash before a clean shutdown.
+        }
+        assert!(
+            dir.join("wal-000001.log").exists(),
+            "committed mutations must be durably logged in the WAL"
+        );
+        // Simulate the table snapshot writes being lost in the crash while the catalog
+        // and the WAL survive.
+        fs::remove_dir_all(dir.join("tables")).ok();
+
+        // Reopen: recovery must replay the WAL and restore both rows.
+        let engine = Engine::open(&dir)?;
+        let (_, tdata) = engine.get_table(&table_ref)?;
+        let live = tdata.rows.iter().filter(|r| !r.deleted).count();
+        assert_eq!(live, 2, "both inserted rows must be recovered from the WAL");
+        // A successful recovery truncates the WAL back to a clean checkpoint.
+        assert!(
+            !dir.join("wal-000001.log").exists(),
+            "WAL must be truncated after a successful recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_segment_file_loads_empty_and_refuses_overwrite() -> anyhow::Result<()> {
+        let dir = temp_dir("corrupt_segment_guard");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let seg_path;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            seg_path = engine.table_segment_path("app", "items");
+            assert!(seg_path.exists(), "segment file should be written");
+        }
+        // Corrupt the on-disk segment, and drop the WAL (as a prior checkpoint would) so
+        // there is no redo log to recover from — the corruption stands alone.
+        let corrupt = b"this is not a valid .rseg file".to_vec();
+        fs::write(&seg_path, &corrupt)?;
+        fs::remove_file(dir.join("wal-000001.log")).ok();
+
+        let mut engine = Engine::open(&dir)?;
+        {
+            let (_, tdata) = engine.get_table(&table)?;
+            assert_eq!(
+                tdata.rows.len(),
+                0,
+                "a corrupt table must load empty, not error"
+            );
+        }
+        // Writes must be refused, so the corrupt file is never overwritten with an empty
+        // table (which would turn recoverable corruption into permanent data loss).
+        let insert = engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None);
+        assert!(insert.is_err(), "writes to a corrupt table must be refused");
+        assert_eq!(
+            fs::read(&seg_path)?,
+            corrupt,
+            "the corrupt segment file must be preserved intact"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wal_recovery_after_primary_key_update_leaves_no_phantom_row() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_pk_move_recovery");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "t".to_string(),
+            r#as: None,
+        };
+        let seg_path;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "t",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            seg_path = engine.table_segment_path("app", "t");
+            // Checkpoint so the snapshot holds id=1 and the WAL is clean.
+            engine.checkpoint_for_shutdown()?;
+        }
+        let pre_update_snapshot = fs::read(&seg_path)?;
+        {
+            let mut engine = Engine::open(&dir)?;
+            // Move the primary key 1 -> 2 (logs a new-key row + an old-key tombstone).
+            let set = row(&[("id", Lit::U64 { v: 2 })]);
+            let predicate = eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            );
+            engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        }
+        // Simulate the update's snapshot write being lost: restore the pre-update segment,
+        // leaving the WAL (with the pk-move records) intact.
+        fs::write(&seg_path, &pre_update_snapshot)?;
+
+        let engine = Engine::open(&dir)?;
+        let (_, tdata) = engine.get_table(&table)?;
+        let live: Vec<u64> = tdata
+            .rows
+            .iter()
+            .filter(|r| !r.deleted)
+            .filter_map(|r| match r.row.get("id") {
+                Some(Lit::U64 { v }) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            vec![2],
+            "after recovery only the new primary key should be live (no phantom old-key row)"
+        );
+        Ok(())
     }
 
     #[test]
@@ -40171,7 +38216,7 @@ mod tests {
         let secret_b = "top-secret-payload-B";
 
         {
-            let mut engine = Engine::open(&dir)?;
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             engine
                 .settings_encryption_register_key(
                     skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -40226,7 +38271,7 @@ mod tests {
         // Reopen WITHOUT registering the key: the table must be locked (loaded empty) and
         // writes/persist must be refused so the ciphertext is never overwritten.
         {
-            let engine = Engine::open(&dir)?;
+            let engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             let key = TableKey {
                 db: "app".to_string(),
                 table: "events".to_string(),
@@ -40244,7 +38289,7 @@ mod tests {
 
         // Reopen and register the key: the encrypted table unlocks and decrypts.
         {
-            let mut engine = Engine::open(&dir)?;
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
             engine
                 .settings_encryption_register_key(
                     skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -40278,7 +38323,7 @@ mod tests {
 
         let dir = temp_dir("encrypted_at_rest_mle");
         let master_key_b64 = BASE64_STANDARD.encode([3u8; ENCRYPTION_MASTER_KEY_LEN]);
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine
             .settings_encryption_register_key(
                 skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -40360,7 +38405,7 @@ mod tests {
         let k1 = BASE64_STANDARD.encode([5u8; ENCRYPTION_MASTER_KEY_LEN]);
         let k2 = BASE64_STANDARD.encode([6u8; ENCRYPTION_MASTER_KEY_LEN]);
 
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine
             .settings_encryption_register_key(
                 skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
@@ -49216,7 +47261,7 @@ mod tests {
     #[test]
     fn table_rows_file_stores_value_refs() -> anyhow::Result<()> {
         let dir = temp_dir("table_rows_value_refs");
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         let large_payload = "same".repeat(80);
         engine.create_table(
             "app",
@@ -49309,7 +47354,7 @@ mod tests {
 
         drop(engine);
 
-        let reopened = Engine::open(&dir)?;
+        let reopened = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         let row = reopened
             .data_get(
                 &BaseTableRef {
@@ -49329,7 +47374,7 @@ mod tests {
     #[test]
     fn table_rows_file_skips_unprofitable_value_refs() -> anyhow::Result<()> {
         let dir = temp_dir("table_rows_skip_small_refs");
-        let mut engine = Engine::open(&dir)?;
+        let mut engine = Engine::open_with_storage_mode_name(&dir, "hybrid")?;
         engine.create_table(
             "app",
             "events",
@@ -52539,6 +50584,11 @@ mod tests {
             save_json(&json_path, &legacy_rows)?;
             remove_file_if_exists(&segment_path)?;
         }
+
+        // This test fabricates a legacy on-disk table that predates the WAL, so drop any
+        // WAL the setup inserts produced; otherwise recovery would (correctly) replay the
+        // originally committed rows over the hand-written legacy snapshot.
+        remove_file_if_exists(&dir.join("wal-000001.log"))?;
 
         let reopened = Engine::open(&dir)?;
         let (_, tdata) = reopened.get_table(&table)?;

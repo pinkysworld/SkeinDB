@@ -33,8 +33,12 @@ impl TableStorageMode {
     }
 
     pub(crate) fn from_env() -> Self {
+        // Default to the database segment (`.rseg`) file — the standard, single-format
+        // row store. `SKEINDB_STORAGE_MODE=hybrid` (Dual) opts back into also writing the
+        // legacy JSON copy. Reads still fall back to JSON, so existing JSON databases load
+        // unchanged. This matches the `serve` CLI default and the documented behavior.
         let raw = std::env::var(STORAGE_MODE_ENV).unwrap_or_default();
-        Self::parse(&raw).unwrap_or(Self::Dual)
+        Self::parse(&raw).unwrap_or(Self::Segment)
     }
 
     /// Returns true for modes that use the .rseg (segment) row files as primary/dual path.

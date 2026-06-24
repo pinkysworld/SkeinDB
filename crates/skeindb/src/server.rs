@@ -43737,6 +43737,11 @@ mod tests {
         let now_ms = now_unix_ms_u64();
         {
             let mut counters = state.counters.lock().unwrap();
+            // Drop the real insert timings logged above so the query-latency alert is
+            // driven solely by the controlled samples below; otherwise a slow insert
+            // (the WAL fsyncs each commit, which is slow under parallel test load) would
+            // raise slow_count and escalate query_tail_latency from warning to critical.
+            counters.query_log.clear();
             counters.query_log.extend([
                 QuerySample {
                     ts_ms: now_ms,
@@ -43925,6 +43930,12 @@ mod tests {
             assert!(insert.ok);
         }
 
+        // This test asserts that only the CDC critical alert matches a route. Clear the
+        // real insert timings first so no incidental `query_tail_latency` alert fires —
+        // the WAL fsyncs each commit, which can be slow enough under parallel test load to
+        // cross the warning threshold and route to the telemetry route.
+        state.counters.lock().unwrap().query_log.clear();
+
         let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
         assert!(stats.ok);
         let alerts = stats
@@ -44073,6 +44084,11 @@ mod tests {
             .await;
             assert!(insert.ok);
         }
+
+        // Clear the real insert timings so only the intended CDC alert is delivered; the
+        // WAL fsyncs each commit, which under parallel test load can be slow enough to
+        // raise an incidental `query_tail_latency` alert and an extra delivery.
+        state.counters.lock().unwrap().query_log.clear();
 
         let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
         assert!(first.ok);
@@ -44283,6 +44299,11 @@ mod tests {
             .await;
             assert!(insert.ok);
         }
+
+        // Clear the real insert timings so only the intended CDC alert is delivered; the
+        // WAL fsyncs each commit, which under parallel test load can be slow enough to
+        // raise an incidental `query_tail_latency` alert and an extra delivery.
+        state.counters.lock().unwrap().query_log.clear();
 
         let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
         assert!(first.ok);

@@ -42,10 +42,24 @@ python -m pip install markdown Pygments
 python scripts/build_docs_site.py
 ```
 
+## Working style
+
+Favor depth over motion:
+
+- **Drive one foundational outcome to done** rather than many trivial slices. "Small
+  PR" means well-scoped, not artificially tiny — a coherent change that moves a real
+  capability beats several sub-200-line slices that mostly touch docs.
+- **Never add code, tests, or helpers solely to cite as evidence of progress.** If a
+  primitive is not wired into a live path, it is not done — don't claim it.
+- **Finish the primary write/read paths** (storage durability, crash recovery,
+  streaming reads) before adding breadth that sits on an unfinished foundation.
+
 ## Documentation honesty
 
 `docs/TRUE_STATUS_MATRIX.md` tracks what is actually hardened versus prototype.
-Only claim what is implemented and verified — do not overstate status.
+Only claim what is implemented and verified — do not overstate status. The matrix is
+a **periodic truth snapshot, not a per-commit changelog** — update it when reality
+changes, and keep the running history in git and `CHANGELOG.md`.
 
 ## Commit and PR conventions
 
