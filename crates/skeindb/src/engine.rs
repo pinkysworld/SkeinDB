@@ -396,6 +396,11 @@ pub struct Engine {
     /// transparently reloaded once the matching key is registered.
     encrypted_locked_tables: HashSet<TableKey>,
 
+    /// Tables whose primary on-disk file is present but unreadable (corrupt/truncated).
+    /// Loaded empty and blocked from being persisted so the corrupt bytes are preserved
+    /// for recovery rather than silently overwritten with an empty table.
+    corrupt_tables: HashSet<TableKey>,
+
     /// Global write-ahead log writer for row-level redo (crash recovery of table data),
     /// opened lazily on the first mutation and truncated at each checkpoint. See
     /// `engine/wal.rs`.
@@ -2020,6 +2025,7 @@ impl Engine {
             encryption_audit: Vec::new(),
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
+            corrupt_tables: HashSet::new(),
             wal: None,
             wal_next_txn: 0,
         };
@@ -11002,9 +11008,14 @@ impl Engine {
                 Err(_) => {}
             }
         }
-        match load_json::<Vec<RowEntry>>(path) {
-            Some(rows) => LoadedTableRows::Rows(rows),
-            None => LoadedTableRows::Missing,
+        if let Some(rows) = load_json::<Vec<RowEntry>>(path) {
+            return LoadedTableRows::Rows(rows);
+        }
+        // Nothing parsed. A present-but-unparseable file is corrupt, not missing.
+        if path.exists() {
+            LoadedTableRows::Corrupt
+        } else {
+            LoadedTableRows::Missing
         }
     }
 
@@ -11016,21 +11027,28 @@ impl Engine {
         let Ok(bytes) = fs::read(path) else {
             return LoadedTableRows::Missing;
         };
+        // The file exists; from here a decode failure means it is corrupt, not missing.
         let Ok(disk) = decode_table_rows_segment(&bytes) else {
-            return LoadedTableRows::Missing;
+            return LoadedTableRows::Corrupt;
         };
         match decode_table_rows_disk(disk, Some(codec)) {
             Ok(rows) => LoadedTableRows::Rows(rows),
             Err(err) if is_encryption_locked_error(&err) => LoadedTableRows::Locked,
-            Err(_) => LoadedTableRows::Missing,
+            Err(_) => LoadedTableRows::Corrupt,
         }
     }
 
     /// Load a table's rows, decrypting encrypted-at-rest cells when the database key is
-    /// registered. Returns `(rows, locked)` where `locked` is true if encrypted cells were
-    /// present but could not be decrypted (the table is then loaded empty and blocked from
-    /// being persisted until the key is registered).
-    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> (Vec<RowEntry>, bool) {
+    /// registered. Returns `(rows, locked, corrupt)`. `locked` is true if encrypted cells
+    /// were present but could not be decrypted; `corrupt` is true if the primary file is
+    /// present but unreadable and no usable fallback exists. In both cases the table is
+    /// loaded empty and blocked from being persisted (so the on-disk bytes are preserved
+    /// until the key is registered / the corruption is resolved).
+    fn load_table_rows_best_effort_for_mode(
+        &self,
+        db: &str,
+        table: &str,
+    ) -> (Vec<RowEntry>, bool, bool) {
         let json_path = self.table_path(db, table);
         let segment_path = self.table_segment_path(db, table);
         let codec = self.row_encryption_codec(db, table);
@@ -11041,13 +11059,18 @@ impl Engine {
         } else {
             (from_json(), from_segment())
         };
+        // Only the primary being corrupt (with no usable fallback) marks the table corrupt.
+        let primary_corrupt = matches!(first, LoadedTableRows::Corrupt);
         match first {
-            LoadedTableRows::Rows(rows) => (rows, false),
-            LoadedTableRows::Locked => (Vec::new(), true),
-            LoadedTableRows::Missing => match second {
-                LoadedTableRows::Rows(rows) => (rows, false),
-                LoadedTableRows::Locked => (Vec::new(), true),
-                LoadedTableRows::Missing => (Vec::new(), false),
+            LoadedTableRows::Rows(rows) => (rows, false, false),
+            LoadedTableRows::Locked => (Vec::new(), true, false),
+            // Primary missing or corrupt: try the secondary file before giving up.
+            LoadedTableRows::Corrupt | LoadedTableRows::Missing => match second {
+                LoadedTableRows::Rows(rows) => (rows, false, false),
+                LoadedTableRows::Locked => (Vec::new(), true, false),
+                LoadedTableRows::Corrupt | LoadedTableRows::Missing => {
+                    (Vec::new(), false, primary_corrupt)
+                }
             },
         }
     }
@@ -11165,6 +11188,12 @@ impl Engine {
                  register the database key before writing"
             );
         }
+        if self.corrupt_tables.contains(&key) {
+            anyhow::bail!(
+                "storage_corrupt: table '{db}.{table}' has an unreadable on-disk file; \
+                 refusing to overwrite it (back up and remove the corrupt file to recover)"
+            );
+        }
         let Some(tdata) = self.tables.get(&key) else {
             return Ok(());
         };
@@ -11248,7 +11277,7 @@ impl Engine {
                 db: db.clone(),
                 table: table.clone(),
             };
-            if self.encrypted_locked_tables.contains(&key) {
+            if self.encrypted_locked_tables.contains(&key) || self.corrupt_tables.contains(&key) {
                 continue;
             }
             self.persist_table(&db, &table)?;
@@ -11300,7 +11329,7 @@ impl Engine {
             })
             .collect();
         for (db, table) in targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&db, &table);
+            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             let key = TableKey {
                 db: db.clone(),
                 table: table.clone(),
@@ -11309,6 +11338,11 @@ impl Engine {
                 self.encrypted_locked_tables.insert(key.clone());
             } else {
                 self.encrypted_locked_tables.remove(&key);
+            }
+            if corrupt {
+                self.corrupt_tables.insert(key.clone());
+            } else {
+                self.corrupt_tables.remove(&key);
             }
             let secondary_indexes =
                 self.load_table_secondary_indexes_best_effort(&db, &table, rows.len());
@@ -11346,8 +11380,9 @@ impl Engine {
             .cloned()
             .collect();
         for key in locked_targets {
-            let (rows, locked) = self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
-            if locked {
+            let (rows, locked, corrupt) =
+                self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
+            if locked || corrupt {
                 continue;
             }
             self.encrypted_locked_tables.remove(&key);
@@ -13070,6 +13105,11 @@ impl Engine {
         if self.encrypted_locked_tables.contains(&key) {
             return Err(format!(
                 "encryption key required: table '{db}.{table}' is locked at rest; register the database key first"
+            ));
+        }
+        if self.corrupt_tables.contains(&key) {
+            return Err(format!(
+                "storage_corrupt: table '{db}.{table}' has an unreadable on-disk file; refusing to overwrite it"
             ));
         }
         let Some(tdata) = self.tables.get(&key) else {
@@ -26223,6 +26263,9 @@ enum LoadedTableRows {
     Rows(Vec<RowEntry>),
     /// Encrypted-at-rest cells are present but the database key is not registered.
     Locked,
+    /// A file is present on disk but could not be decoded (truncated/corrupt). The table
+    /// must NOT be silently loaded empty and then overwritten, or the on-disk data is lost.
+    Corrupt,
     /// No usable file was found / could be parsed.
     Missing,
 }
@@ -31742,6 +31785,61 @@ mod tests {
         assert!(
             !dir.join("wal-000001.log").exists(),
             "WAL must be truncated after a successful recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_segment_file_loads_empty_and_refuses_overwrite() -> anyhow::Result<()> {
+        let dir = temp_dir("corrupt_segment_guard");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let seg_path;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            seg_path = engine.table_segment_path("app", "items");
+            assert!(seg_path.exists(), "segment file should be written");
+        }
+        // Corrupt the on-disk segment, and drop the WAL (as a prior checkpoint would) so
+        // there is no redo log to recover from — the corruption stands alone.
+        let corrupt = b"this is not a valid .rseg file".to_vec();
+        fs::write(&seg_path, &corrupt)?;
+        fs::remove_file(dir.join("wal-000001.log")).ok();
+
+        let mut engine = Engine::open(&dir)?;
+        {
+            let (_, tdata) = engine.get_table(&table)?;
+            assert_eq!(
+                tdata.rows.len(),
+                0,
+                "a corrupt table must load empty, not error"
+            );
+        }
+        // Writes must be refused, so the corrupt file is never overwritten with an empty
+        // table (which would turn recoverable corruption into permanent data loss).
+        let insert = engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None);
+        assert!(insert.is_err(), "writes to a corrupt table must be refused");
+        assert_eq!(
+            fs::read(&seg_path)?,
+            corrupt,
+            "the corrupt segment file must be preserved intact"
         );
         Ok(())
     }

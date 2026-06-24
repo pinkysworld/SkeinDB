@@ -100,12 +100,20 @@ impl Engine {
                 }
             }
         }
+        let mut all_persisted = true;
         for (db, table) in &touched {
             // Rebuild pk/secondary indexes from the recovered rows, then re-persist.
             let _ = self.rebuild_indexes_after_history_gc(db, table);
-            let _ = self.persist_table(db, table);
+            // A persist can be refused (e.g. the table's on-disk file is corrupt or
+            // encryption-locked). Don't truncate the WAL in that case, or the recovered
+            // rows would be lost on the next open.
+            if self.persist_table(db, table).is_err() {
+                all_persisted = false;
+            }
         }
-        self.wal_truncate();
+        if all_persisted {
+            self.wal_truncate();
+        }
     }
 
     /// Apply a single redo record idempotently. Returns true if the in-memory table was
