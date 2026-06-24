@@ -3742,7 +3742,8 @@ impl Engine {
                 secondary_index_remove_row(tdata, idx, &current_row)?;
                 tdata.rows[idx].row = new_row;
                 secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
-                if current_pk_key != new_pk_key {
+                let pk_changed = current_pk_key != new_pk_key;
+                if pk_changed {
                     tdata.pk_index.remove(&current_pk_key);
                     tdata.pk_index.insert(new_pk_key, idx);
                 }
@@ -3759,6 +3760,23 @@ impl Engine {
                         pk_vals,
                         &tdata.rows[idx],
                     ));
+                }
+                // If the update moved the primary key, also log a tombstone for the OLD
+                // key so WAL replay removes the pre-update row instead of leaving a
+                // phantom live row under the old key on recovery.
+                if pk_changed {
+                    if let Ok(old_pk) = extract_pk(schema, &current_row) {
+                        wal_records.push(WalRowRecord {
+                            db: table.db.clone(),
+                            table: table.table.clone(),
+                            pk: old_pk,
+                            row: current_row.clone(),
+                            version: tdata.rows[idx].version,
+                            schema_version: tdata.rows[idx].schema_version,
+                            deleted: true,
+                            commit_ts_ms: tdata.rows[idx].commit_ts_ms,
+                        });
+                    }
                 }
                 change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
                 collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
@@ -31840,6 +31858,74 @@ mod tests {
             fs::read(&seg_path)?,
             corrupt,
             "the corrupt segment file must be preserved intact"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wal_recovery_after_primary_key_update_leaves_no_phantom_row() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_pk_move_recovery");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "t".to_string(),
+            r#as: None,
+        };
+        let seg_path;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "t",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            seg_path = engine.table_segment_path("app", "t");
+            // Checkpoint so the snapshot holds id=1 and the WAL is clean.
+            engine.checkpoint_for_shutdown()?;
+        }
+        let pre_update_snapshot = fs::read(&seg_path)?;
+        {
+            let mut engine = Engine::open(&dir)?;
+            // Move the primary key 1 -> 2 (logs a new-key row + an old-key tombstone).
+            let set = row(&[("id", Lit::U64 { v: 2 })]);
+            let predicate = eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            );
+            engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        }
+        // Simulate the update's snapshot write being lost: restore the pre-update segment,
+        // leaving the WAL (with the pk-move records) intact.
+        fs::write(&seg_path, &pre_update_snapshot)?;
+
+        let engine = Engine::open(&dir)?;
+        let (_, tdata) = engine.get_table(&table)?;
+        let live: Vec<u64> = tdata
+            .rows
+            .iter()
+            .filter(|r| !r.deleted)
+            .filter_map(|r| match r.row.get("id") {
+                Some(Lit::U64 { v }) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            vec![2],
+            "after recovery only the new primary key should be live (no phantom old-key row)"
         );
         Ok(())
     }
