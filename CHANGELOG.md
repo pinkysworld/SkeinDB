@@ -1,8 +1,18 @@
 # Changelog
 
-## Unreleased
+## v0.3.21 - 2026-06-24
 
+Storage durability hardening, segment-default persistence, dependency modernization, and PostgreSQL admin/framework compatibility.
+
+- **Atomic, durable persistence.** All on-disk writes (catalog, `.rseg` table data, column-snapshot segments, and metadata JSON) now go through a temp-file → `fsync` → atomic-rename → parent-dir-`fsync` path. Previously files were overwritten in place with no `fsync`, so a crash mid-write could corrupt the whole file. Stale `*.skein-tmp.*` files left by a crash are swept on open (symlink- and depth-safe).
+- **Row-level redo WAL with crash recovery.** Every committed `insert`/`update`/`delete` appends the affected rows' final images to a global WAL (`data/wal-000001.log`) and `fsync`s before the snapshot write; committed records replay idempotently on open to recover any mutation lost between the WAL commit and the snapshot write, then the WAL is truncated. Primary-key-changing updates log an old-key tombstone so replay leaves no phantom row. See `docs/ON_DISK_FORMAT.md` §11.11.
+- **Segment is now the default row store.** `serve` / `Engine::open` default to segment-backed `.rseg` (was hybrid JSON+segment). Reads still fall back to JSON so existing databases load unchanged; `SKEINDB_STORAGE_MODE=hybrid` opts back in.
+- **Corruption fail-safe.** A present-but-undecodable table file is detected as corrupt (distinct from missing): the table loads empty and is blocked from being persisted, so a corrupt file is never silently overwritten with an empty table.
+- **PostgreSQL admin/framework compatibility.** Adds `pg_catalog` column-type mappings plus `pg_stat_user_tables` / `pg_stat_user_indexes` / `pg_locks` virtual-table handling so pgAdmin/DBeaver introspection and psycopg/SQLAlchemy reflection round-trip over the PG wire, covered by new `tests/compat/pg_admin_*.sql` and `pg_framework_*.sql` fixtures.
+- **Dependency modernization.** Upgrades `axum` 0.7→0.8 (route syntax), the RustCrypto digest family (`sha1`/`sha2`/`md-5`) →0.11, `getrandom` →0.3, and `hkdf` →0.13, with the required call-site updates.
+- **Engine module split.** Extracts the forensic audit-chain helpers (R06) and migration-intent inference (R17) out of the monolithic `engine.rs` into their own modules (~2,370 fewer lines in `engine.rs`); no behavior change.
 - Groups coordinated RustCrypto and HTTP/web-stack dependency bumps in Dependabot and adds a router-construction regression test so `axum` path-syntax breakage is caught by CI before fragmented upgrade PRs land.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and a green `cargo test --workspace` suite (including the new durable-write, WAL crash-recovery, corruption-guard, and PG admin/framework round-trip tests).
 
 ## v0.3.20 - 2026-06-11
 
