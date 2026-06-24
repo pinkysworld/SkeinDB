@@ -9953,12 +9953,15 @@ async fn read_sse_event(response: &mut reqwest::Response) -> anyhow::Result<SseE
 }
 
 fn pg_compat_corpus_statements() -> Vec<String> {
-    let corpus = include_str!(concat!(
+    pg_fixture_statements(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/compat/pg_corpus.sql"
-    ));
+    )))
+}
+
+fn pg_fixture_statements(fixture: &str) -> Vec<String> {
     let mut cleaned = String::new();
-    for line in corpus.lines() {
+    for line in fixture.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("--") {
             continue;
@@ -10035,6 +10038,13 @@ fn pg_compat_corpus_statements() -> Vec<String> {
         statements.push(tail.to_string());
     }
     statements
+}
+
+fn pg_fixture_statements_from_path(relative_path: &str) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let fixture = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read fixture {}: {err}", path.display()));
+    pg_fixture_statements(&fixture)
 }
 
 /// Returns the length (in chars) of a PostgreSQL dollar-quote opening delimiter
@@ -12920,6 +12930,180 @@ async fn pg_simple_query_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result
     );
     assert_eq!(pg_ready_status(&msgs)?, b'I');
 
+    for (sql, expected_cols, expected_oids) in [
+        (
+            "SELECT relid, relname, n_live_tup FROM pg_catalog.pg_stat_all_tables LIMIT 5",
+            vec![
+                "relid".to_string(),
+                "relname".to_string(),
+                "n_live_tup".to_string(),
+            ],
+            vec![26, 25, 23],
+        ),
+        (
+            "SELECT relid, indexrelid, idx_scan FROM pg_catalog.pg_stat_all_indexes LIMIT 5",
+            vec![
+                "relid".to_string(),
+                "indexrelid".to_string(),
+                "idx_scan".to_string(),
+            ],
+            vec![26, 26, 23],
+        ),
+        (
+            "SELECT relid, indexrelname, idx_scan FROM pg_catalog.pg_stat_user_indexes LIMIT 5",
+            vec![
+                "relid".to_string(),
+                "indexrelname".to_string(),
+                "idx_scan".to_string(),
+            ],
+            vec![26, 25, 23],
+        ),
+        (
+            "SELECT locktype, database, relation, mode, granted FROM pg_catalog.pg_locks LIMIT 5",
+            vec![
+                "locktype".to_string(),
+                "database".to_string(),
+                "relation".to_string(),
+                "mode".to_string(),
+                "granted".to_string(),
+            ],
+            vec![25, 26, 26, 25, 16],
+        ),
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(
+            pg_row_description_names(&msgs)?,
+            expected_cols,
+            "query: {sql}"
+        );
+        assert_eq!(
+            pg_row_description_type_oids(&msgs)?,
+            expected_oids,
+            "query: {sql}"
+        );
+        assert_eq!(
+            pg_all_data_row_cells(&msgs)?,
+            Vec::<Vec<Option<String>>>::new(),
+            "query: {sql}"
+        );
+        assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 0", "query: {sql}");
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_admin_fixture_pgadmin_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_admin_fixture_pgadmin")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE TABLE admin_items (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_admin_items_name ON admin_items (name)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_admin_pgadmin.sql") {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "pgAdmin fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_admin_fixture_dbeaver_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_admin_fixture_dbeaver")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE TABLE admin_browse (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_admin_browse_name ON admin_browse (name)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_admin_dbeaver.sql") {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "DBeaver fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_framework_fixture_psycopg_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_framework_psycopg")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE TABLE app_users (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_app_users_name ON app_users (name)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in pg_fixture_statements_from_path("../../tests/compat/pg_framework_psycopg.sql") {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "psycopg fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_framework_fixture_sqlalchemy_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_framework_sqlalchemy")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE TABLE app_orders (id BIGINT NOT NULL, total BIGINT NOT NULL, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_app_orders_total ON app_orders (total)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    for statement in
+        pg_fixture_statements_from_path("../../tests/compat/pg_framework_sqlalchemy.sql")
+    {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let tags = pg_message_tags(&msgs);
+        assert!(
+            !tags.contains(&b'E'),
+            "SQLAlchemy fixture statement produced an ErrorResponse: `{statement}` -> {:?}",
+            pg_error_response(&msgs).ok()
+        );
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "statement: {statement}");
+    }
+
     Ok(())
 }
 
@@ -13121,6 +13305,55 @@ async fn pg_extended_query_describe_portal_then_execute_emits_single_row_descrip
     assert_eq!(pg_row_description_names(&msgs)?, vec!["name".to_string()]);
     assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
     assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_admin_catalog_describe_execute_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_admin_catalog")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "admin_catalog_stmt",
+                    "SELECT relid, relname, n_live_tup FROM pg_catalog.pg_stat_all_tables LIMIT 5",
+                    &[],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("admin_catalog_portal", "admin_catalog_stmt", &[]),
+            ),
+            (b'D', pg_describe_payload(b'P', "admin_catalog_portal")),
+            (b'E', pg_execute_payload("admin_catalog_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'T').count(),
+        1,
+        "expected exactly one RowDescription for admin catalog portal: {tags:?}"
+    );
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "relid".to_string(),
+            "relname".to_string(),
+            "n_live_tup".to_string(),
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![26, 25, 23]);
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 0");
     assert_eq!(pg_ready_status(&msgs)?, b'I');
 
     Ok(())
