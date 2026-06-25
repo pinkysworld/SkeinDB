@@ -297,6 +297,16 @@ enum TableResidency {
     },
 }
 
+impl TableData {
+    /// True when the table's rows are fully in memory (the default). False for a
+    /// segment-backed `Streaming` table, whose `rows` is empty and is read on demand via
+    /// the segment. Resident-only fast paths (e.g. slice/cursor batch scans, in-memory index
+    /// access) must gate on this and let streaming tables fall through to the read seam.
+    fn is_resident(&self) -> bool {
+        matches!(self.residency, TableResidency::Resident)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TableKey {
     db: String,
@@ -14793,7 +14803,14 @@ fn try_execute_select_base_table(
     }
 
     let candidate_rows = index_prefilter_candidates(engine, base, predicate, args);
-    if !distinct && query.limit.is_none() && order.is_empty() && candidate_rows.is_none() {
+    // The batch fast path scans `tdata.rows` by slice/cursor, which only exists for a
+    // resident table; a streaming table falls through to the seam-based row scan below.
+    if !distinct
+        && query.limit.is_none()
+        && order.is_empty()
+        && candidate_rows.is_none()
+        && tdata.is_resident()
+    {
         let (rows, rows_scanned) = execute_select_batches(
             schema,
             tdata,
@@ -14858,6 +14875,9 @@ fn try_execute_select_base_table(
     };
 
     if let Some(indices) = candidate_rows {
+        // Index-driven access only exists for a resident table (a streaming table holds no
+        // in-memory secondary index, so `candidate_rows` is None for it and we take the
+        // full-scan branch below).
         for idx in indices.iter() {
             let Some(entry) = tdata.rows.get(*idx) else {
                 continue;
@@ -14865,9 +14885,7 @@ fn try_execute_select_base_table(
             push_entry(entry)?;
         }
     } else {
-        for entry in tdata.rows.iter() {
-            push_entry(entry)?;
-        }
+        engine.for_each_table_row(&base.db, &base.table, tdata, |entry| push_entry(entry))?;
     }
 
     if !order.is_empty() {
@@ -15545,9 +15563,7 @@ fn execute_select_with_keys(
             push_entry(entry)?;
         }
     } else {
-        for entry in tdata.rows.iter() {
-            push_entry(entry)?;
-        }
+        engine.for_each_table_row(&base.db, &base.table, tdata, |entry| push_entry(entry))?;
     }
 
     // ORDER BY
@@ -32529,6 +32545,88 @@ mod tests {
 
         // A missing pk still errors not_found through the streaming path.
         assert!(engine.data_get(&base, vec![Lit::U64 { v: 9999 }]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn select_on_streaming_table_matches_resident_results() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_select");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+
+        // A single-table SELECT with no predicate/order takes the executor's full-scan
+        // branch — the one migrated to for_each_table_row in Phase C.
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "payload".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        // want_etag=false routes through execute_select; want_etag=true through
+        // execute_select_with_keys (the patchable path) — exercise both.
+        let run = |engine: &Engine, want_etag: bool| -> anyhow::Result<Option<serde_json::Value>> {
+            Ok(engine
+                .query_select(
+                    &query,
+                    &[],
+                    ResultFormat::RowsJson,
+                    want_etag,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                )?
+                .data)
+        };
+
+        let resident_plain = run(&engine, false)?;
+        let resident_keys = run(&engine, true)?;
+        assert!(resident_plain.is_some());
+
+        // Convert to Streaming and re-run: the executor must full-scan the segment and
+        // return identical rows in identical order through both entry points.
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+        // Drop the cached result so the streaming run actually re-executes (the etag is
+        // data-derived and unchanged, so it would otherwise be a cache hit).
+        engine.cached_select.lock().unwrap().clear();
+
+        assert_eq!(
+            run(&engine, false)?,
+            resident_plain,
+            "execute_select over a Streaming table must match the Resident result"
+        );
+        assert_eq!(
+            run(&engine, true)?,
+            resident_keys,
+            "execute_select_with_keys over a Streaming table must match the Resident result"
+        );
         Ok(())
     }
 
