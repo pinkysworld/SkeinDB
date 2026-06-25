@@ -14,6 +14,7 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
@@ -290,6 +291,9 @@ enum TableResidency {
     Resident,
     Streaming {
         segment: PathBuf,
+        /// Offsets + value dictionary for the segment (never the rows). Boxed so the common
+        /// `Resident` case keeps `TableData.residency` pointer-small. Built at load.
+        index: Box<StreamingIndex>,
     },
 }
 
@@ -3525,11 +3529,9 @@ impl Engine {
         let (_schema, tdata) = self.get_table(table)?;
 
         let key = pk_key(&pk);
-        let Some(&idx) = tdata.pk_index.get(&key) else {
+        let Some(entry) = self.table_row_by_pk(&table.db, &table.table, tdata, &key)? else {
             anyhow::bail!("not_found");
         };
-
-        let entry = &tdata.rows[idx];
         if entry.deleted {
             anyhow::bail!("not_found");
         }
@@ -10207,10 +10209,9 @@ impl Engine {
     fn get_row_by_pk(&self, table: &BaseTableRef, pk: &[Lit]) -> anyhow::Result<RowObject> {
         let (_schema, tdata) = self.get_table(table)?;
         let key = pk_key(pk);
-        let Some(&idx) = tdata.pk_index.get(&key) else {
+        let Some(entry) = self.table_row_by_pk(&table.db, &table.table, tdata, &key)? else {
             anyhow::bail!("not_found");
         };
-        let entry = &tdata.rows[idx];
         if entry.deleted {
             anyhow::bail!("not_found");
         }
@@ -10885,9 +10886,35 @@ impl Engine {
                 }
                 Ok(())
             }
-            TableResidency::Streaming { segment } => {
+            TableResidency::Streaming { segment, .. } => {
                 let codec = self.row_encryption_codec(db, table);
                 stream_segment_rows_visit(segment, Some(&codec), |entry| visit(&entry))
+            }
+        }
+    }
+
+    /// Residency-transparent point lookup by primary key. Returns the row for `pk_key` as a
+    /// `Cow` — borrowed from the in-memory rows for a `Resident` table (no clone on the hot
+    /// path), or decoded from the segment via the streaming index for a `Streaming` table.
+    /// `None` if the key is absent. The caller still checks `deleted`, as with direct access.
+    fn table_row_by_pk<'a>(
+        &self,
+        db: &str,
+        table: &str,
+        tdata: &'a TableData,
+        pk_key: &str,
+    ) -> anyhow::Result<Option<Cow<'a, RowEntry>>> {
+        match &tdata.residency {
+            TableResidency::Resident => Ok(tdata
+                .pk_index
+                .get(pk_key)
+                .and_then(|&idx| tdata.rows.get(idx))
+                .map(Cow::Borrowed)),
+            TableResidency::Streaming { segment, index } => {
+                let codec = self.row_encryption_codec(db, table);
+                Ok(index
+                    .get_by_pk(segment, pk_key, Some(&codec))?
+                    .map(Cow::Owned))
             }
         }
     }
@@ -32383,9 +32410,12 @@ mod tests {
         // The read seam over a Streaming table (empty `rows`, segment-backed) returns exactly
         // what the same seam returns over the Resident table — the invariant that lets read
         // sites migrate to the seam without caring about residency.
+        let schema = engine.get_schema("app", "events")?.clone();
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
         let streaming_tdata = TableData {
             residency: TableResidency::Streaming {
                 segment: seg_path.clone(),
+                index: Box::new(index),
             },
             ..Default::default()
         };
@@ -32445,6 +32475,60 @@ mod tests {
         assert!(index
             .get_by_pk(&seg_path, &missing_pk, Some(&codec))?
             .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn data_get_and_get_row_by_pk_work_on_streaming_table() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_point_reads");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+        let base = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+
+        // Baseline point reads while the table is Resident.
+        let resident_get = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        let resident_row2 = engine.get_row_by_pk(&base, &[Lit::U64 { v: 2 }])?;
+
+        // Convert the table to Streaming: drop the in-memory rows + pk_index, attach the
+        // segment-backed index. data_get / get_row_by_pk must now resolve via the index.
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+
+        let streaming_get = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            serde_json::to_vec(&streaming_get.row)?,
+            serde_json::to_vec(&resident_get.row)?,
+            "streaming data_get must match the resident result"
+        );
+        assert_eq!(streaming_get.etag, resident_get.etag);
+        let streaming_row2 = engine.get_row_by_pk(&base, &[Lit::U64 { v: 2 }])?;
+        assert_eq!(
+            serde_json::to_vec(&streaming_row2)?,
+            serde_json::to_vec(&resident_row2)?
+        );
+
+        // A missing pk still errors not_found through the streaming path.
+        assert!(engine.data_get(&base, vec![Lit::U64 { v: 9999 }]).is_err());
         Ok(())
     }
 
