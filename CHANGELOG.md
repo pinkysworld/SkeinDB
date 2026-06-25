@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Deferred snapshot flush (storage Slice 3).** Row mutations (`insert`/`update`/`delete`) no longer rewrite the full table snapshot on every commit. Durability comes from the WAL fsync; the table is marked dirty and its snapshot is flushed in a batch once `WAL_FLUSH_THRESHOLD` mutations accumulate (and at every checkpoint), which removes the O(rows) write amplification per mutation while bounding WAL size and crash-recovery replay time. WAL replay on open now also re-interns recovered cell values into the content-addressed ValueStore so dedup/value-ref stats are correct after recovery. Encryption-locked and corrupt tables still route through `persist_table`, preserving their write-refusal.
+- **Streaming segment load (storage Slice 4, first step).** Segment-backed tables now load by streaming length-prefixed row records off disk one at a time, instead of reading the entire encoded `.rseg` file into a buffer and then decoding it. This removes the full-file buffer (roughly halving peak load memory for large segment tables) and establishes the incremental segment-read primitive. Corruption detection is unchanged (a present-but-unreadable segment is still treated as corrupt, not empty). Streaming the read path end-to-end so a table need not fully materialize at query time is the remaining Slice 4 work.
 - Bumps `wasmtime` 45→46 and `getrandom` 0.3→0.4 (plus the grouped minor/patch dependency updates) on top of v0.3.21.
 
 ## v0.3.21 - 2026-06-24

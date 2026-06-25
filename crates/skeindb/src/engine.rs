@@ -11053,12 +11053,19 @@ impl Engine {
         path: &Path,
         codec: &RowEncryptionCodec<'_>,
     ) -> LoadedTableRows {
-        let Ok(bytes) = fs::read(path) else {
-            return LoadedTableRows::Missing;
-        };
-        // The file exists; from here a decode failure means it is corrupt, not missing.
-        let Ok(disk) = decode_table_rows_segment(&bytes) else {
-            return LoadedTableRows::Corrupt;
+        // Stream the segment off disk record-by-record rather than buffering the whole
+        // encoded file, lowering peak memory on large segment-backed tables.
+        let disk = match read_table_rows_segment_streaming(path) {
+            Ok(disk) => disk,
+            // A missing file is Missing; a present-but-unreadable file is Corrupt (so it
+            // is never silently overwritten with an empty table).
+            Err(_) => {
+                return if path.exists() {
+                    LoadedTableRows::Corrupt
+                } else {
+                    LoadedTableRows::Missing
+                };
+            }
         };
         match decode_table_rows_disk(disk, Some(codec)) {
             Ok(rows) => LoadedTableRows::Rows(rows),
@@ -26631,6 +26638,9 @@ fn encode_table_rows_segment(disk: &TableRowsDisk) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+// Retained as the in-memory decoder (used by tests and as the reference for the
+// streaming reader); the load path now streams via `read_table_rows_segment_streaming`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
     if bytes.len() < 24 {
         anyhow::bail!("segment file too small");
@@ -26664,6 +26674,52 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
         anyhow::bail!("segment file contains trailing bytes");
     }
 
+    Ok(TableRowsDisk {
+        format_version: table_format_version,
+        rows,
+    })
+}
+
+/// Stream a row segment off disk record-by-record instead of reading the whole encoded
+/// file into a buffer first. Produces the same `TableRowsDisk` as
+/// `decode_table_rows_segment` (and rejects the same corruption: bad magic/version,
+/// truncated payloads, trailing bytes) but never holds the full file in memory — only one
+/// row payload at a time — which lowers peak memory when loading large segment tables.
+/// (The materialized row Vec is still built; streaming the read path end-to-end so a
+/// table need not fully materialize is the remaining Slice 4 work.)
+fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDisk> {
+    use std::io::Read;
+    let mut reader = std::io::BufReader::new(fs::File::open(path)?);
+    let mut header = [0u8; 24];
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| anyhow::anyhow!("segment file too small"))?;
+    if header[0..8] != TABLE_ROWS_SEGMENT_MAGIC {
+        anyhow::bail!("segment magic mismatch");
+    }
+    let segment_version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    if segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+        anyhow::bail!("unsupported segment format version: {segment_version}");
+    }
+    let table_format_version = u32::from_le_bytes(header[12..16].try_into().unwrap());
+    let row_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    let mut rows = Vec::new();
+    for _ in 0..row_count {
+        let mut len_buf = [0u8; 4];
+        reader
+            .read_exact(&mut len_buf)
+            .map_err(|_| anyhow::anyhow!("segment payload truncated"))?;
+        let payload_len = u32::from_le_bytes(len_buf) as usize;
+        let mut payload = vec![0u8; payload_len];
+        reader
+            .read_exact(&mut payload)
+            .map_err(|_| anyhow::anyhow!("segment payload truncated"))?;
+        rows.push(serde_json::from_slice::<RowEntryDisk>(&payload)?);
+    }
+    let mut trailing = [0u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        anyhow::bail!("segment file contains trailing bytes");
+    }
     Ok(TableRowsDisk {
         format_version: table_format_version,
         rows,
@@ -32019,6 +32075,32 @@ mod tests {
                 "threshold flush should truncate the WAL"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_segment_reader_matches_bytes_decoder_and_rejects_corruption() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("streaming_segment_reader");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "stream-a", "stream-b")?;
+        engine.flush_dirty_tables()?; // write the segment to disk
+        let seg_path = engine.table_segment_path("app", "events");
+
+        // The streaming reader yields the same TableRowsDisk as the in-memory bytes decoder.
+        let from_bytes = decode_table_rows_segment(&fs::read(&seg_path)?)?;
+        let streamed = read_table_rows_segment_streaming(&seg_path)?;
+        assert_eq!(streamed.format_version, from_bytes.format_version);
+        assert_eq!(streamed.rows.len(), 2);
+        assert_eq!(
+            serde_json::to_vec(&streamed.rows)?,
+            serde_json::to_vec(&from_bytes.rows)?,
+            "streaming reader must decode identical rows in identical order"
+        );
+
+        // It rejects a corrupt segment (so the loader treats it as Corrupt, not empty).
+        fs::write(&seg_path, b"not a valid segment file")?;
+        assert!(read_table_rows_segment_streaming(&seg_path).is_err());
         Ok(())
     }
 
