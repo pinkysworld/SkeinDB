@@ -8053,6 +8053,12 @@ impl Engine {
             let Some(tdata) = self.tables.get_mut(&key) else {
                 continue;
             };
+            // History GC mutates in-memory rows; a streaming table holds none (its history
+            // lives in the on-disk segment). Skip it rather than materialize the whole table
+            // for maintenance — and never let the empty in-memory image reach a persist.
+            if !tdata.is_resident() {
+                continue;
+            }
             total_scanned += tdata.rows.len() as u64;
             let before = tdata.rows.len();
             tdata.rows.retain(|entry| {
@@ -10996,16 +11002,22 @@ impl Engine {
         &mut self,
         table: &BaseTableRef,
     ) -> anyhow::Result<(&mut TableSchema, &mut TableData)> {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        // A streaming table must be brought fully into memory before it can be mutated:
+        // the write paths address rows and the pk index by position, which a segment-backed
+        // table does not hold. This is the single choke point where every DML mutation
+        // acquires its &mut, so materializing here covers all writes.
+        self.materialize_streaming_table(&key)?;
+
         // Borrow dance: fetch schema and tabledata separately.
         let schema_ptr: *mut TableSchema = {
             let schema = self.get_schema_mut(&table.db, &table.table)? as *mut TableSchema;
             schema
         };
 
-        let key = TableKey {
-            db: table.db.clone(),
-            table: table.table.clone(),
-        };
         let tdata_ptr: *mut TableData = self
             .tables
             .get_mut(&key)
@@ -11014,6 +11026,52 @@ impl Engine {
 
         // SAFETY: schema and tdata live in different hashmaps; pointers are stable for this scope.
         unsafe { Ok((&mut *schema_ptr, &mut *tdata_ptr)) }
+    }
+
+    /// Bring a `Streaming` table fully into memory and flip it back to `Resident`: stream
+    /// every row off the segment, rebuild the pk index and mysql-compat secondary indexes
+    /// (mirroring the load path), and clear the residency. A no-op for a table that is
+    /// already resident or absent. Used before any write, since a segment-backed table
+    /// cannot be mutated in place.
+    ///
+    /// Note: this materializes the whole table, so writing a table larger than RAM will
+    /// exceed memory — an accepted v1 limitation (streaming targets read-mostly large
+    /// tables); a true streaming append/merge is a later enhancement.
+    fn materialize_streaming_table(&mut self, key: &TableKey) -> anyhow::Result<()> {
+        let segment = match self.tables.get(key) {
+            Some(tdata) => match &tdata.residency {
+                TableResidency::Streaming { segment, .. } => segment.clone(),
+                TableResidency::Resident => return Ok(()),
+            },
+            None => return Ok(()),
+        };
+
+        let codec = self.row_encryption_codec(&key.db, &key.table);
+        let mut rows: Vec<RowEntry> = Vec::new();
+        stream_segment_rows_visit(&segment, Some(&codec), |entry| {
+            rows.push(entry);
+            Ok(())
+        })?;
+        drop(codec);
+
+        let schema = self.get_schema(&key.db, &key.table).ok().cloned();
+        if let Some(tdata) = self.tables.get_mut(key) {
+            tdata.rows = rows;
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Resident;
+            if let Some(schema) = schema.as_ref() {
+                for (idx, entry) in tdata.rows.iter().enumerate() {
+                    if entry.deleted {
+                        continue;
+                    }
+                    if let Ok(pk) = extract_pk(schema, &entry.row) {
+                        tdata.pk_index.insert(pk_key(&pk), idx);
+                    }
+                }
+                ensure_mysql_compat_secondary_indexes(schema, tdata);
+            }
+        }
+        Ok(())
     }
 
     fn persist_catalog(&self) -> anyhow::Result<()> {
@@ -11318,6 +11376,12 @@ impl Engine {
         let Some(tdata) = self.tables.get(&key) else {
             return Ok(());
         };
+        // A streaming table's authoritative rows live in its on-disk segment; it holds no
+        // in-memory rows (any write materializes it to resident first). Persisting it would
+        // encode the empty in-memory image over the segment and lose the data — skip it.
+        if !tdata.is_resident() {
+            return Ok(());
+        }
         let path = self.table_path(db, table);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -32626,6 +32690,74 @@ mod tests {
             run(&engine, true)?,
             resident_keys,
             "execute_select_with_keys over a Streaming table must match the Resident result"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_to_streaming_table_materializes_and_succeeds() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_write");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+        let base = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+
+        // Convert to Streaming.
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+        assert!(!engine.tables.get(&key).unwrap().is_resident());
+
+        // Insert a new row: get_table_mut must materialize the table first, then apply it.
+        engine.data_insert(
+            &base,
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "gamma".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        // The table is now resident, holds all three rows, and every row reads back — the
+        // pre-existing streamed rows survived materialization and the new row is present.
+        assert!(engine.tables.get(&key).unwrap().is_resident());
+        assert_eq!(engine.tables.get(&key).unwrap().rows.len(), 3);
+        let got1 = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            got1.row.get("payload"),
+            Some(&Lit::Str {
+                v: "alpha".to_string()
+            })
+        );
+        let got3 = engine.data_get(&base, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            got3.row.get("payload"),
+            Some(&Lit::Str {
+                v: "gamma".to_string()
+            })
         );
         Ok(())
     }
