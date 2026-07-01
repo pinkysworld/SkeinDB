@@ -2107,6 +2107,16 @@ impl Engine {
         let mut seen_ids = HashSet::<ValueId>::new();
 
         for tdata in self.tables.values() {
+            // A streaming table's rows live on disk; report an approximate record count from
+            // its index (cheap, no segment scan) rather than force a full materialization on
+            // every stats poll. The count is an upper bound — it includes tombstones/old
+            // versions, like mvcc_versions — and per-value byte accounting is skipped.
+            if let TableResidency::Streaming { index, .. } = &tdata.residency {
+                let records = index.row_count() as u64;
+                total_rows = total_rows.saturating_add(records);
+                mvcc_versions = mvcc_versions.saturating_add(records);
+                continue;
+            }
             for entry in tdata.rows.iter() {
                 mvcc_versions = mvcc_versions.saturating_add(entry.version.max(1));
                 if entry.deleted {
@@ -11505,6 +11515,57 @@ impl Engine {
         Ok(())
     }
 
+    /// Minimum on-disk segment size (bytes) at which a table loads as `Streaming` instead of
+    /// fully in memory, or `None` to disable streaming (the default). Opt-in via
+    /// `SKEINDB_STREAMING_MIN_BYTES`, and only meaningful when the segment is the primary row
+    /// store — so with streaming off, load behavior is exactly as before.
+    fn streaming_threshold_bytes(&self) -> Option<u64> {
+        if !self.storage_mode.uses_segment() {
+            return None;
+        }
+        std::env::var("SKEINDB_STREAMING_MIN_BYTES")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n > 0)
+    }
+
+    /// Try to load `db.table` as a segment-backed `Streaming` table (rows stay on disk, read
+    /// on demand). Returns `None` — so the caller falls back to a normal in-memory load — when
+    /// the table is ineligible: no readable segment at/above `min_bytes`, no primary key, an
+    /// embedding/vector column (vector search needs the in-memory rows), an active oblivious
+    /// policy, or the index cannot be built (encrypted-at-rest without the key, or corrupt).
+    fn try_load_streaming_table(&self, db: &str, table: &str, min_bytes: u64) -> Option<TableData> {
+        let segment = self.table_segment_path(db, table);
+        if fs::metadata(&segment).ok()?.len() < min_bytes {
+            return None;
+        }
+        let schema = self.get_schema(db, table).ok()?;
+        if schema.primary_key.is_empty() {
+            return None;
+        }
+        if schema.columns.iter().any(|c| c.r#type.kind == "embedding") {
+            return None;
+        }
+        let base = BaseTableRef {
+            db: db.to_string(),
+            table: table.to_string(),
+            r#as: None,
+        };
+        if self.oblivious_policy_for(&base).level != "off" {
+            return None;
+        }
+        let codec = self.row_encryption_codec(db, table);
+        let index = build_streaming_index(&segment, schema, Some(&codec)).ok()?;
+        Some(TableData {
+            residency: TableResidency::Streaming {
+                segment,
+                index: Box::new(index),
+            },
+            ..Default::default()
+        })
+    }
+
     fn load_tables_best_effort(&mut self) {
         let targets: Vec<(String, String)> = self
             .catalog
@@ -11516,12 +11577,24 @@ impl Engine {
                     .map(move |table| (db.clone(), table.clone()))
             })
             .collect();
+        let streaming_min_bytes = self.streaming_threshold_bytes();
         for (db, table) in targets {
-            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             let key = TableKey {
                 db: db.clone(),
                 table: table.clone(),
             };
+            // With streaming enabled, an eligible large segment-backed table loads as a
+            // Streaming table (rows stay on disk, read via the seam) rather than materializing
+            // its whole row set into memory.
+            if let Some(min_bytes) = streaming_min_bytes {
+                if let Some(tdata) = self.try_load_streaming_table(&db, &table, min_bytes) {
+                    self.encrypted_locked_tables.remove(&key);
+                    self.corrupt_tables.remove(&key);
+                    self.tables.insert(key, tdata);
+                    continue;
+                }
+            }
+            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             if locked {
                 self.encrypted_locked_tables.insert(key.clone());
             } else {
@@ -26912,7 +26985,10 @@ fn for_each_segment_record(
             .read_exact(&mut payload)
             .map_err(|_| anyhow::anyhow!("segment payload truncated"))?;
         pos += 4 + payload_len as u64;
-        visit(record_offset, serde_json::from_slice::<RowEntryDisk>(&payload)?)?;
+        visit(
+            record_offset,
+            serde_json::from_slice::<RowEntryDisk>(&payload)?,
+        )?;
     }
     let mut trailing = [0u8; 1];
     if reader.read(&mut trailing)? != 0 {
@@ -26959,10 +27035,7 @@ fn stream_segment_rows_visit(
         collect_value_ref_seeds(&row, &mut seeds);
         Ok(())
     })?;
-    if format_version != 2
-        && format_version != 3
-        && format_version != TABLE_ROWS_FORMAT_VERSION
-    {
+    if format_version != 2 && format_version != 3 && format_version != TABLE_ROWS_FORMAT_VERSION {
         anyhow::bail!("unsupported table format version: {format_version}");
     }
     for_each_segment_record(path, |_offset, row| {
@@ -27020,20 +27093,6 @@ impl StreamingIndex {
         enc: Option<&RowEncryptionCodec<'_>>,
     ) -> anyhow::Result<Option<RowEntry>> {
         match self.pk_offsets.get(pk_key) {
-            Some(&offset) => Ok(Some(self.decode_at(path, offset, enc)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Positional access mirroring `rows.get(idx)`: returns the row at segment position
-    /// `idx`, or `None` if out of range.
-    fn get_at(
-        &self,
-        path: &Path,
-        idx: usize,
-        enc: Option<&RowEncryptionCodec<'_>>,
-    ) -> anyhow::Result<Option<RowEntry>> {
-        match self.row_offsets.get(idx) {
             Some(&offset) => Ok(Some(self.decode_at(path, offset, enc)?)),
             None => Ok(None),
         }
@@ -32513,7 +32572,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_index_point_and_positional_lookups_match_resident_rows() -> anyhow::Result<()> {
+    fn streaming_index_point_lookups_match_resident_rows() -> anyhow::Result<()> {
         let dir = temp_dir("streaming_index");
         let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
         // Shared payload across both rows so the cell is interned: a point lookup that seeks
@@ -32533,15 +32592,6 @@ mod tests {
         let codec = engine.row_encryption_codec("app", "events");
         let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
         assert_eq!(index.row_count(), 2);
-
-        // Positional access matches the resident rows in order; out-of-range is None.
-        for (i, resident) in resident_rows.iter().enumerate() {
-            let got = index
-                .get_at(&seg_path, i, Some(&codec))?
-                .expect("positional row present");
-            assert_eq!(serde_json::to_vec(&got)?, serde_json::to_vec(resident)?);
-        }
-        assert!(index.get_at(&seg_path, 99, Some(&codec))?.is_none());
 
         // Point lookup by pk returns the right row (value-refs resolved from the seed dict).
         for resident in resident_rows.iter() {
@@ -32759,6 +32809,35 @@ mod tests {
                 v: "gamma".to_string()
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn try_load_streaming_table_respects_eligibility() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_eligibility");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+
+        // Eligible: segment above the (tiny) threshold, has a pk, no embedding column, no
+        // oblivious policy -> loads as a Streaming table whose index sees both rows.
+        let tdata = engine
+            .try_load_streaming_table("app", "events", 1)
+            .expect("eligible table should stream");
+        assert!(!tdata.is_resident());
+        match &tdata.residency {
+            TableResidency::Streaming { index, .. } => assert_eq!(index.row_count(), 2),
+            TableResidency::Resident => panic!("expected a streaming table"),
+        }
+
+        // Ineligible: threshold above the segment size -> None (caller does a normal load).
+        assert!(engine
+            .try_load_streaming_table("app", "events", u64::MAX)
+            .is_none());
+        // Ineligible: unknown table -> None.
+        assert!(engine
+            .try_load_streaming_table("app", "missing", 1)
+            .is_none());
         Ok(())
     }
 
