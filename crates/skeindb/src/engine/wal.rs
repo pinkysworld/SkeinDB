@@ -138,6 +138,10 @@ impl Engine {
         if self.encrypted_locked_tables.contains(&key) {
             return false;
         }
+        // A streaming table holds no in-memory rows; bring it resident before replaying a
+        // recovered mutation onto it, so the row lands in memory and the follow-up persist
+        // writes the real (non-empty) image rather than being skipped.
+        let _ = self.materialize_streaming_table(&key);
         let Some(tdata) = self.tables.get_mut(&key) else {
             return false;
         };

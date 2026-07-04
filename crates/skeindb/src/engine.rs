@@ -14,6 +14,7 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
@@ -274,6 +275,36 @@ pub struct TableData {
     pub pk_index: HashMap<String, usize>,
     vector_index: Mutex<HashMap<String, VectorIndex>>,
     secondary_indexes: Mutex<HashMap<String, SecondaryIndex>>,
+    /// Where this table's rows live. `Resident` (the default) keeps the full row set in
+    /// `rows`/`pk_index` as today; `Streaming` keeps `rows` empty and reads rows from the
+    /// on-disk segment on demand. Reads run under `&self`, so a streaming table can only be
+    /// *read* (pure file I/O) while `&self`; any write materializes it back to `Resident`
+    /// under `&mut self` first. See `Engine::for_each_table_row`.
+    residency: TableResidency,
+}
+
+/// Residency of a table's rows: fully in memory, or backed by an on-disk segment that is
+/// streamed at read time so the table need not be materialized to be scanned.
+#[derive(Debug, Default)]
+enum TableResidency {
+    #[default]
+    Resident,
+    Streaming {
+        segment: PathBuf,
+        /// Offsets + value dictionary for the segment (never the rows). Boxed so the common
+        /// `Resident` case keeps `TableData.residency` pointer-small. Built at load.
+        index: Box<StreamingIndex>,
+    },
+}
+
+impl TableData {
+    /// True when the table's rows are fully in memory (the default). False for a
+    /// segment-backed `Streaming` table, whose `rows` is empty and is read on demand via
+    /// the segment. Resident-only fast paths (e.g. slice/cursor batch scans, in-memory index
+    /// access) must gate on this and let streaming tables fall through to the read seam.
+    fn is_resident(&self) -> bool {
+        matches!(self.residency, TableResidency::Resident)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2076,6 +2107,16 @@ impl Engine {
         let mut seen_ids = HashSet::<ValueId>::new();
 
         for tdata in self.tables.values() {
+            // A streaming table's rows live on disk; report an approximate record count from
+            // its index (cheap, no segment scan) rather than force a full materialization on
+            // every stats poll. The count is an upper bound — it includes tombstones/old
+            // versions, like mvcc_versions — and per-value byte accounting is skipped.
+            if let TableResidency::Streaming { index, .. } = &tdata.residency {
+                let records = index.row_count() as u64;
+                total_rows = total_rows.saturating_add(records);
+                mvcc_versions = mvcc_versions.saturating_add(records);
+                continue;
+            }
             for entry in tdata.rows.iter() {
                 mvcc_versions = mvcc_versions.saturating_add(entry.version.max(1));
                 if entry.deleted {
@@ -3508,11 +3549,9 @@ impl Engine {
         let (_schema, tdata) = self.get_table(table)?;
 
         let key = pk_key(&pk);
-        let Some(&idx) = tdata.pk_index.get(&key) else {
+        let Some(entry) = self.table_row_by_pk(&table.db, &table.table, tdata, &key)? else {
             anyhow::bail!("not_found");
         };
-
-        let entry = &tdata.rows[idx];
         if entry.deleted {
             anyhow::bail!("not_found");
         }
@@ -8024,6 +8063,12 @@ impl Engine {
             let Some(tdata) = self.tables.get_mut(&key) else {
                 continue;
             };
+            // History GC mutates in-memory rows; a streaming table holds none (its history
+            // lives in the on-disk segment). Skip it rather than materialize the whole table
+            // for maintenance — and never let the empty in-memory image reach a persist.
+            if !tdata.is_resident() {
+                continue;
+            }
             total_scanned += tdata.rows.len() as u64;
             let before = tdata.rows.len();
             tdata.rows.retain(|entry| {
@@ -10190,10 +10235,9 @@ impl Engine {
     fn get_row_by_pk(&self, table: &BaseTableRef, pk: &[Lit]) -> anyhow::Result<RowObject> {
         let (_schema, tdata) = self.get_table(table)?;
         let key = pk_key(pk);
-        let Some(&idx) = tdata.pk_index.get(&key) else {
+        let Some(entry) = self.table_row_by_pk(&table.db, &table.table, tdata, &key)? else {
             anyhow::bail!("not_found");
         };
-        let entry = &tdata.rows[idx];
         if entry.deleted {
             anyhow::bail!("not_found");
         }
@@ -10844,6 +10888,63 @@ impl Engine {
         Ok((schema, tdata))
     }
 
+    /// The single read seam over a table's rows. Every read path funnels through here so a
+    /// table's residency is transparent to its callers: a `Resident` table iterates its
+    /// in-memory `rows`; a `Streaming` table reads them off its on-disk segment one at a
+    /// time (pure `&self` file I/O, no materialization). `visit` sees each live `RowEntry`
+    /// in storage order; returning an `Err` from it stops the scan and propagates.
+    ///
+    /// This is the invariant that makes streaming tables safe: no read site may touch
+    /// `tdata.rows` directly (a `Streaming` table's `rows` is empty), so as streaming is
+    /// rolled out, read sites migrate to this method one by one and only the final stage
+    /// flips `load` to create `Streaming` tables.
+    fn for_each_table_row(
+        &self,
+        db: &str,
+        table: &str,
+        tdata: &TableData,
+        mut visit: impl FnMut(&RowEntry) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        match &tdata.residency {
+            TableResidency::Resident => {
+                for entry in tdata.rows.iter() {
+                    visit(entry)?;
+                }
+                Ok(())
+            }
+            TableResidency::Streaming { segment, .. } => {
+                let codec = self.row_encryption_codec(db, table);
+                stream_segment_rows_visit(segment, Some(&codec), |entry| visit(&entry))
+            }
+        }
+    }
+
+    /// Residency-transparent point lookup by primary key. Returns the row for `pk_key` as a
+    /// `Cow` — borrowed from the in-memory rows for a `Resident` table (no clone on the hot
+    /// path), or decoded from the segment via the streaming index for a `Streaming` table.
+    /// `None` if the key is absent. The caller still checks `deleted`, as with direct access.
+    fn table_row_by_pk<'a>(
+        &self,
+        db: &str,
+        table: &str,
+        tdata: &'a TableData,
+        pk_key: &str,
+    ) -> anyhow::Result<Option<Cow<'a, RowEntry>>> {
+        match &tdata.residency {
+            TableResidency::Resident => Ok(tdata
+                .pk_index
+                .get(pk_key)
+                .and_then(|&idx| tdata.rows.get(idx))
+                .map(Cow::Borrowed)),
+            TableResidency::Streaming { segment, index } => {
+                let codec = self.row_encryption_codec(db, table);
+                Ok(index
+                    .get_by_pk(segment, pk_key, Some(&codec))?
+                    .map(Cow::Owned))
+            }
+        }
+    }
+
     fn ai_nl_prompt_tables(
         &self,
         db: &str,
@@ -10911,16 +11012,22 @@ impl Engine {
         &mut self,
         table: &BaseTableRef,
     ) -> anyhow::Result<(&mut TableSchema, &mut TableData)> {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        // A streaming table must be brought fully into memory before it can be mutated:
+        // the write paths address rows and the pk index by position, which a segment-backed
+        // table does not hold. This is the single choke point where every DML mutation
+        // acquires its &mut, so materializing here covers all writes.
+        self.materialize_streaming_table(&key)?;
+
         // Borrow dance: fetch schema and tabledata separately.
         let schema_ptr: *mut TableSchema = {
             let schema = self.get_schema_mut(&table.db, &table.table)? as *mut TableSchema;
             schema
         };
 
-        let key = TableKey {
-            db: table.db.clone(),
-            table: table.table.clone(),
-        };
         let tdata_ptr: *mut TableData = self
             .tables
             .get_mut(&key)
@@ -10929,6 +11036,52 @@ impl Engine {
 
         // SAFETY: schema and tdata live in different hashmaps; pointers are stable for this scope.
         unsafe { Ok((&mut *schema_ptr, &mut *tdata_ptr)) }
+    }
+
+    /// Bring a `Streaming` table fully into memory and flip it back to `Resident`: stream
+    /// every row off the segment, rebuild the pk index and mysql-compat secondary indexes
+    /// (mirroring the load path), and clear the residency. A no-op for a table that is
+    /// already resident or absent. Used before any write, since a segment-backed table
+    /// cannot be mutated in place.
+    ///
+    /// Note: this materializes the whole table, so writing a table larger than RAM will
+    /// exceed memory — an accepted v1 limitation (streaming targets read-mostly large
+    /// tables); a true streaming append/merge is a later enhancement.
+    fn materialize_streaming_table(&mut self, key: &TableKey) -> anyhow::Result<()> {
+        let segment = match self.tables.get(key) {
+            Some(tdata) => match &tdata.residency {
+                TableResidency::Streaming { segment, .. } => segment.clone(),
+                TableResidency::Resident => return Ok(()),
+            },
+            None => return Ok(()),
+        };
+
+        let codec = self.row_encryption_codec(&key.db, &key.table);
+        let mut rows: Vec<RowEntry> = Vec::new();
+        stream_segment_rows_visit(&segment, Some(&codec), |entry| {
+            rows.push(entry);
+            Ok(())
+        })?;
+        drop(codec);
+
+        let schema = self.get_schema(&key.db, &key.table).ok().cloned();
+        if let Some(tdata) = self.tables.get_mut(key) {
+            tdata.rows = rows;
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Resident;
+            if let Some(schema) = schema.as_ref() {
+                for (idx, entry) in tdata.rows.iter().enumerate() {
+                    if entry.deleted {
+                        continue;
+                    }
+                    if let Ok(pk) = extract_pk(schema, &entry.row) {
+                        tdata.pk_index.insert(pk_key(&pk), idx);
+                    }
+                }
+                ensure_mysql_compat_secondary_indexes(schema, tdata);
+            }
+        }
+        Ok(())
     }
 
     fn persist_catalog(&self) -> anyhow::Result<()> {
@@ -11233,6 +11386,12 @@ impl Engine {
         let Some(tdata) = self.tables.get(&key) else {
             return Ok(());
         };
+        // A streaming table's authoritative rows live in its on-disk segment; it holds no
+        // in-memory rows (any write materializes it to resident first). Persisting it would
+        // encode the empty in-memory image over the segment and lose the data — skip it.
+        if !tdata.is_resident() {
+            return Ok(());
+        }
         let path = self.table_path(db, table);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -11356,6 +11515,57 @@ impl Engine {
         Ok(())
     }
 
+    /// Minimum on-disk segment size (bytes) at which a table loads as `Streaming` instead of
+    /// fully in memory, or `None` to disable streaming (the default). Opt-in via
+    /// `SKEINDB_STREAMING_MIN_BYTES`, and only meaningful when the segment is the primary row
+    /// store — so with streaming off, load behavior is exactly as before.
+    fn streaming_threshold_bytes(&self) -> Option<u64> {
+        if !self.storage_mode.uses_segment() {
+            return None;
+        }
+        std::env::var("SKEINDB_STREAMING_MIN_BYTES")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n > 0)
+    }
+
+    /// Try to load `db.table` as a segment-backed `Streaming` table (rows stay on disk, read
+    /// on demand). Returns `None` — so the caller falls back to a normal in-memory load — when
+    /// the table is ineligible: no readable segment at/above `min_bytes`, no primary key, an
+    /// embedding/vector column (vector search needs the in-memory rows), an active oblivious
+    /// policy, or the index cannot be built (encrypted-at-rest without the key, or corrupt).
+    fn try_load_streaming_table(&self, db: &str, table: &str, min_bytes: u64) -> Option<TableData> {
+        let segment = self.table_segment_path(db, table);
+        if fs::metadata(&segment).ok()?.len() < min_bytes {
+            return None;
+        }
+        let schema = self.get_schema(db, table).ok()?;
+        if schema.primary_key.is_empty() {
+            return None;
+        }
+        if schema.columns.iter().any(|c| c.r#type.kind == "embedding") {
+            return None;
+        }
+        let base = BaseTableRef {
+            db: db.to_string(),
+            table: table.to_string(),
+            r#as: None,
+        };
+        if self.oblivious_policy_for(&base).level != "off" {
+            return None;
+        }
+        let codec = self.row_encryption_codec(db, table);
+        let index = build_streaming_index(&segment, schema, Some(&codec)).ok()?;
+        Some(TableData {
+            residency: TableResidency::Streaming {
+                segment,
+                index: Box::new(index),
+            },
+            ..Default::default()
+        })
+    }
+
     fn load_tables_best_effort(&mut self) {
         let targets: Vec<(String, String)> = self
             .catalog
@@ -11367,12 +11577,24 @@ impl Engine {
                     .map(move |table| (db.clone(), table.clone()))
             })
             .collect();
+        let streaming_min_bytes = self.streaming_threshold_bytes();
         for (db, table) in targets {
-            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             let key = TableKey {
                 db: db.clone(),
                 table: table.clone(),
             };
+            // With streaming enabled, an eligible large segment-backed table loads as a
+            // Streaming table (rows stay on disk, read via the seam) rather than materializing
+            // its whole row set into memory.
+            if let Some(min_bytes) = streaming_min_bytes {
+                if let Some(tdata) = self.try_load_streaming_table(&db, &table, min_bytes) {
+                    self.encrypted_locked_tables.remove(&key);
+                    self.corrupt_tables.remove(&key);
+                    self.tables.insert(key, tdata);
+                    continue;
+                }
+            }
+            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
             if locked {
                 self.encrypted_locked_tables.insert(key.clone());
             } else {
@@ -14718,7 +14940,14 @@ fn try_execute_select_base_table(
     }
 
     let candidate_rows = index_prefilter_candidates(engine, base, predicate, args);
-    if !distinct && query.limit.is_none() && order.is_empty() && candidate_rows.is_none() {
+    // The batch fast path scans `tdata.rows` by slice/cursor, which only exists for a
+    // resident table; a streaming table falls through to the seam-based row scan below.
+    if !distinct
+        && query.limit.is_none()
+        && order.is_empty()
+        && candidate_rows.is_none()
+        && tdata.is_resident()
+    {
         let (rows, rows_scanned) = execute_select_batches(
             schema,
             tdata,
@@ -14783,6 +15012,9 @@ fn try_execute_select_base_table(
     };
 
     if let Some(indices) = candidate_rows {
+        // Index-driven access only exists for a resident table (a streaming table holds no
+        // in-memory secondary index, so `candidate_rows` is None for it and we take the
+        // full-scan branch below).
         for idx in indices.iter() {
             let Some(entry) = tdata.rows.get(*idx) else {
                 continue;
@@ -14790,9 +15022,7 @@ fn try_execute_select_base_table(
             push_entry(entry)?;
         }
     } else {
-        for entry in tdata.rows.iter() {
-            push_entry(entry)?;
-        }
+        engine.for_each_table_row(&base.db, &base.table, tdata, |entry| push_entry(entry))?;
     }
 
     if !order.is_empty() {
@@ -15470,9 +15700,7 @@ fn execute_select_with_keys(
             push_entry(entry)?;
         }
     } else {
-        for entry in tdata.rows.iter() {
-            push_entry(entry)?;
-        }
+        engine.for_each_table_row(&base.db, &base.table, tdata, |entry| push_entry(entry))?;
     }
 
     // ORDER BY
@@ -17732,12 +17960,12 @@ fn scan_table(
 
     let (schema, tdata) = engine.get_table(base)?;
     let mut out = Vec::new();
-    for entry in tdata.rows.iter() {
-        if !row_visible_at(entry, as_of_ms) {
-            continue;
+    engine.for_each_table_row(&base.db, &base.table, tdata, |entry| {
+        if row_visible_at(entry, as_of_ms) {
+            out.push(table_row_ctx_from_row(&alias, schema, &entry.row));
         }
-        out.push(table_row_ctx_from_row(&alias, schema, &entry.row));
-    }
+        Ok(())
+    })?;
     if let Some(padding) = engine.oblivious_padding_for(base, out.len() as u64) {
         if padding.shuffle {
             let seed = oblivious_shuffle_seed(base, padding.target_rows);
@@ -26553,71 +26781,89 @@ fn decode_table_rows_disk(
 
     let mut seeds = HashMap::<ValueId, Lit>::new();
     for row in disk.rows.iter() {
-        for v in row.row.values() {
-            let Some(refv) = decode_value_ref_payload(v) else {
-                continue;
-            };
-            let _kind = value_kind_from_label(&refv.kind);
-            let Some(id) = parse_hex16(&refv.id) else {
-                continue;
-            };
-            let Some(lit_json) = refv.lit.as_ref() else {
-                continue;
-            };
-            if let Ok(lit) = serde_json::from_value::<Lit>(lit_json.clone()) {
-                seeds.insert(id, lit);
-            }
-        }
+        collect_value_ref_seeds(row, &mut seeds);
     }
 
     let mut rows = Vec::with_capacity(disk.rows.len());
     for row in disk.rows.into_iter() {
-        let mut decoded = RowObject::new();
-        for (k, v) in row.row.into_iter() {
-            if let Some(payload) = decode_encrypted_cell_payload(&v) {
-                let codec = enc.ok_or_else(|| {
-                    anyhow::Error::from(EncryptionLockedError {
-                        db: String::new(),
-                        table: String::new(),
-                        detail: "database master key is not registered".to_string(),
-                    })
-                })?;
-                let lit = codec
-                    .decrypt_cell(&payload.column, &payload.kind, &payload.env_b64)
-                    .map_err(|e| {
-                        anyhow::Error::from(EncryptionLockedError {
-                            db: codec.db.clone(),
-                            table: codec.table.clone(),
-                            detail: e.to_string(),
-                        })
-                    })?;
-                decoded.insert(k, lit);
-                continue;
-            }
-            let lit = if let Some(refv) = decode_value_ref_payload(&v) {
-                let _kind = value_kind_from_label(&refv.kind);
-                if let Some(inline) = refv.lit {
-                    serde_json::from_value::<Lit>(inline).ok()
-                } else if let Some(id) = parse_hex16(&refv.id) {
-                    seeds.get(&id).cloned()
-                } else {
-                    None
-                }
-            } else {
-                serde_json::from_value::<Lit>(v).ok()
-            }
-            .unwrap_or(Lit::Null);
-            decoded.insert(k, lit);
-        }
-        rows.push(RowEntry {
-            row: decoded,
-            version: row.version,
-            schema_version: row.schema_version,
-            deleted: row.deleted,
-            commit_ts_ms: row.commit_ts_ms,
-        });
+        rows.push(decode_one_disk_row(row, &seeds, enc)?);
     }
     Ok(rows)
+}
+
+/// Collect value-ref interning seeds from one disk row: any cell carrying an inline literal
+/// for a `ValueId` seeds that id so later id-only references can resolve to it. Shared by
+/// the batch decoder and the streaming reader (which runs this over a first pass).
+fn collect_value_ref_seeds(row: &RowEntryDisk, seeds: &mut HashMap<ValueId, Lit>) {
+    for v in row.row.values() {
+        let Some(refv) = decode_value_ref_payload(v) else {
+            continue;
+        };
+        let _kind = value_kind_from_label(&refv.kind);
+        let Some(id) = parse_hex16(&refv.id) else {
+            continue;
+        };
+        let Some(lit_json) = refv.lit.as_ref() else {
+            continue;
+        };
+        if let Ok(lit) = serde_json::from_value::<Lit>(lit_json.clone()) {
+            seeds.insert(id, lit);
+        }
+    }
+}
+
+/// Decode one on-disk row into a `RowEntry`, resolving encrypted cells (via `enc`) and
+/// value-refs (via the pre-collected `seeds`). Shared by the batch decoder and the
+/// streaming reader so both produce identical rows.
+fn decode_one_disk_row(
+    row: RowEntryDisk,
+    seeds: &HashMap<ValueId, Lit>,
+    enc: Option<&RowEncryptionCodec<'_>>,
+) -> anyhow::Result<RowEntry> {
+    let mut decoded = RowObject::new();
+    for (k, v) in row.row.into_iter() {
+        if let Some(payload) = decode_encrypted_cell_payload(&v) {
+            let codec = enc.ok_or_else(|| {
+                anyhow::Error::from(EncryptionLockedError {
+                    db: String::new(),
+                    table: String::new(),
+                    detail: "database master key is not registered".to_string(),
+                })
+            })?;
+            let lit = codec
+                .decrypt_cell(&payload.column, &payload.kind, &payload.env_b64)
+                .map_err(|e| {
+                    anyhow::Error::from(EncryptionLockedError {
+                        db: codec.db.clone(),
+                        table: codec.table.clone(),
+                        detail: e.to_string(),
+                    })
+                })?;
+            decoded.insert(k, lit);
+            continue;
+        }
+        let lit = if let Some(refv) = decode_value_ref_payload(&v) {
+            let _kind = value_kind_from_label(&refv.kind);
+            if let Some(inline) = refv.lit {
+                serde_json::from_value::<Lit>(inline).ok()
+            } else if let Some(id) = parse_hex16(&refv.id) {
+                seeds.get(&id).cloned()
+            } else {
+                None
+            }
+        } else {
+            serde_json::from_value::<Lit>(v).ok()
+        }
+        .unwrap_or(Lit::Null);
+        decoded.insert(k, lit);
+    }
+    Ok(RowEntry {
+        row: decoded,
+        version: row.version,
+        schema_version: row.schema_version,
+        deleted: row.deleted,
+        commit_ts_ms: row.commit_ts_ms,
+    })
 }
 
 fn encode_table_rows_segment(disk: &TableRowsDisk) -> anyhow::Result<Vec<u8>> {
@@ -26688,6 +26934,28 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 /// (The materialized row Vec is still built; streaming the read path end-to-end so a
 /// table need not fully materialize is the remaining Slice 4 work.)
 fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDisk> {
+    let mut rows = Vec::new();
+    let format_version = for_each_segment_record(path, |_offset, row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(TableRowsDisk {
+        format_version,
+        rows,
+    })
+}
+
+/// Stream a row segment off disk record-by-record, validating the header and framing and
+/// invoking `visit(record_offset, row)` with each decoded-from-JSON `RowEntryDisk` in file
+/// order. `record_offset` is the absolute byte offset of the record's `[len]` frame, so a
+/// later `read_segment_record_at(path, record_offset)` re-reads exactly this record (the
+/// basis for seek-based point lookups on streaming tables). Never holds more than one row
+/// payload in memory. Rejects the same corruption as the in-memory decoder (bad
+/// magic/version, truncated payload, trailing bytes). Returns the table format version.
+fn for_each_segment_record(
+    path: &Path,
+    mut visit: impl FnMut(u64, RowEntryDisk) -> anyhow::Result<()>,
+) -> anyhow::Result<u32> {
     use std::io::Read;
     let mut reader = std::io::BufReader::new(fs::File::open(path)?);
     let mut header = [0u8; 24];
@@ -26703,8 +26971,10 @@ fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDis
     }
     let table_format_version = u32::from_le_bytes(header[12..16].try_into().unwrap());
     let row_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
-    let mut rows = Vec::new();
+    // Byte cursor past the 24-byte header; the start of each record's `[len]` frame.
+    let mut pos: u64 = 24;
     for _ in 0..row_count {
+        let record_offset = pos;
         let mut len_buf = [0u8; 4];
         reader
             .read_exact(&mut len_buf)
@@ -26714,15 +26984,153 @@ fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDis
         reader
             .read_exact(&mut payload)
             .map_err(|_| anyhow::anyhow!("segment payload truncated"))?;
-        rows.push(serde_json::from_slice::<RowEntryDisk>(&payload)?);
+        pos += 4 + payload_len as u64;
+        visit(
+            record_offset,
+            serde_json::from_slice::<RowEntryDisk>(&payload)?,
+        )?;
     }
     let mut trailing = [0u8; 1];
     if reader.read(&mut trailing)? != 0 {
         anyhow::bail!("segment file contains trailing bytes");
     }
-    Ok(TableRowsDisk {
-        format_version: table_format_version,
-        rows,
+    Ok(table_format_version)
+}
+
+/// Read exactly one record's `[len][payload]` frame at `record_offset` (an offset reported
+/// by [`for_each_segment_record`]) and decode the JSON `RowEntryDisk`. Seeks directly to the
+/// record without scanning the file — the point-lookup primitive for streaming tables.
+fn read_segment_record_at(path: &Path, record_offset: u64) -> anyhow::Result<RowEntryDisk> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(record_offset))?;
+    let mut len_buf = [0u8; 4];
+    file.read_exact(&mut len_buf)
+        .map_err(|_| anyhow::anyhow!("segment record truncated"))?;
+    let payload_len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; payload_len];
+    file.read_exact(&mut payload)
+        .map_err(|_| anyhow::anyhow!("segment record truncated"))?;
+    Ok(serde_json::from_slice::<RowEntryDisk>(&payload)?)
+}
+
+/// Decode a row segment off disk and hand each finished `RowEntry` to `visit`, one at a
+/// time, without ever materializing the full row Vec — the query-time streaming read path
+/// for tables that are not resident in memory.
+///
+/// Two streaming passes are required for correctness: value-refs intern repeated cell
+/// literals so that only the first occurrence of a `ValueId` carries the inline literal and
+/// later rows reference it by id, and the segment does not guarantee the seeding row
+/// precedes its references. Pass one streams the file to build the id→literal seed map
+/// (holding only the seeds, not the rows); pass two streams it again, decoding each row
+/// against the seeds. The produced rows are identical to `decode_table_rows_disk` over the
+/// same segment.
+fn stream_segment_rows_visit(
+    path: &Path,
+    enc: Option<&RowEncryptionCodec<'_>>,
+    mut visit: impl FnMut(RowEntry) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut seeds = HashMap::<ValueId, Lit>::new();
+    let format_version = for_each_segment_record(path, |_offset, row| {
+        collect_value_ref_seeds(&row, &mut seeds);
+        Ok(())
+    })?;
+    if format_version != 2 && format_version != 3 && format_version != TABLE_ROWS_FORMAT_VERSION {
+        anyhow::bail!("unsupported table format version: {format_version}");
+    }
+    for_each_segment_record(path, |_offset, row| {
+        let entry = decode_one_disk_row(row, &seeds, enc)?;
+        visit(entry)
+    })?;
+    Ok(())
+}
+
+/// In-memory index over a segment-backed (`Streaming`) table. Holds only byte offsets and
+/// the value-ref seed dictionary — never the decoded rows — so a table larger than RAM can
+/// be point-queried and positionally accessed by seeking to a record instead of scanning.
+/// Built by streaming the segment at load (see [`build_streaming_index`]); intended to be
+/// persisted to a `.rsegidx` sidecar so re-open can skip the rescan.
+///
+/// `seeds` is required for decode correctness: value-ref interning means a seeked record may
+/// reference a `ValueId` whose inline literal lives in a *different* record, so a record is
+/// not self-decodable without the dictionary. This dictionary is bounded by the number of
+/// distinct interned values, not the row count.
+#[derive(Debug, Default)]
+struct StreamingIndex {
+    /// Value-ref id → literal, covering every interned value referenced anywhere in the
+    /// segment. Lets any single seeked record be decoded in isolation.
+    seeds: HashMap<ValueId, Lit>,
+    /// `pk_key(pk)` → byte offset of that row's record frame. Point-lookup index.
+    pk_offsets: HashMap<String, u64>,
+    /// Row position → byte offset of that record frame, in segment order. Positional index
+    /// for `rows[idx]`-style access.
+    row_offsets: Vec<u64>,
+}
+
+impl StreamingIndex {
+    /// Total record count (including tombstoned rows), mirroring `TableData.rows.len()` for
+    /// a resident table.
+    fn row_count(&self) -> usize {
+        self.row_offsets.len()
+    }
+
+    /// Decode the row at byte offset `record_offset` against the seed dictionary.
+    fn decode_at(
+        &self,
+        path: &Path,
+        record_offset: u64,
+        enc: Option<&RowEncryptionCodec<'_>>,
+    ) -> anyhow::Result<RowEntry> {
+        let disk = read_segment_record_at(path, record_offset)?;
+        decode_one_disk_row(disk, &self.seeds, enc)
+    }
+
+    /// Point lookup by primary key: returns the row for `pk_key`, or `None` if absent.
+    fn get_by_pk(
+        &self,
+        path: &Path,
+        pk_key: &str,
+        enc: Option<&RowEncryptionCodec<'_>>,
+    ) -> anyhow::Result<Option<RowEntry>> {
+        match self.pk_offsets.get(pk_key) {
+            Some(&offset) => Ok(Some(self.decode_at(path, offset, enc)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Build a [`StreamingIndex`] for a segment by streaming it twice without ever materializing
+/// the row set: pass one collects the value-ref seed dictionary and each record's byte
+/// offset (in segment order); pass two decodes each record against the seeds, extracts its
+/// primary key, and maps `pk_key → offset`. Holds only offsets and the seed dictionary in
+/// memory, so it scales to tables far larger than RAM. Rows that fail pk extraction (e.g. a
+/// schema mismatch) are skipped from the pk map but retain their positional offset.
+fn build_streaming_index(
+    path: &Path,
+    schema: &TableSchema,
+    enc: Option<&RowEncryptionCodec<'_>>,
+) -> anyhow::Result<StreamingIndex> {
+    let mut seeds = HashMap::<ValueId, Lit>::new();
+    let mut row_offsets: Vec<u64> = Vec::new();
+    for_each_segment_record(path, |offset, row| {
+        collect_value_ref_seeds(&row, &mut seeds);
+        row_offsets.push(offset);
+        Ok(())
+    })?;
+
+    let mut pk_offsets = HashMap::<String, u64>::new();
+    for_each_segment_record(path, |offset, row| {
+        let entry = decode_one_disk_row(row, &seeds, enc)?;
+        if let Ok(pk) = extract_pk(schema, &entry.row) {
+            pk_offsets.insert(pk_key(&pk), offset);
+        }
+        Ok(())
+    })?;
+
+    Ok(StreamingIndex {
+        seeds,
+        pk_offsets,
+        row_offsets,
     })
 }
 
@@ -32101,6 +32509,335 @@ mod tests {
         // It rejects a corrupt segment (so the loader treats it as Corrupt, not empty).
         fs::write(&seg_path, b"not a valid segment file")?;
         assert!(read_table_rows_segment_streaming(&seg_path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_row_visitor_reconstructs_resident_rows_through_seam() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_row_visitor");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        // Identical payloads in both rows so the cell value is interned as a value-ref: one
+        // row carries the inline literal (the seed) and the other references it by id. That
+        // is exactly the case the streaming reader's two-pass seed map exists to handle, and
+        // it would silently decode to Null if the reader did a naive single-pass decode.
+        seed_events_table(&mut engine, "shared-payload", "shared-payload")?;
+        engine.flush_dirty_tables()?; // materialize the segment on disk
+        let seg_path = engine.table_segment_path("app", "events");
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let resident_rows: Vec<RowEntry> = engine.tables.get(&key).unwrap().rows.clone();
+        assert_eq!(resident_rows.len(), 2);
+        let resident_json = serde_json::to_vec(&resident_rows)?;
+
+        // The low-level streaming visitor yields rows identical to the resident, in-memory
+        // rows (same order, same value-ref-resolved contents).
+        let codec = engine.row_encryption_codec("app", "events");
+        let mut streamed: Vec<RowEntry> = Vec::new();
+        stream_segment_rows_visit(&seg_path, Some(&codec), |entry| {
+            streamed.push(entry);
+            Ok(())
+        })?;
+        assert_eq!(
+            serde_json::to_vec(&streamed)?,
+            resident_json,
+            "streaming visitor must reconstruct the resident rows, value-refs included"
+        );
+
+        // The read seam over a Streaming table (empty `rows`, segment-backed) returns exactly
+        // what the same seam returns over the Resident table — the invariant that lets read
+        // sites migrate to the seam without caring about residency.
+        let schema = engine.get_schema("app", "events")?.clone();
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        let streaming_tdata = TableData {
+            residency: TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            },
+            ..Default::default()
+        };
+        let mut via_seam: Vec<RowEntry> = Vec::new();
+        engine.for_each_table_row("app", "events", &streaming_tdata, |entry| {
+            via_seam.push(entry.clone());
+            Ok(())
+        })?;
+        assert_eq!(
+            serde_json::to_vec(&via_seam)?,
+            resident_json,
+            "for_each_table_row over a Streaming table must match the Resident rows"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_index_point_lookups_match_resident_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_index");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        // Shared payload across both rows so the cell is interned: a point lookup that seeks
+        // to a single record must still resolve its value-ref via the index's seed dict.
+        seed_events_table(&mut engine, "shared-payload", "shared-payload")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let resident_rows: Vec<RowEntry> = engine.tables.get(&key).unwrap().rows.clone();
+        assert_eq!(resident_rows.len(), 2);
+
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        assert_eq!(index.row_count(), 2);
+
+        // Point lookup by pk returns the right row (value-refs resolved from the seed dict).
+        for resident in resident_rows.iter() {
+            let pk = extract_pk(&schema, &resident.row)?;
+            let got = index
+                .get_by_pk(&seg_path, &pk_key(&pk), Some(&codec))?
+                .expect("pk row present");
+            assert_eq!(serde_json::to_vec(&got)?, serde_json::to_vec(resident)?);
+        }
+        let missing_pk = pk_key(&[Lit::U64 { v: 9999 }]);
+        assert!(index
+            .get_by_pk(&seg_path, &missing_pk, Some(&codec))?
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn data_get_and_get_row_by_pk_work_on_streaming_table() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_point_reads");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+        let base = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+
+        // Baseline point reads while the table is Resident.
+        let resident_get = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        let resident_row2 = engine.get_row_by_pk(&base, &[Lit::U64 { v: 2 }])?;
+
+        // Convert the table to Streaming: drop the in-memory rows + pk_index, attach the
+        // segment-backed index. data_get / get_row_by_pk must now resolve via the index.
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+
+        let streaming_get = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            serde_json::to_vec(&streaming_get.row)?,
+            serde_json::to_vec(&resident_get.row)?,
+            "streaming data_get must match the resident result"
+        );
+        assert_eq!(streaming_get.etag, resident_get.etag);
+        let streaming_row2 = engine.get_row_by_pk(&base, &[Lit::U64 { v: 2 }])?;
+        assert_eq!(
+            serde_json::to_vec(&streaming_row2)?,
+            serde_json::to_vec(&resident_row2)?
+        );
+
+        // A missing pk still errors not_found through the streaming path.
+        assert!(engine.data_get(&base, vec![Lit::U64 { v: 9999 }]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn select_on_streaming_table_matches_resident_results() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_select");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+
+        // A single-table SELECT with no predicate/order takes the executor's full-scan
+        // branch — the one migrated to for_each_table_row in Phase C.
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "payload".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        // want_etag=false routes through execute_select; want_etag=true through
+        // execute_select_with_keys (the patchable path) — exercise both.
+        let run = |engine: &Engine, want_etag: bool| -> anyhow::Result<Option<serde_json::Value>> {
+            Ok(engine
+                .query_select(
+                    &query,
+                    &[],
+                    ResultFormat::RowsJson,
+                    want_etag,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                )?
+                .data)
+        };
+
+        let resident_plain = run(&engine, false)?;
+        let resident_keys = run(&engine, true)?;
+        assert!(resident_plain.is_some());
+
+        // Convert to Streaming and re-run: the executor must full-scan the segment and
+        // return identical rows in identical order through both entry points.
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+        // Drop the cached result so the streaming run actually re-executes (the etag is
+        // data-derived and unchanged, so it would otherwise be a cache hit).
+        engine.cached_select.lock().unwrap().clear();
+
+        assert_eq!(
+            run(&engine, false)?,
+            resident_plain,
+            "execute_select over a Streaming table must match the Resident result"
+        );
+        assert_eq!(
+            run(&engine, true)?,
+            resident_keys,
+            "execute_select_with_keys over a Streaming table must match the Resident result"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_to_streaming_table_materializes_and_succeeds() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_write");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+        let seg_path = engine.table_segment_path("app", "events");
+        let base = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+
+        // Convert to Streaming.
+        let schema = engine.get_schema("app", "events")?.clone();
+        let codec = engine.row_encryption_codec("app", "events");
+        let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
+        {
+            let tdata = engine.tables.get_mut(&key).unwrap();
+            tdata.rows.clear();
+            tdata.pk_index.clear();
+            tdata.residency = TableResidency::Streaming {
+                segment: seg_path.clone(),
+                index: Box::new(index),
+            };
+        }
+        assert!(!engine.tables.get(&key).unwrap().is_resident());
+
+        // Insert a new row: get_table_mut must materialize the table first, then apply it.
+        engine.data_insert(
+            &base,
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "gamma".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        // The table is now resident, holds all three rows, and every row reads back — the
+        // pre-existing streamed rows survived materialization and the new row is present.
+        assert!(engine.tables.get(&key).unwrap().is_resident());
+        assert_eq!(engine.tables.get(&key).unwrap().rows.len(), 3);
+        let got1 = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            got1.row.get("payload"),
+            Some(&Lit::Str {
+                v: "alpha".to_string()
+            })
+        );
+        let got3 = engine.data_get(&base, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            got3.row.get("payload"),
+            Some(&Lit::Str {
+                v: "gamma".to_string()
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_load_streaming_table_respects_eligibility() -> anyhow::Result<()> {
+        let dir = temp_dir("streaming_eligibility");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        engine.flush_dirty_tables()?;
+
+        // Eligible: segment above the (tiny) threshold, has a pk, no embedding column, no
+        // oblivious policy -> loads as a Streaming table whose index sees both rows.
+        let tdata = engine
+            .try_load_streaming_table("app", "events", 1)
+            .expect("eligible table should stream");
+        assert!(!tdata.is_resident());
+        match &tdata.residency {
+            TableResidency::Streaming { index, .. } => assert_eq!(index.row_count(), 2),
+            TableResidency::Resident => panic!("expected a streaming table"),
+        }
+
+        // Ineligible: threshold above the segment size -> None (caller does a normal load).
+        assert!(engine
+            .try_load_streaming_table("app", "events", u64::MAX)
+            .is_none());
+        // Ineligible: unknown table -> None.
+        assert!(engine
+            .try_load_streaming_table("app", "missing", 1)
+            .is_none());
         Ok(())
     }
 
