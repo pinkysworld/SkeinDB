@@ -172,6 +172,15 @@ Current runtime surface in `stats.snapshot.cdc`:
 Optional endpoint:
 - GET `/metrics`
 
+Currently exported (text `version=0.0.4`):
+- `skeindb_uptime_seconds`, `skeindb_rpc_total`, `skeindb_rpc_method_total{method}`
+- **Per-method query stats:** `skeindb_query_count{method}`, `skeindb_query_errors_total{method}`, `skeindb_query_latency_ms_sum{method}`, `skeindb_query_latency_ms_max{method}`, `skeindb_query_rows_returned_total{method}`
+- **Latency quantiles:** `skeindb_query_latency_ms{quantile="0.5"|"0.95"|"0.99"}` over recent samples
+- **Storage-engine internals** (cheap, never a full row scan): `skeindb_tables`, `skeindb_streaming_tables`, `skeindb_dirty_tables`, `skeindb_mutations_since_flush` (deferred-flush lag), `skeindb_wal_bytes`, `skeindb_rows_total`
+- **Index advisor:** `skeindb_advisor_suggestions_total`, `skeindb_advisor_applied_total`, `skeindb_advisor_rejected_total`, `skeindb_advisor_estimated_saved_ms_total`
+
+Slow-query log: set `SKEINDB_SLOW_QUERY_MS=<ms>` to log every completed query at or above the threshold at WARN (method, duration, rows, status, fingerprint), in addition to the `stats.slow_queries` RPC.
+
 Design notes:
 - keep metric names stable
 - include labels:

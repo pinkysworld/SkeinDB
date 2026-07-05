@@ -72,6 +72,16 @@ Notes:
 - CLI `--storage-mode` takes precedence for `serve`.
 - Environment variable is still used by non-serve workflows that open the engine directly.
 
+### Operational tuning (all opt-in; unset = previous behavior)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SKEINDB_STATEMENT_TIMEOUT_MS` | `0` (disabled) | Cooperative statement timeout. A query running longer is aborted at the next executor deadline check with a `statement_timeout` error, so a runaway query cannot hold the engine lock indefinitely. Recommended in production. |
+| `SKEINDB_SLOW_QUERY_MS` | `0` (disabled) | Log any completed RPC/query at or above this duration at WARN (method, duration, rows, status, fingerprint). |
+| `SKEINDB_WAL_SYNC_BATCH` | `1` | WAL group commit: `fsync` the write-ahead log once every N committed transactions instead of every one. `1` = fsync every commit (strongest durability). A larger value amortizes the fsync-under-lock cost; it can lose at most `N-1` most-recent commits on a *power-loss* crash (a clean restart still recovers everything), and recovery always yields a consistent committed prefix. |
+| `SKEINDB_STREAMING_MIN_BYTES` | `0` (disabled) | Query-time streaming: a segment-backed table whose on-disk file is at least this many bytes, has a primary key, and uses no embedding/oblivious features loads as a *streaming* table — its rows stay on disk and are read on demand (with a seek-based pk index for point lookups) instead of being materialized into memory. Writes materialize the table on demand. |
+| `SKEINDB_TOKEN` | unset | Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). **Unset = no HTTP RPC authentication.** Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration. |
+
 ---
 
 ## HTTP services

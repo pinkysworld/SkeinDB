@@ -804,6 +804,41 @@ literal inline:</p>
 - <code>columns</code> and <code>include</code> use the same ordering semantics as the prototype secondary-index advisor.
 - <code>keys</code> map the JSON-encoded composite key to row indexes inside the current table snapshot.
 - Missing files or unknown <code>format_version</code> values are ignored and fall back to rebuilding from row data.</p>
+<h3 id="1111-row-redo-wal-wal-000001log">11.11 Row-redo WAL (<code>wal-000001.log</code>)<a class="headerlink" href="#1111-row-redo-wal-wal-000001log" title="Permanent link">¶</a></h3>
+<p>A single engine-level write-ahead log at <code>&lt;data_dir&gt;/wal-000001.log</code> provides crash
+recovery for committed table data. It uses the core WAL file framing from §9 (64-byte
+file header + length-prefixed records, grouped into <code>begin</code> / <code>mutation</code> / <code>commit</code>
+transactions), one transaction per committed DML statement.</p>
+<p>Each <code>mutation</code> record's payload is a JSON-encoded <strong>row redo record</strong> — the full final
+state of one changed row:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;items&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;commit_ts_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1718900000000</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Semantics:</p>
+<ul>
+<li><strong>Ordering.</strong> On every committed <code>data_insert</code> / <code>data_update</code> / <code>data_delete</code>, the
+  affected rows' redo records are appended and <strong>fsynced before</strong> the table snapshot
+  (<code>.rseg</code>/<code>.json</code>) is written. A crash at any point therefore leaves a state the next
+  open can reconstruct.</li>
+<li><strong>Replay.</strong> On <code>Engine::open</code>, after snapshots are loaded, committed records are
+  replayed. Redo is <strong>idempotent</strong>: a record is applied only when its <code>version</code> exceeds
+  the row already present (by primary key), so records the snapshot already reflects are
+  skipped and a mutation lost between its WAL commit and the snapshot write is restored.
+  Deletes replay as tombstones (<code>deleted: true</code>).</li>
+<li><strong>Truncation.</strong> After a successful replay — and at every checkpoint, once all table
+  snapshots are durable — the WAL is deleted and reopened lazily on the next mutation, so
+  it only ever holds mutations since the last checkpoint.</li>
+</ul>
+<p>No existing on-disk record format changes; this is an additional, self-contained file.</p>
 <hr />
 <h1 id="appendix-a-v02v03-extensions">Appendix A) v0.2/v0.3 extensions<a class="headerlink" href="#appendix-a-v02v03-extensions" title="Permanent link">¶</a></h1>
 <p>This appendix specifies optional extensions that can be implemented without invalidating v0.1 data.
@@ -962,6 +997,7 @@ The FileHeader format_ver remains 1; extensions use new record types and/or high
 <li><a href="#118-tablesjson-format-v3">11.8 tables//.json (format v3)</a></li>
 <li><a href="#119-tablesrseg-prototype-segment-container-v1">11.9 tables//.rseg (prototype segment container v1)</a></li>
 <li><a href="#1110-tablessidxjson-prototype-secondary-index-cache-v1">11.10 tables//.sidx.json (prototype secondary index cache v1)</a></li>
+<li><a href="#1111-row-redo-wal-wal-000001log">11.11 Row-redo WAL (wal-000001.log)</a></li>
 </ul>
 </li>
 <li><a href="#a1-delta-valueentries">A.1 Delta ValueEntries</a></li>

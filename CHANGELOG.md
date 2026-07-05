@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.3.23 - 2026-07-05
 
-Production-readiness hardening (all opt-in / additive; default behavior unchanged).
+Production-readiness hardening (all opt-in / additive; default behavior unchanged): statement timeouts, deeper `/metrics` + slow-query log, backup/restore CLI, non-fatal lock poisoning, a WAL torn-tail crash-recovery harness, opt-in WAL group commit, an unauthenticated-exposure startup warning, and a concurrent-write benchmark that surfaced (and began fixing) a major write-throughput bottleneck. Docs and website updated.
 
 - **Cooperative statement timeout.** A runaway query could previously hold the global engine lock indefinitely. SELECT execution now installs a per-thread deadline (RAII-guarded; nested subqueries share one budget) that the executor's scan/batch loops check cooperatively, aborting with a `statement_timeout` error. Opt-in via `SKEINDB_STATEMENT_TIMEOUT_MS` (0/unset = disabled); checks are amortized (every 1024 rows / once per batch) so per-row cost is negligible.
 - **Deeper observability.** `/metrics` now also exposes per-method query latency (sum/max), error counts, rows-returned, overall latency quantiles (p50/p95/p99), and cheap storage-engine internals (tables, streaming tables, dirty tables + mutations-since-flush as deferred-flush lag, WAL size, total rows) via a new O(tables) `runtime_storage_metrics` that never scans rows. Adds an opt-in slow-query log (`SKEINDB_SLOW_QUERY_MS`) that logs completed queries at/above the threshold at WARN.

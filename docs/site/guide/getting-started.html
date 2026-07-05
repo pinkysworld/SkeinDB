@@ -358,9 +358,20 @@ It now supports virtual metadata queries over:
 <p>Current status is documented in:
 - <code>docs/MYSQL_COMPAT.md</code></p>
 <hr />
-<h2 id="8-where-to-go-next">8) Where to go next<a class="headerlink" href="#8-where-to-go-next" title="Permanent link">¶</a></h2>
+<h2 id="8-backup-and-restore">8) Backup and restore<a class="headerlink" href="#8-backup-and-restore" title="Permanent link">¶</a></h2>
+<p>Make a crash-consistent copy of a data directory and restore it into a fresh one:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Back up ./data into an empty ./backup directory</span>
+./target/release/skeindb<span class="w"> </span>backup<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--out<span class="w"> </span>./backup
+
+<span class="c1"># Restore a backup into a fresh (empty or absent) data directory, verifying it opens</span>
+./target/release/skeindb<span class="w"> </span>restore<span class="w"> </span>--from<span class="w"> </span>./backup<span class="w"> </span>--data<span class="w"> </span>./restored
+</code></pre></div>
+
+<p>The atomic-write + WAL design makes the copy recoverable even if taken from a live instance, and fully consistent from a stopped/idle one. Both commands refuse to clobber a non-empty destination. (Online/hot RPC-driven backup and point-in-time recovery are follow-ons.)</p>
+<hr />
+<h2 id="9-where-to-go-next">9) Where to go next<a class="headerlink" href="#9-where-to-go-next" title="Permanent link">¶</a></h2>
 <ul>
-<li>Operator knobs: <code>docs/CONFIGURATION.md</code></li>
+<li>Operator knobs (timeouts, group commit, streaming, slow-query log): <code>docs/CONFIGURATION.md</code></li>
 <li>Specs and research notes: <code>docs/README.md</code></li>
 </ul>
       <hr>
@@ -400,7 +411,8 @@ It now supports virtual metadata queries over:
 <li><a href="#5-storage-dedup-stats">5) Storage + dedup stats</a></li>
 <li><a href="#6-querypatch-delta-updates">6) QueryPatch (delta updates)</a></li>
 <li><a href="#7-mysql-compatibility">7) MySQL compatibility</a></li>
-<li><a href="#8-where-to-go-next">8) Where to go next</a></li>
+<li><a href="#8-backup-and-restore">8) Backup and restore</a></li>
+<li><a href="#9-where-to-go-next">9) Where to go next</a></li>
 </ul>
 </div>
 
