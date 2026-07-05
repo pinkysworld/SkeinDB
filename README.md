@@ -5,7 +5,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-05-29.
+Last updated: 2026-07-05.
 
 **SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
@@ -56,6 +56,9 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 - **SkeinAdmin** is a real embedded control panel: schema browsing, SQL workspaces, Easy Viewer with inline edit + WYSIWYG schema design, dashboards with live storage/dedup/MVCC/cache cards, settings + token/user management, telemetry, privacy controls, index-advisor workflows, CDC, time-travel, replay, encryption, and forensic query/proof export workflows.
 - **SkeinQL** is the preferred native API: typed JSON-RPC over HTTP and QUIC.
 - **Row persistence** defaults to segment-backed `.rseg` storage.
+- **Durable, crash-safe storage.** All on-disk writes go through an atomic temp→`fsync`→rename→dir-`fsync` path, backed by a row-level redo **write-ahead log** with idempotent crash recovery (validated by a torn-tail fault-injection test that truncates the WAL at every offset). Snapshot flushes are **deferred and batched** so a mutation doesn't rewrite the whole table on every commit, and an opt-in **WAL group commit** (`SKEINDB_WAL_SYNC_BATCH`) amortizes the fsync under concurrent write load. A corrupt table file loads empty and refuses to be overwritten.
+- **Query-time streaming for tables larger than RAM** (opt-in `SKEINDB_STREAMING_MIN_BYTES`). Eligible large tables are read directly off their on-disk segment without materializing, with a seek-based on-disk primary-key index for point lookups; writes materialize on demand.
+- **Operational readiness.** Cooperative **statement timeout** (`SKEINDB_STATEMENT_TIMEOUT_MS`) aborts runaway queries; `/metrics` exposes per-method query latency/error/quantile and storage-engine internals in Prometheus format, with an opt-in **slow-query log** (`SKEINDB_SLOW_QUERY_MS`); `skeindb backup` / `skeindb restore` make and verify crash-consistent copies; internal lock poisoning is non-fatal; and startup warns if the API is bound to a non-loopback address without a token.
 
 ## What's Still Partial
 

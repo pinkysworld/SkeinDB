@@ -289,7 +289,23 @@ Current status is documented in:
 
 ---
 
-## 8) Where to go next
+## 8) Backup and restore
 
-- Operator knobs: `docs/CONFIGURATION.md`
+Make a crash-consistent copy of a data directory and restore it into a fresh one:
+
+```bash
+# Back up ./data into an empty ./backup directory
+./target/release/skeindb backup --data ./data --out ./backup
+
+# Restore a backup into a fresh (empty or absent) data directory, verifying it opens
+./target/release/skeindb restore --from ./backup --data ./restored
+```
+
+The atomic-write + WAL design makes the copy recoverable even if taken from a live instance, and fully consistent from a stopped/idle one. Both commands refuse to clobber a non-empty destination. (Online/hot RPC-driven backup and point-in-time recovery are follow-ons.)
+
+---
+
+## 9) Where to go next
+
+- Operator knobs (timeouts, group commit, streaming, slow-query log): `docs/CONFIGURATION.md`
 - Specs and research notes: `docs/README.md`

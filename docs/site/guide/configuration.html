@@ -190,6 +190,43 @@ OPTIONS:
 <p>Notes:
 - CLI <code>--storage-mode</code> takes precedence for <code>serve</code>.
 - Environment variable is still used by non-serve workflows that open the engine directly.</p>
+<h3 id="operational-tuning-all-opt-in-unset-previous-behavior">Operational tuning (all opt-in; unset = previous behavior)<a class="headerlink" href="#operational-tuning-all-opt-in-unset-previous-behavior" title="Permanent link">¶</a></h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SKEINDB_STATEMENT_TIMEOUT_MS</code></td>
+<td><code>0</code> (disabled)</td>
+<td>Cooperative statement timeout. A query running longer is aborted at the next executor deadline check with a <code>statement_timeout</code> error, so a runaway query cannot hold the engine lock indefinitely. Recommended in production.</td>
+</tr>
+<tr>
+<td><code>SKEINDB_SLOW_QUERY_MS</code></td>
+<td><code>0</code> (disabled)</td>
+<td>Log any completed RPC/query at or above this duration at WARN (method, duration, rows, status, fingerprint).</td>
+</tr>
+<tr>
+<td><code>SKEINDB_WAL_SYNC_BATCH</code></td>
+<td><code>1</code></td>
+<td>WAL group commit: <code>fsync</code> the write-ahead log once every N committed transactions instead of every one. <code>1</code> = fsync every commit (strongest durability). A larger value amortizes the fsync-under-lock cost; it can lose at most <code>N-1</code> most-recent commits on a <em>power-loss</em> crash (a clean restart still recovers everything), and recovery always yields a consistent committed prefix.</td>
+</tr>
+<tr>
+<td><code>SKEINDB_STREAMING_MIN_BYTES</code></td>
+<td><code>0</code> (disabled)</td>
+<td>Query-time streaming: a segment-backed table whose on-disk file is at least this many bytes, has a primary key, and uses no embedding/oblivious features loads as a <em>streaming</em> table — its rows stay on disk and are read on demand (with a seek-based pk index for point lookups) instead of being materialized into memory. Writes materialize the table on demand.</td>
+</tr>
+<tr>
+<td><code>SKEINDB_TOKEN</code></td>
+<td>unset</td>
+<td>Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). <strong>Unset = no HTTP RPC authentication.</strong> Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration.</td>
+</tr>
+</tbody>
+</table>
 <hr />
 <h2 id="http-services">HTTP services<a class="headerlink" href="#http-services" title="Permanent link">¶</a></h2>
 <p>When enabled, the HTTP listener serves:
@@ -269,7 +306,10 @@ Current coverage:
 <li><a href="#examples">Examples</a></li>
 </ul>
 </li>
-<li><a href="#environment-variables">Environment variables</a></li>
+<li><a href="#environment-variables">Environment variables</a><ul>
+<li><a href="#operational-tuning-all-opt-in-unset-previous-behavior">Operational tuning (all opt-in; unset = previous behavior)</a></li>
+</ul>
+</li>
 <li><a href="#http-services">HTTP services</a></li>
 <li><a href="#mysql-listener">MySQL listener</a></li>
 <li><a href="#postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)</a></li>
