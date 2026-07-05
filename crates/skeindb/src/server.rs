@@ -634,7 +634,10 @@ impl InFlightQuery {
 impl QueryCoalescer {
     /// Returns (inflight, is_leader)
     fn get_or_create(&self, key: &str) -> (Arc<InFlightQuery>, bool) {
-        let mut map = self.inflight.lock().unwrap();
+        let mut map = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = map.get(key) {
             return (existing.clone(), false);
         }
@@ -644,7 +647,10 @@ impl QueryCoalescer {
     }
 
     fn finish(&self, key: &str) {
-        let mut map = self.inflight.lock().unwrap();
+        let mut map = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.remove(key);
     }
 }
@@ -1154,7 +1160,10 @@ async fn deliver_stats_snapshot_alerts(
             let identity = stats_alert_identity_key(item);
             seen_identities.insert(identity.clone());
             let first_seen = {
-                let mut delivery = state.alert_delivery.lock().unwrap();
+                let mut delivery = state
+                    .alert_delivery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *delivery.first_seen.entry(identity).or_insert(now_ms)
             };
             let severity = item
@@ -1183,7 +1192,10 @@ async fn deliver_stats_snapshot_alerts(
                 }
             }
         }
-        let mut delivery = state.alert_delivery.lock().unwrap();
+        let mut delivery = state
+            .alert_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         delivery
             .first_seen
             .retain(|key, _| seen_identities.contains(key));
@@ -1248,7 +1260,10 @@ async fn deliver_stats_snapshot_alerts(
                 let delivery_key = stats_alert_delivery_key(&route_id, target, &alert_payload);
                 seen_active.insert(delivery_key.clone());
                 let should_send = {
-                    let mut delivery = state.alert_delivery.lock().unwrap();
+                    let mut delivery = state
+                        .alert_delivery
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match delivery.active.get(&delivery_key).copied() {
                         Some(last) if !stats_alert_should_refire(now_ms, last, &config) => false,
                         _ => {
@@ -1264,7 +1279,10 @@ async fn deliver_stats_snapshot_alerts(
                 }
 
                 let Some(client) = client.as_ref() else {
-                    let mut delivery = state.alert_delivery.lock().unwrap();
+                    let mut delivery = state
+                        .alert_delivery
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     delivery.active.remove(&delivery_key);
                     route_failed = route_failed.saturating_add(1);
                     failed = failed.saturating_add(1);
@@ -1287,14 +1305,20 @@ async fn deliver_stats_snapshot_alerts(
                         delivered = delivered.saturating_add(1);
                     }
                     Ok(resp) => {
-                        let mut delivery = state.alert_delivery.lock().unwrap();
+                        let mut delivery = state
+                            .alert_delivery
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         delivery.active.remove(&delivery_key);
                         route_failed = route_failed.saturating_add(1);
                         failed = failed.saturating_add(1);
                         tracing::warn!(target = %target, status = %resp.status(), route_id = %route_id, "alert delivery failed");
                     }
                     Err(err) => {
-                        let mut delivery = state.alert_delivery.lock().unwrap();
+                        let mut delivery = state
+                            .alert_delivery
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         delivery.active.remove(&delivery_key);
                         route_failed = route_failed.saturating_add(1);
                         failed = failed.saturating_add(1);
@@ -1318,7 +1342,10 @@ async fn deliver_stats_snapshot_alerts(
     }
 
     {
-        let mut delivery = state.alert_delivery.lock().unwrap();
+        let mut delivery = state
+            .alert_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         delivery.active.retain(|key, _| seen_active.contains(key));
     }
 
@@ -17021,7 +17048,10 @@ async fn checkpoint_engine_for_shutdown(state: &AppState) -> anyhow::Result<()> 
 fn mark_local_node_offline(state: &AppState) -> anyhow::Result<()> {
     let now = now_unix_ms_u64();
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let local_node_id = cluster.local_node_id.clone();
         let Some(local_node) = cluster
             .nodes
@@ -17039,7 +17069,10 @@ fn mark_local_node_offline(state: &AppState) -> anyhow::Result<()> {
 
 async fn notify_cluster_node_leave(state: &AppState) -> anyhow::Result<()> {
     let (enabled, local_node_id, targets) = {
-        let cluster = state.cluster.lock().unwrap();
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
             cluster.enabled,
             cluster.local_node_id.clone(),
@@ -17167,7 +17200,11 @@ async fn prepared_get_handler(
         return match res {
             Ok(r) => {
                 if r.not_modified {
-                    state.counters.lock().unwrap().etag_hits += 1;
+                    state
+                        .counters
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .etag_hits += 1;
                     let mut resp = StatusCode::NOT_MODIFIED.into_response();
                     if let Some(etag) = r.etag.as_ref() {
                         if let Ok(v) = etag.parse() {
@@ -17207,7 +17244,11 @@ async fn prepared_get_handler(
     let (inflight, is_leader) = state.coalesce.get_or_create(&query_id);
 
     let res: Result<crate::engine::QuerySelectResult, String> = if is_leader {
-        state.counters.lock().unwrap().coalesce_leader += 1;
+        state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .coalesce_leader += 1;
         let eng = state.engine.read().await;
         let out = eng
             .query_select(
@@ -17222,15 +17263,27 @@ async fn prepared_get_handler(
                 None,
             )
             .map_err(|e| e.to_string());
-        *inflight.result.lock().unwrap() = Some(out.clone());
+        *inflight
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(out.clone());
         inflight.notify.notify_waiters();
         state.coalesce.finish(&query_id);
         out
     } else {
         // Joiner: wait for leader (or return immediately if already completed).
-        state.counters.lock().unwrap().coalesce_follower += 1;
+        state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .coalesce_follower += 1;
         loop {
-            if let Some(r) = inflight.result.lock().unwrap().as_ref() {
+            if let Some(r) = inflight
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
                 break r.clone();
             }
             inflight.notify.notified().await;
@@ -17240,7 +17293,11 @@ async fn prepared_get_handler(
     match res {
         Ok(r) => {
             if r.not_modified {
-                state.counters.lock().unwrap().etag_hits += 1;
+                state
+                    .counters
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .etag_hits += 1;
                 let mut resp = StatusCode::NOT_MODIFIED.into_response();
                 if let Some(etag) = r.etag.as_ref() {
                     if let Ok(v) = etag.parse() {
@@ -17569,7 +17626,10 @@ async fn cdc_sse_handler(
     };
 
     let start_offset = {
-        let subs = state.subs.lock().unwrap();
+        let subs = state
+            .subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(sub) = subs.subs.get(&sub_id) else {
             return (StatusCode::NOT_FOUND, "unknown sub_id").into_response();
         };
@@ -17591,7 +17651,10 @@ async fn cdc_sse_handler(
         loop {
             let batch = {
                 let eng = stream_state.engine.read().await;
-                let subs = stream_state.subs.lock().unwrap();
+                let subs = stream_state
+                    .subs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 eng.cdc_poll(&subs, &stream_sub_id, cursor, CDC_SSE_BATCH_LIMIT)
             };
 
@@ -17667,7 +17730,10 @@ async fn cdc_ws_session(
     loop {
         let batch = {
             let eng = state.engine.read().await;
-            let subs = state.subs.lock().unwrap();
+            let subs = state
+                .subs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             eng.cdc_poll(&subs, &stream_sub_id, cursor, CDC_SSE_BATCH_LIMIT)
         };
 
@@ -17735,7 +17801,10 @@ async fn cdc_ws_handler(
     };
 
     let start_offset = {
-        let subs = state.subs.lock().unwrap();
+        let subs = state
+            .subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(sub) = subs.subs.get(&sub_id) else {
             return (StatusCode::NOT_FOUND, "unknown sub_id").into_response();
         };
@@ -17758,7 +17827,10 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             eng.runtime_storage_metrics(),
         )
     };
-    let counters = state.counters.lock().unwrap();
+    let counters = state
+        .counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let mut body = String::new();
     body.push_str("# HELP skeindb_uptime_seconds Process uptime in seconds\n");
@@ -18085,7 +18157,10 @@ fn query_latency_histogram_json(samples: &[u64]) -> Value {
 /// Record a MySQL feature flag hit for telemetry (T110).
 fn observe_mysql_feature(state: &AppState, feature: &str, category: &str) {
     let now_ms = now_unix_ms_u64();
-    let mut counters = state.counters.lock().unwrap();
+    let mut counters = state
+        .counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let entry = counters
         .feature_flags
         .entry(feature.to_string())
@@ -18290,7 +18365,10 @@ fn observe_workload_features(state: &AppState, lower: &str) {
     if features.is_empty() {
         return;
     }
-    let mut counters = state.counters.lock().unwrap();
+    let mut counters = state
+        .counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for key in features {
         let entry = counters.workload_features.entry(key).or_default();
         entry.frequency += 1;
@@ -18495,7 +18573,10 @@ fn observe_rpc_call(
         }
     }
 
-    let mut counters = state.counters.lock().unwrap();
+    let mut counters = state
+        .counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let agg = counters
         .query_stats
         .entry(fingerprint.clone())
@@ -18548,7 +18629,10 @@ fn stats_top_queries(state: &AppState, params: Option<Value>) -> Result<Value, R
         .unwrap_or("total_ms");
 
     let mut rows = {
-        let counters = state.counters.lock().unwrap();
+        let counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters
             .query_stats
             .iter()
@@ -18650,7 +18734,10 @@ fn stats_query_fingerprint_latency(
         .map(ToOwned::to_owned);
 
     let mut rows = {
-        let counters = state.counters.lock().unwrap();
+        let counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters
             .query_stats
             .iter()
@@ -18739,7 +18826,10 @@ fn stats_slow_queries(state: &AppState, params: Option<Value>) -> Result<Value, 
         .unwrap_or(200);
 
     let queries = {
-        let counters = state.counters.lock().unwrap();
+        let counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters
             .query_log
             .iter()
@@ -18796,7 +18886,10 @@ pub(crate) async fn handle_rpc(
 
     // Bump counters
     {
-        let mut c = state.counters.lock().unwrap();
+        let mut c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         c.total_rpc += 1;
         *c.per_method.entry(req.method.clone()).or_insert(0) += 1;
     }
@@ -19346,7 +19439,7 @@ pub(crate) async fn handle_rpc(
                 // --------------------
                 "telemetry.feature_flags" => {
                     let p: TelemetryFeatureFlagsParams = parse_params(params.clone())?;
-                    let counters = state.counters.lock().unwrap();
+                    let counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mut flags: Vec<skeindb_skeinql::methods::FeatureFlagEntry> = counters
                         .feature_flags
                         .iter()
@@ -19383,7 +19476,7 @@ pub(crate) async fn handle_rpc(
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
                 "telemetry.workload_features" => {
-                    let counters = state.counters.lock().unwrap();
+                    let counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let limit = params
                         .as_ref()
                         .and_then(|p| p.get("limit"))
@@ -19434,7 +19527,7 @@ pub(crate) async fn handle_rpc(
                 "plan_cache.status" => {
                     let _p: PlanCacheStatusParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let counters = state.counters.lock().unwrap();
+                    let counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng.plan_cache_status(
                         counters.plan_cache_hits,
                         counters.plan_cache_misses,
@@ -19455,8 +19548,8 @@ pub(crate) async fn handle_rpc(
                 // stats.coalescing (Phase 16)
                 // --------------------
                 "stats.coalescing" => {
-                    let counters = state.counters.lock().unwrap();
-                    let in_flight_now = state.coalesce.inflight.lock().unwrap().len() as u64;
+                    let counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let in_flight_now = state.coalesce.inflight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() as u64;
                     let r = skeindb_skeinql::methods::StatsCoalescingResult {
                         total_coalesced: counters.coalesce_leader + counters.coalesce_follower,
                         total_leader: counters.coalesce_leader,
@@ -19707,9 +19800,9 @@ pub(crate) async fn handle_rpc(
                         let (in_flight, is_leader) = state.coalesce.get_or_create(&key);
 
                         if !is_leader {
-                            state.counters.lock().unwrap().coalesce_follower += 1;
+                            state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner).coalesce_follower += 1;
                             let res = loop {
-                                if let Some(res) = in_flight.result.lock().unwrap().clone() {
+                                if let Some(res) = in_flight.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
                                     break res;
                                 }
                                 in_flight.notify.notified().await;
@@ -19718,7 +19811,7 @@ pub(crate) async fn handle_rpc(
                             Ok(serde_json::to_value(r)
                                 .map_err(|e| RpcError::new("internal", e.to_string()))?)
                         } else {
-                            state.counters.lock().unwrap().coalesce_leader += 1;
+                            state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner).coalesce_leader += 1;
                             let res: Result<crate::engine::QuerySelectResult, String> = {
                                 let eng = state.engine.read().await;
                                 eng.query_patch(
@@ -19734,7 +19827,7 @@ pub(crate) async fn handle_rpc(
                                 .map_err(|e| e.to_string())
                             };
 
-                            *in_flight.result.lock().unwrap() = Some(res.clone());
+                            *in_flight.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(res.clone());
                             in_flight.notify.notify_waiters();
                             state.coalesce.finish(&key);
 
@@ -19963,7 +20056,7 @@ pub(crate) async fn handle_rpc(
                 "ai.autoparam.metrics" => {
                     let p: AiAutoparamMetricsParams = parse_params(params.clone())?;
                     let (plan_cache_hits, plan_cache_misses) = {
-                        let counters = state.counters.lock().unwrap();
+                        let counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         (counters.plan_cache_hits, counters.plan_cache_misses)
                     };
                     let eng = state.engine.read().await;
@@ -20114,7 +20207,7 @@ pub(crate) async fn handle_rpc(
                                 "maintenance.compaction.set_policy requires an object params",
                             )
                         })?;
-                    let current_settings = state.settings.lock().unwrap().clone();
+                    let current_settings = state.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
                     let current_config = compaction_scheduler_config(&current_settings);
                     let mut patch = serde_json::Map::new();
 
@@ -20443,7 +20536,7 @@ pub(crate) async fn handle_rpc(
                     let horizon_ms = maintenance_history_params_horizon(state, params.as_ref())?;
                     let eng = state.engine.read().await;
                     let report = eng.maintenance_history_status(horizon_ms);
-                    let settings = state.settings.lock().unwrap();
+                    let settings = state.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let enabled = settings
                         .get("history.retention.enabled")
                         .and_then(|v| v.as_bool())
@@ -20505,7 +20598,7 @@ pub(crate) async fn handle_rpc(
                         ));
                     }
                     let _ = handle_settings_set(state, Some(Value::Object(patch)))?;
-                    let settings = state.settings.lock().unwrap();
+                    let settings = state.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let enabled = settings
                         .get("history.retention.enabled")
                         .and_then(|v| v.as_bool())
@@ -20813,7 +20906,7 @@ pub(crate) async fn handle_rpc(
                     )
                     .map_err(to_rpc_error)?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng
                         .cdc_subscribe_table_with_options(&mut subs, &p.db, &p.table, options)
                         .map_err(to_rpc_error)?;
@@ -20838,7 +20931,7 @@ pub(crate) async fn handle_rpc(
                     )
                     .map_err(to_rpc_error)?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng
                         .cdc_subscribe_query_with_options(&mut subs, &p.query_id, &p.args, options)
                         .map_err(to_rpc_error)?;
@@ -20854,7 +20947,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.poll" => {
                     let p: CdcPollParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let subs = state.subs.lock().unwrap();
+                    let subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let lim = p.limit.unwrap_or(200);
                     let r = eng
                         .cdc_poll(&subs, &p.sub_id, p.from_offset, lim)
@@ -20865,7 +20958,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.ack" => {
                     let p: CdcAckParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng
                         .cdc_ack(&mut subs, &p.sub_id, p.offset)
                         .map_err(to_rpc_error)?;
@@ -20875,7 +20968,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.sink_drain" => {
                     let p: CdcSinkDrainParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let lim = p.limit.unwrap_or(500);
                     let r = eng
                         .cdc_sink_drain(&mut subs, &p.sub_id, lim)
@@ -20886,7 +20979,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.pause" => {
                     let p: CdcPauseParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng.cdc_pause(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
@@ -20894,7 +20987,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.resume" => {
                     let p: CdcResumeParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng.cdc_resume(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
@@ -20902,7 +20995,7 @@ pub(crate) async fn handle_rpc(
                 "cdc.close" => {
                     let p: CdcCloseParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
-                    let mut subs = state.subs.lock().unwrap();
+                    let mut subs = state.subs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let r = eng.cdc_close(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
@@ -21089,7 +21182,11 @@ fn enforce_cluster_write_guard(
         return Ok(());
     }
     let (db, table) = write_target_from_params(method, params);
-    let cluster = state.cluster.lock().unwrap().clone();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if !cluster.enabled {
         return Ok(());
     }
@@ -21121,7 +21218,10 @@ async fn replicate_write_to_cluster(
     let now = now_unix_ms_u64();
     let (db, table) = write_target_from_params(method, Some(&params));
     let (targets, enabled) = {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let enabled = cluster.enabled;
         cluster.replication.last_updated_ms = now;
         (
@@ -21184,7 +21284,10 @@ async fn replicate_write_to_cluster(
     }
 
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.replication.shipped_ops = cluster.replication.shipped_ops.saturating_add(shipped);
         cluster.replication.failed_ops = cluster.replication.failed_ops.saturating_add(failed);
         if failed > 0 {
@@ -21265,13 +21368,19 @@ fn merge_cluster_causality(a: &CausalityToken, b: &CausalityToken) -> CausalityT
 
 fn note_applied_replication(state: &AppState, causality: Option<CausalityToken>) {
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.replication.applied_ops = cluster.replication.applied_ops.saturating_add(1);
         cluster.replication.last_updated_ms = now_unix_ms_u64();
     }
 
     if let Some(token) = causality {
-        let mut current = state.replication_causality.lock().unwrap();
+        let mut current = state
+            .replication_causality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = Some(match current.as_ref() {
             Some(existing) => merge_cluster_causality(existing, &token),
             None => token,
@@ -21282,8 +21391,17 @@ fn note_applied_replication(state: &AppState, causality: Option<CausalityToken>)
 }
 
 fn cluster_replication_status_json(state: &AppState) -> Value {
-    let replication = state.cluster.lock().unwrap().replication.clone();
-    let causality = state.replication_causality.lock().unwrap().clone();
+    let replication = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replication
+        .clone();
+    let causality = state
+        .replication_causality
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let mut value = serde_json::to_value(replication).unwrap_or_else(|_| serde_json::json!({}));
     if let (Some(obj), Some(token)) = (value.as_object_mut(), causality) {
         obj.insert(
@@ -21295,7 +21413,11 @@ fn cluster_replication_status_json(state: &AppState) -> Value {
 }
 
 fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
-    let cluster = state.cluster.lock().unwrap().clone();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let methods = vec![
         "cluster.status",
         "cluster.nodes",
@@ -21322,7 +21444,11 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
 }
 
 fn cluster_nodes(state: &AppState, params: Option<ClusterNodesParams>) -> Result<Value, RpcError> {
-    let cluster = state.cluster.lock().unwrap().clone();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let role = params.and_then(|p| p.role);
     let nodes: Vec<_> = cluster
         .nodes
@@ -21354,7 +21480,10 @@ fn cluster_join_token_create(
     let token = format!("join_{}_{}", now, seq);
 
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.enabled = true;
         cluster.cleanup_join_tokens(now);
         cluster.join_tokens.push(ClusterJoinToken {
@@ -21378,7 +21507,10 @@ fn cluster_join_token_create(
 fn cluster_node_join(state: &AppState, params: ClusterNodeJoinParams) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     let node = {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.enabled = true;
         cluster.cleanup_join_tokens(now);
 
@@ -21420,7 +21552,10 @@ fn cluster_node_join(state: &AppState, params: ClusterNodeJoinParams) -> Result<
         }
     };
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
-    let cluster = state.cluster.lock().unwrap();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(serde_json::json!({
         "ok": true,
         "cluster_id": cluster.cluster_id,
@@ -21434,7 +21569,10 @@ fn cluster_node_remove(
 ) -> Result<Value, RpcError> {
     let mut new_primary = None;
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let local_node_id = cluster.local_node_id.clone();
         if params.node_id == cluster.local_node_id && !params.force.unwrap_or(false) {
             return Err(RpcError::new(
@@ -21489,7 +21627,10 @@ fn cluster_node_leave(state: &AppState, params: ClusterNodeLeaveParams) -> Resul
     let now = now_unix_ms_u64();
     let mut new_primary = None;
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut found = false;
         for node in cluster.nodes.iter_mut() {
             if node.node_id == params.node_id {
@@ -21560,7 +21701,10 @@ fn cluster_replica_promote(
 ) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !cluster.nodes.iter().any(|n| n.node_id == params.node_id) {
             return Err(RpcError::new("not_found", "node not found"));
         }
@@ -21604,7 +21748,10 @@ fn cluster_shard_create(
 ) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     let shard = {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.enabled = true;
         let shard_id = params.shard_id.clone().unwrap_or_else(|| {
             format!(
@@ -21917,7 +22064,14 @@ async fn resolve_shard_object_manifest(
     db: &str,
     table: Option<&str>,
 ) -> Result<ShardObjectManifest, RpcError> {
-    let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+    let local_node_id = {
+        state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .local_node_id
+            .clone()
+    };
     if source_node_id == local_node_id {
         let eng = state.engine.read().await;
         let manifest = eng.shard_object_manifest(db, table).map_err(|err| {
@@ -21954,7 +22108,14 @@ async fn execute_destination_objects_pull(
     source_rpc_url: &str,
     missing_ids: &[String],
 ) -> Result<Value, RpcError> {
-    let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+    let local_node_id = {
+        state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .local_node_id
+            .clone()
+    };
     if missing_ids.is_empty() {
         return Ok(serde_json::json!({
             "ok": true,
@@ -21999,7 +22160,10 @@ async fn cluster_shard_move(
     let now = now_unix_ms_u64();
     let dry_run = params.dry_run.unwrap_or(false);
     let (preview, source_node_id, source_rpc_url, destination_rpc_url) = {
-        let cluster = state.cluster.lock().unwrap();
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let destination_rpc_url = cluster
             .nodes
             .iter()
@@ -22048,7 +22212,14 @@ async fn cluster_shard_move(
         if source_node_id == params.to_node_id || manifest.ids.is_empty() {
             (manifest.ids.clone(), Vec::new())
         } else {
-            let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+            let local_node_id = {
+                state
+                    .cluster
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .local_node_id
+                    .clone()
+            };
             let need_result = if params.to_node_id == local_node_id {
                 objects_need(state, manifest.ids.clone()).await?
             } else {
@@ -22111,7 +22282,10 @@ async fn cluster_shard_move(
 
     if !dry_run {
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let shard = cluster
                 .shards
                 .iter_mut()
@@ -22155,7 +22329,10 @@ async fn cluster_shard_rebalance(
     let dry_run = params.dry_run.unwrap_or(false);
     let mut plans = Vec::<(String, String, String)>::new();
     {
-        let cluster = state.cluster.lock().unwrap();
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let active_nodes: Vec<String> = cluster
             .nodes
             .iter()
@@ -22397,7 +22574,10 @@ async fn fetch_remote_object_batch(
 /// counters. Exposed via `cluster.replication_stats` and embedded into
 /// `stats.snapshot` under `cluster.replication.objects`.
 fn cluster_replication_stats_json(state: &AppState) -> Value {
-    let c = state.counters.lock().unwrap();
+    let c = state
+        .counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let r = &c.replication_objects;
     let need_total = r.need_hits.saturating_add(r.need_misses);
     let hit_rate = if need_total == 0 {
@@ -22453,7 +22633,10 @@ async fn objects_need(state: &AppState, ids: Vec<String>) -> Result<Value, RpcEr
     drop(eng);
     // T167: record CAS replication object-pull metrics.
     {
-        let mut c = state.counters.lock().unwrap();
+        let mut c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = &mut c.replication_objects;
         r.need_calls = r.need_calls.saturating_add(1);
         r.need_ids_total = r.need_ids_total.saturating_add(ids.len() as u64);
@@ -22487,7 +22670,10 @@ async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, Rp
     drop(vs);
     drop(eng);
     {
-        let mut c = state.counters.lock().unwrap();
+        let mut c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = &mut c.replication_objects;
         r.missing_calls = r.missing_calls.saturating_add(1);
         r.missing_ids_total = r.missing_ids_total.saturating_add(ids.len() as u64);
@@ -22533,7 +22719,10 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
     drop(eng);
     let objects_served = objects.len() as u64;
     {
-        let mut c = state.counters.lock().unwrap();
+        let mut c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = &mut c.replication_objects;
         r.fetch_calls = r.fetch_calls.saturating_add(1);
         r.fetch_ids_total = r.fetch_ids_total.saturating_add(ids.len() as u64);
@@ -22792,7 +22981,10 @@ fn cluster_route_query(
     table: Option<String>,
     read_only: bool,
 ) -> Result<Value, RpcError> {
-    let cluster = state.cluster.lock().unwrap();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !cluster.enabled {
         return Ok(serde_json::json!({
             "ok": true,
@@ -23341,7 +23533,10 @@ fn maintenance_history_params_horizon(
             return Ok(Some(ms));
         }
     }
-    let settings = state.settings.lock().unwrap();
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let enabled = settings
         .get("history.retention.enabled")
         .and_then(|v| v.as_bool())
@@ -32695,7 +32890,11 @@ fn collect_compaction_runtime(
     now_ms: u64,
     record_sample: bool,
 ) -> CompactionRuntimeSnapshot {
-    let settings = state.settings.lock().unwrap().clone();
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let config = compaction_scheduler_config(&settings);
     let l0 = collect_l0_segment_stats(&state.data_dir);
     let levels = classify_compaction_levels(
@@ -32734,7 +32933,10 @@ fn collect_compaction_runtime(
 
     let recent_window_start_ms = now_ms.saturating_sub(COMPACTION_RECENT_WINDOW_MS);
     let recent_queries = {
-        let counters = state.counters.lock().unwrap();
+        let counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters
             .query_log
             .iter()
@@ -32776,7 +32978,10 @@ fn collect_compaction_runtime(
     };
 
     let (stall_rate, pressure_rate, pressure_events_total, last_pressure_event, worker_stats) = {
-        let mut counters = state.counters.lock().unwrap();
+        let mut counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if record_sample {
             maybe_record_compaction_sample(
                 &mut counters,
@@ -33256,7 +33461,10 @@ async fn run_compaction_worker_task(
         planned.task.table
     );
     {
-        let mut counters = state.counters.lock().unwrap();
+        let mut counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.compaction_worker.active_task = Some(task_name.clone());
         counters.compaction_worker.last_error = None;
     }
@@ -33303,7 +33511,10 @@ async fn run_compaction_worker_task(
 
     let bytes_reclaimed = before_bytes.saturating_sub(after_bytes);
     {
-        let mut counters = state.counters.lock().unwrap();
+        let mut counters = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.compaction_worker.active_task = None;
         counters.compaction_worker.runs = counters.compaction_worker.runs.saturating_add(1);
         counters.compaction_worker.last_run_ms = now_ms;
@@ -33373,7 +33584,7 @@ async fn run_compaction_worker_loop(state: AppState, mut shutdown_rx: watch::Rec
             }
             _ = ticker.tick() => {
                 if let Err(err) = run_compaction_worker_once(&state).await {
-                    let mut counters = state.counters.lock().unwrap();
+                    let mut counters = state.counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     counters.compaction_worker.active_task = None;
                     counters.compaction_worker.last_error = Some(err.to_string());
                     tracing::warn!(?err, "compaction worker tick failed");
@@ -33413,7 +33624,10 @@ async fn stats_snapshot(state: &AppState) -> Value {
     let now_ms = now_unix_ms_u64();
     let (storage, value_lookup, learned_index, cdc) = {
         let eng = state.engine.read().await;
-        let subs = state.subs.lock().unwrap();
+        let subs = state
+            .subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
             eng.storage_stats_snapshot(),
             eng.value_lookup_distribution_snapshot(),
@@ -33424,16 +33638,26 @@ async fn stats_snapshot(state: &AppState) -> Value {
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
     let compaction = compaction_runtime_json(&compaction_runtime);
     let alert_routes = {
-        let settings = state.settings.lock().unwrap();
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         stats_alert_routes(&settings)
     };
     let escalation_config = {
-        let settings = state.settings.lock().unwrap();
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         stats_alert_escalation_config(&settings)
     };
     let mut alerts = stats_snapshot_alerts(&compaction_runtime, &cdc, &alert_routes);
     deliver_stats_snapshot_alerts(state, &mut alerts, &alert_routes, escalation_config).await;
-    let cluster = state.cluster.lock().unwrap().clone();
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let (
         total_rpc,
         fingerprint_count,
@@ -33444,7 +33668,10 @@ async fn stats_snapshot(state: &AppState) -> Value {
         plan_cache_hits,
         plan_cache_misses,
     ) = {
-        let c = state.counters.lock().unwrap();
+        let c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let total = c.total_rpc;
         let qps = if uptime_s == 0 {
             total as f64
@@ -33462,7 +33689,11 @@ async fn stats_snapshot(state: &AppState) -> Value {
             c.plan_cache_misses,
         )
     };
-    let open_txns = state.txns.lock().unwrap().len() as u64;
+    let open_txns = state
+        .txns
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len() as u64;
     let tps = compaction_runtime
         .writes
         .ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0);
@@ -33562,7 +33793,10 @@ fn handle_settings_get(state: &AppState, params: Option<Value>) -> Result<Value,
         .and_then(|v| v.as_array())
         .ok_or_else(|| RpcError::new("invalid_request", "settings.get requires params.keys[]"))?;
 
-    let settings = state.settings.lock().unwrap();
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut out = serde_json::Map::new();
     for k in keys {
         if let Some(ks) = k.as_str() {
@@ -33575,7 +33809,10 @@ fn handle_settings_get(state: &AppState, params: Option<Value>) -> Result<Value,
 }
 
 fn handle_settings_list(state: &AppState) -> Result<Value, RpcError> {
-    let settings = state.settings.lock().unwrap();
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut keys: Vec<String> = settings.keys().cloned().collect();
     keys.sort();
     let mut out = serde_json::Map::new();
@@ -33593,7 +33830,10 @@ fn handle_settings_set(state: &AppState, params: Option<Value>) -> Result<Value,
     })?;
 
     {
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (k, v) in obj.iter() {
             settings.insert(k.clone(), v.clone());
         }
@@ -33604,11 +33844,17 @@ fn handle_settings_set(state: &AppState, params: Option<Value>) -> Result<Value,
             RpcError::new("invalid_request", format!("invalid cluster state: {}", e))
         })?;
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *cluster = parsed;
         }
     } else if let Some(v) = obj.get("cluster.enabled").and_then(|v| v.as_bool()) {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.enabled = v;
     }
 
@@ -33660,7 +33906,10 @@ fn load_settings(state: &AppState) -> anyhow::Result<()> {
     let bytes = std::fs::read(&path)?;
     let json: Value = serde_json::from_slice(&bytes)?;
     if let Some(obj) = json.as_object() {
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *settings = obj.clone();
     }
     Ok(())
@@ -33668,19 +33917,28 @@ fn load_settings(state: &AppState) -> anyhow::Result<()> {
 
 fn load_cluster_state(state: &AppState) -> anyhow::Result<()> {
     let loaded = {
-        let settings = state.settings.lock().unwrap();
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         settings.get(CLUSTER_STATE_KEY).cloned()
     };
     if let Some(v) = loaded {
         if let Ok(parsed) = serde_json::from_value::<ClusterStateModel>(v) {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *cluster = parsed;
         }
     }
 
     let now = now_unix_ms_u64();
     {
-        let mut cluster = state.cluster.lock().unwrap();
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.cleanup_join_tokens(now);
         let local_node_id = cluster.local_node_id.clone();
         let primary_node_id = cluster.primary_node_id.clone();
@@ -33713,11 +33971,17 @@ fn load_cluster_state(state: &AppState) -> anyhow::Result<()> {
 
 fn persist_cluster_state(state: &AppState) -> anyhow::Result<()> {
     let (cluster_value, enabled) = {
-        let cluster = state.cluster.lock().unwrap();
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (serde_json::to_value(&*cluster)?, cluster.enabled)
     };
     {
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         settings.insert(CLUSTER_STATE_KEY.to_string(), cluster_value);
         settings.insert("cluster.enabled".to_string(), Value::Bool(enabled));
     }
@@ -33727,7 +33991,10 @@ fn persist_cluster_state(state: &AppState) -> anyhow::Result<()> {
 
 fn save_settings(state: &AppState) -> anyhow::Result<()> {
     let path = settings_path(state);
-    let settings = state.settings.lock().unwrap();
+    let settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let bytes = serde_json::to_vec_pretty(&Value::Object(settings.clone()))?;
     std::fs::write(&path, bytes)?;
     Ok(())
@@ -34241,7 +34508,10 @@ mod tests {
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default();
-                        seen_fetch_batches.lock().unwrap().push(ids);
+                        seen_fetch_batches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(ids);
                     }
                     rpc_handler(State(state), headers, Json(req)).await
                 }
@@ -43680,7 +43950,10 @@ mod tests {
         let now_ms = now_unix_ms_u64();
 
         {
-            let mut counters = state.counters.lock().unwrap();
+            let mut counters = state
+                .counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.total_rpc = 5;
             counters.query_log.extend([
                 QuerySample {
@@ -43976,7 +44249,10 @@ mod tests {
 
         let now_ms = now_unix_ms_u64();
         {
-            let mut counters = state.counters.lock().unwrap();
+            let mut counters = state
+                .counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Drop the real insert timings logged above so the query-latency alert is
             // driven solely by the controlled samples below; otherwise a slow insert
             // (the WAL fsyncs each commit, which is slow under parallel test load) would
@@ -44174,7 +44450,12 @@ mod tests {
         // real insert timings first so no incidental `query_tail_latency` alert fires —
         // the WAL fsyncs each commit, which can be slow enough under parallel test load to
         // cross the warning threshold and route to the telemetry route.
-        state.counters.lock().unwrap().query_log.clear();
+        state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .query_log
+            .clear();
 
         let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
         assert!(stats.ok);
@@ -44275,7 +44556,10 @@ mod tests {
             post(move |Json(payload): Json<Value>| {
                 let payloads_ref = payloads_ref.clone();
                 async move {
-                    payloads_ref.lock().unwrap().push(payload);
+                    payloads_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(payload);
                     Json(serde_json::json!({"ok": true}))
                 }
             }),
@@ -44328,7 +44612,12 @@ mod tests {
         // Clear the real insert timings so only the intended CDC alert is delivered; the
         // WAL fsyncs each commit, which under parallel test load can be slow enough to
         // raise an incidental `query_tail_latency` alert and an extra delivery.
-        state.counters.lock().unwrap().query_log.clear();
+        state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .query_log
+            .clear();
 
         let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
         assert!(first.ok);
@@ -44341,8 +44630,17 @@ mod tests {
             first_alerts["routing"]["delivery"]["suppressed"].as_u64(),
             Some(0)
         );
-        assert_eq!(seen_payloads.lock().unwrap().len(), 1);
-        let delivered_payload = seen_payloads.lock().unwrap()[0].clone();
+        assert_eq!(
+            seen_payloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+        let delivered_payload = seen_payloads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+            .clone();
         assert_eq!(
             delivered_payload["route"]["id"].as_str(),
             Some("ops-webhook")
@@ -44363,7 +44661,13 @@ mod tests {
             second_alerts["routing"]["delivery"]["suppressed"].as_u64(),
             Some(1)
         );
-        assert_eq!(seen_payloads.lock().unwrap().len(), 1);
+        assert_eq!(
+            seen_payloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
 
         remote.abort();
         std::fs::remove_dir_all(&dir).ok();
@@ -44489,7 +44793,10 @@ mod tests {
             post(move |Json(payload): Json<Value>| {
                 let payloads_ref = payloads_ref.clone();
                 async move {
-                    payloads_ref.lock().unwrap().push(payload);
+                    payloads_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(payload);
                     Json(serde_json::json!({"ok": true}))
                 }
             }),
@@ -44543,7 +44850,12 @@ mod tests {
         // Clear the real insert timings so only the intended CDC alert is delivered; the
         // WAL fsyncs each commit, which under parallel test load can be slow enough to
         // raise an incidental `query_tail_latency` alert and an extra delivery.
-        state.counters.lock().unwrap().query_log.clear();
+        state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .query_log
+            .clear();
 
         let first = call_rpc(&state, "stats.snapshot", serde_json::json!({})).await;
         assert!(first.ok);
@@ -44564,7 +44876,13 @@ mod tests {
             Some(1),
             "alert should re-fire after the cooldown elapses"
         );
-        assert_eq!(seen_payloads.lock().unwrap().len(), 2);
+        assert_eq!(
+            seen_payloads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2
+        );
 
         remote.abort();
         std::fs::remove_dir_all(&dir).ok();
@@ -44644,7 +44962,10 @@ mod tests {
         let now_ms = now_unix_ms_u64();
 
         {
-            let mut counters = state.counters.lock().unwrap();
+            let mut counters = state
+                .counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut agg = QueryStatsAgg::new("query.select".to_string());
             for sample in [4u64, 9, 15, 60, 500] {
                 agg.record(sample, 200, true, 1, now_ms);
@@ -46440,7 +46761,10 @@ mod tests {
             spawn_rpc_test_server(dest_state.clone(), dest_fetches.clone()).await?;
 
         {
-            let mut cluster = source_state.cluster.lock().unwrap();
+            let mut cluster = source_state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cluster.enabled = true;
             if let Some(local) = cluster.nodes.iter_mut().find(|n| n.node_id == "node-test") {
                 local.rpc_url = source_url.clone();
@@ -46666,9 +46990,18 @@ mod tests {
                         .get(REPLICATION_HEADER)
                         .and_then(|v| v.to_str().ok())
                         .map(|v| v.to_string());
-                    methods_ref.lock().unwrap().push(method);
-                    nodes_ref.lock().unwrap().push(node_id);
-                    header_ref.lock().unwrap().push(replication);
+                    methods_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(method);
+                    nodes_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(node_id);
+                    header_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(replication);
                     Json(serde_json::json!({
                         "skeinql": SKEINQL_VERSION,
                         "ok": true,
@@ -46685,7 +47018,10 @@ mod tests {
         });
 
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cluster.enabled = true;
             cluster.nodes.push(ClusterNode {
                 node_id: "peer-a".to_string(),
@@ -46702,12 +47038,24 @@ mod tests {
         mock.abort();
 
         assert_eq!(
-            seen_methods.lock().unwrap().as_slice(),
+            seen_methods
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &["cluster.node.leave"]
         );
-        assert_eq!(seen_nodes.lock().unwrap().as_slice(), &["node-test"]);
         assert_eq!(
-            seen_header.lock().unwrap().as_slice(),
+            seen_nodes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &["node-test"]
+        );
+        assert_eq!(
+            seen_header
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
             &[Some("1".to_string())]
         );
 
@@ -46750,7 +47098,10 @@ mod tests {
                         .get(REPLICATION_CAUSALITY_HEADER)
                         .and_then(|v| v.to_str().ok())
                         .map(|v| v.to_string());
-                    causality_ref.lock().unwrap().push(causality);
+                    causality_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(causality);
                     Json(serde_json::json!({
                         "skeinql": SKEINQL_VERSION,
                         "ok": true,
@@ -46767,7 +47118,10 @@ mod tests {
         });
 
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cluster.enabled = true;
             cluster.nodes.push(ClusterNode {
                 node_id: "peer-a".to_string(),
@@ -46965,7 +47319,10 @@ mod tests {
         assert_eq!(result["remote_missing"].as_array().unwrap().len(), 0);
         assert_eq!(result["verification_failed"].as_array().unwrap().len(), 0);
         assert_eq!(
-            seen_fetch_batches.lock().unwrap().clone(),
+            seen_fetch_batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             vec![
                 vec![remote_hex[0].clone(), remote_hex[1].clone()],
                 vec![remote_hex[2].clone()],
@@ -47042,7 +47399,10 @@ mod tests {
         assert_eq!(result["stored"].as_u64().unwrap(), 2);
         assert_eq!(result["verification_failed"].as_array().unwrap().len(), 0);
         assert_eq!(
-            seen_fetch_batches.lock().unwrap().clone(),
+            seen_fetch_batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             vec![vec![value_id_to_hex(&delta_id)], vec![base_hex]]
         );
 
@@ -47263,7 +47623,10 @@ mod tests {
 
         // Enable clustering and add a replica.
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cluster.enabled = true;
             cluster.nodes.push(ClusterNode {
                 node_id: "replica-1".to_string(),
@@ -47300,7 +47663,10 @@ mod tests {
 
         // Make the local node a replica in an active cluster.
         {
-            let mut cluster = state.cluster.lock().unwrap();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cluster.enabled = true;
             cluster.local_node_id = "replica-local".to_string();
             cluster.primary_node_id = "primary-remote".to_string();
