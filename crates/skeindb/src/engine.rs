@@ -3651,6 +3651,12 @@ impl Engine {
         };
         let row_schema_version = self.schema_version_for(&table_key);
 
+        // Only advancing an auto-increment counter changes the *durable* catalog on an insert;
+        // the per-insert table_version bump is an in-memory index-staleness marker that is
+        // rebuilt on load if unpersisted. Persist the catalog (a full fsync) only when the
+        // counter actually moved — this removes an fsync from every non-auto-increment insert.
+        let mut catalog_persist_needed = false;
+
         {
             let (schema, tdata) = self.get_table_mut(table)?;
             rebuild_secondary_indexes_if_stale(schema, tdata)?;
@@ -3718,6 +3724,8 @@ impl Engine {
 
             bump_table_version(schema);
             set_secondary_indexes_built_version(tdata, schema.table_version)?;
+            catalog_persist_needed =
+                affected > 0 && schema.columns.iter().any(|c| c.auto_increment);
         }
 
         if !intern_items.is_empty() {
@@ -3744,7 +3752,9 @@ impl Engine {
                 Some(after),
             );
         }
-        self.persist_catalog()?;
+        if catalog_persist_needed {
+            self.persist_catalog()?;
+        }
         // Durably log the row redo records before writing the snapshot, so a crash
         // between here and the snapshot write is recoverable on the next open.
         self.wal_log_rows(&wal_records)?;
@@ -32622,6 +32632,88 @@ mod tests {
             "group-committed WAL must recover all commits on a clean restart"
         );
         Ok(())
+    }
+
+    // In-process concurrent-write benchmark isolating the global engine write-lock contention
+    // (no transport/network overhead). Reports insert throughput for 1 vs N writers at fsync-
+    // every-commit vs group-commit, and verifies every insert survives concurrency. Ignored
+    // by default; run with:
+    //   cargo test -p skeindb --bins bench_concurrent_write_throughput -- --ignored --nocapture
+    #[test]
+    #[ignore = "benchmark: run explicitly with --ignored --nocapture"]
+    fn bench_concurrent_write_throughput() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let ops_per_writer = 500usize;
+        println!("\n=== concurrent write throughput (write-lock contention) ===");
+        for &batch in &[1u64, 64u64] {
+            for &writers in &[1usize, 4usize, 8usize] {
+                let dir = temp_dir(&format!("bench_w{writers}_b{batch}"));
+                let mut engine = Engine::open(&dir).unwrap();
+                engine.wal_sync_batch = batch;
+                engine
+                    .create_table(
+                        "app",
+                        "items",
+                        vec![ColumnSchema {
+                            name: "id".to_string(),
+                            r#type: type_desc("u64"),
+                            nullable: false,
+                            auto_increment: false,
+                        }],
+                        vec!["id".to_string()],
+                        false,
+                        None,
+                    )
+                    .unwrap();
+                let engine = std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+                let start = std::time::Instant::now();
+                rt.block_on(async {
+                    let mut handles = Vec::new();
+                    for w in 0..writers {
+                        let eng = engine.clone();
+                        let table_ref = table_ref.clone();
+                        handles.push(tokio::spawn(async move {
+                            for i in 0..ops_per_writer {
+                                let id = (w * ops_per_writer + i) as u64;
+                                let mut e = eng.write().await;
+                                e.data_insert(
+                                    &table_ref,
+                                    vec![row(&[("id", Lit::U64 { v: id })])],
+                                    None,
+                                )
+                                .unwrap();
+                            }
+                        }));
+                    }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
+                });
+                let elapsed = start.elapsed();
+                let total = writers * ops_per_writer;
+                let tput = total as f64 / elapsed.as_secs_f64();
+                // Correctness: every concurrent insert landed exactly once.
+                let live = rt.block_on(async {
+                    let e = engine.read().await;
+                    e.get_table(&table_ref)
+                        .map(|(_, t)| t.rows.iter().filter(|r| !r.deleted).count())
+                        .unwrap_or(0)
+                });
+                assert_eq!(live, total, "lost inserts under concurrency");
+                println!(
+                    "batch={batch:<3} writers={writers}: {total} inserts in {elapsed:>10.2?} = {tput:>9.0} inserts/sec"
+                );
+            }
+        }
+        println!("===========================================================\n");
     }
 
     #[test]
