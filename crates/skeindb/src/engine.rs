@@ -438,6 +438,15 @@ pub struct Engine {
     wal: Option<WalWriter>,
     /// Monotonic transaction id stamped on WAL records.
     wal_next_txn: u64,
+    /// Group-commit batch size: fsync the WAL once every this many committed transactions
+    /// (read once from `SKEINDB_WAL_SYNC_BATCH` at open; default 1 = fsync every commit =
+    /// strongest durability). A larger value amortizes the fsync — fewer fsync-under-lock
+    /// stalls, higher write throughput — at the cost of losing at most `batch-1` most-recent
+    /// commits on a power-loss crash (recovery stays a consistent prefix either way).
+    wal_sync_batch: u64,
+    /// Committed transactions appended to the WAL but not yet fsynced (bounded by
+    /// `wal_sync_batch`; reset at each fsync and at WAL truncation).
+    wal_unsynced_commits: u64,
 
     /// Tables mutated since the last snapshot flush. With the WAL providing per-commit
     /// durability, row mutations defer their full-table snapshot rewrite: the table is
@@ -2080,6 +2089,12 @@ impl Engine {
             corrupt_tables: HashSet::new(),
             wal: None,
             wal_next_txn: 0,
+            wal_sync_batch: std::env::var("SKEINDB_WAL_SYNC_BATCH")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(1),
+            wal_unsynced_commits: 0,
             dirty_tables: HashSet::new(),
             mutations_since_flush: 0,
         };
@@ -32555,6 +32570,56 @@ mod tests {
         assert_eq!(
             prev_live, 8,
             "the full WAL must recover every committed row"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wal_group_commit_batches_fsync_and_preserves_durability() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_group_commit");
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            // Opt into group commit: fsync only every 16 commits.
+            engine.wal_sync_batch = 16;
+            engine.wal_unsynced_commits = 0;
+            for i in 1..=5u64 {
+                engine.data_insert(&table_ref, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
+            }
+            // The 5 commits are below the batch, so no fsync fired — they were appended only
+            // (durable to the OS page cache, recoverable on a clean restart).
+            assert_eq!(
+                engine.wal_unsynced_commits, 5,
+                "group commit must defer the fsync below the batch size"
+            );
+            // Drop without a checkpoint.
+        }
+        // A clean restart still recovers every committed row from the appended WAL.
+        let engine = Engine::open(&dir)?;
+        let live = engine
+            .get_table(&table_ref)
+            .map(|(_, t)| t.rows.iter().filter(|r| !r.deleted).count())
+            .unwrap_or(0);
+        assert_eq!(
+            live, 5,
+            "group-committed WAL must recover all commits on a clean restart"
         );
         Ok(())
     }

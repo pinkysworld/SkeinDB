@@ -58,9 +58,18 @@ impl Engine {
         self.data_dir.join("wal-000001.log")
     }
 
-    /// Durably append a batch of row redo records as one committed WAL transaction.
-    /// Called by the DML handlers *before* they persist the table snapshot, so a crash
-    /// after this returns can always recover the mutation on the next open().
+    /// Append a batch of row redo records as one committed WAL transaction. Called by the DML
+    /// handlers *before* they persist the table snapshot, so a crash after this returns can
+    /// always recover the mutation on the next open().
+    ///
+    /// The record is always appended (durable to the OS page cache, so it survives a process
+    /// crash and is recovered on a clean restart). The `fsync` — which is what forces it to
+    /// stable storage and survives a power-loss crash — is issued every `wal_sync_batch`
+    /// commits (group commit). With the default batch of 1 that is every commit (unchanged,
+    /// strongest durability); a larger batch amortizes the fsync-under-lock cost. Recovery is
+    /// a consistent committed prefix regardless of where an fsync fell (see
+    /// `wal_recovery_is_robust_to_torn_tail_at_every_offset`), and the deferred snapshot flush
+    /// makes everything durable at each checkpoint.
     pub(crate) fn wal_log_rows(&mut self, records: &[WalRowRecord]) -> anyhow::Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -70,13 +79,19 @@ impl Engine {
         }
         let txn = self.wal_next_txn;
         self.wal_next_txn = self.wal_next_txn.wrapping_add(1);
-        let writer = self.wal.as_mut().expect("wal writer opened above");
-        writer.begin_txn(txn)?;
-        for rec in records {
-            writer.append_mutation(txn, serde_json::to_vec(rec)?)?;
+        {
+            let writer = self.wal.as_mut().expect("wal writer opened above");
+            writer.begin_txn(txn)?;
+            for rec in records {
+                writer.append_mutation(txn, serde_json::to_vec(rec)?)?;
+            }
+            writer.commit_txn(txn)?;
         }
-        writer.commit_txn(txn)?;
-        writer.sync()?;
+        self.wal_unsynced_commits = self.wal_unsynced_commits.saturating_add(1);
+        if self.wal_unsynced_commits >= self.wal_sync_batch {
+            self.wal.as_ref().expect("wal writer opened above").sync()?;
+            self.wal_unsynced_commits = 0;
+        }
         Ok(())
     }
 
@@ -170,6 +185,9 @@ impl Engine {
     /// checkpoint (or after replay) has made every table snapshot durable.
     pub(crate) fn wal_truncate(&mut self) {
         self.wal = None;
+        // The log is gone, so nothing is pending an fsync. (The snapshots that superseded it
+        // were persisted durably before truncation.)
+        self.wal_unsynced_commits = 0;
         let _ = fs::remove_file(self.wal_path());
     }
 
