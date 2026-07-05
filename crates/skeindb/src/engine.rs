@@ -2621,8 +2621,14 @@ impl Engine {
             }
         }
 
-        self.cached_select.lock().unwrap().clear();
-        self.cached_patch.lock().unwrap().clear();
+        self.cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.cached_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
 
         self.persist_catalog()?;
         self.persist_table(&target.db, &target.table)?;
@@ -5018,7 +5024,10 @@ impl Engine {
         // Try cache first.
         let (columns, rows) = if let Some(etag) = etag.as_deref() {
             let cached = {
-                let cache = self.cached_select.lock().unwrap();
+                let cache = self
+                    .cached_select
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 cache.get(etag).cloned()
             };
             if let Some(hit) = cached {
@@ -5036,7 +5045,10 @@ impl Engine {
                 };
 
                 {
-                    let mut cache = self.cached_select.lock().unwrap();
+                    let mut cache = self
+                        .cached_select
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     cache.insert(
                         etag.to_string(),
                         CachedSelect {
@@ -5151,7 +5163,13 @@ impl Engine {
                 base: base.to_string(),
                 cur: tag.clone(),
             };
-            if let Some(hit) = self.cached_patch.lock().unwrap().get(&key).cloned() {
+            if let Some(hit) = self
+                .cached_patch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .cloned()
+            {
                 let (data_json, wire_json) = self.render_patch_obj(
                     false,
                     base_etag,
@@ -5196,7 +5214,13 @@ impl Engine {
 
         // 1) Try server cache by base_etag.
         if let Some(base) = base_etag {
-            if let Some(hit) = self.cached_select.lock().unwrap().get(base).cloned() {
+            if let Some(hit) = self
+                .cached_select
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(base)
+                .cloned()
+            {
                 if let Some(keys) = hit.keys.clone() {
                     base_source = Some("etag_cache");
                     have_old = true;
@@ -5437,7 +5461,10 @@ impl Engine {
                     base: base.to_string(),
                     cur: tag.clone(),
                 };
-                let mut cache = self.cached_patch.lock().unwrap();
+                let mut cache = self
+                    .cached_patch
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if cache.len() > 4096 {
                     cache.clear();
                 }
@@ -5701,7 +5728,12 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<QuerySelectWithKeys> {
         // Try cache first.
-        if let Some(hit) = self.cached_select.lock().unwrap().get_mut(etag) {
+        if let Some(hit) = self
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(etag)
+        {
             if let Some(keys) = hit.keys.clone() {
                 hit.hits += 1;
                 hit.last_hit_ms = now_millis();
@@ -5713,19 +5745,22 @@ impl Engine {
 
         // Recompute in patchable mode and refresh cache.
         let (c, r, keys) = execute_select_with_keys(self, query, args, None)?;
-        self.cached_select.lock().unwrap().insert(
-            etag.to_string(),
-            CachedSelect {
-                columns: c.clone(),
-                rows: r.clone(),
-                keys: Some(keys.clone()),
-                query: Some(format!("{:?}", query)),
-                hits: 0,
-                created_ms: now_millis(),
-                last_hit_ms: now_millis(),
-                schema_version: 0,
-            },
-        );
+        self.cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                etag.to_string(),
+                CachedSelect {
+                    columns: c.clone(),
+                    rows: r.clone(),
+                    keys: Some(keys.clone()),
+                    query: Some(format!("{:?}", query)),
+                    hits: 0,
+                    created_ms: now_millis(),
+                    last_hit_ms: now_millis(),
+                    schema_version: 0,
+                },
+            );
         Ok((c, r, keys))
     }
 
@@ -6545,7 +6580,10 @@ impl Engine {
         misses: u64,
         evictions: u64,
     ) -> skeindb_skeinql::methods::PlanCacheStatusResult {
-        let cache = self.cached_select.lock().unwrap();
+        let cache = self
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entries: Vec<skeindb_skeinql::methods::PlanCacheEntry> = cache
             .iter()
             .take(100)
@@ -6573,10 +6611,16 @@ impl Engine {
     }
 
     pub fn plan_cache_clear(&mut self) -> skeindb_skeinql::methods::PlanCacheClearResult {
-        let mut cache = self.cached_select.lock().unwrap();
+        let mut cache = self
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cleared = cache.len() as u64;
         cache.clear();
-        let mut patch_cache = self.cached_patch.lock().unwrap();
+        let mut patch_cache = self
+            .cached_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         patch_cache.clear();
         skeindb_skeinql::methods::PlanCacheClearResult { cleared }
     }
@@ -6762,7 +6806,10 @@ impl Engine {
             classifier: params.classifier,
         })?;
 
-        let mut feedback = self.autoparam_feedback.lock().unwrap();
+        let mut feedback = self
+            .autoparam_feedback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cached_before = feedback.contains_key(&analysis.fingerprint);
         let reclassified = cache_event == "plan_cache_miss" || !cached_before;
         let entry = feedback
@@ -6808,8 +6855,15 @@ impl Engine {
         plan_cache_hits: u64,
         plan_cache_misses: u64,
     ) -> AiAutoparamMetricsResult {
-        let metrics = self.autoparam_metrics.lock().unwrap().clone();
-        let feedback = self.autoparam_feedback.lock().unwrap();
+        let metrics = self
+            .autoparam_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let feedback = self
+            .autoparam_feedback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let feedback_cache_miss_count = feedback
             .values()
             .map(|entry| entry.cache_miss_count)
@@ -6846,7 +6900,10 @@ impl Engine {
 
     fn record_autoparam_classifier_latency(&self, elapsed: Duration) {
         let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
-        let mut metrics = self.autoparam_metrics.lock().unwrap();
+        let mut metrics = self
+            .autoparam_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         metrics.classifier_invocations = metrics.classifier_invocations.saturating_add(1);
         metrics.classifier_total_ns = metrics.classifier_total_ns.saturating_add(elapsed_ns);
     }
@@ -8526,7 +8583,10 @@ impl Engine {
         seed_tables: &[&ReplayBundleTable],
     ) {
         let fallback_table = seed_tables.first().copied();
-        let mut cache = self.cached_select.lock().unwrap();
+        let mut cache = self
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.clear();
 
         for idx in 0..target_count {
@@ -8548,7 +8608,10 @@ impl Engine {
         seed_tables: &[&ReplayBundleTable],
     ) {
         let fallback_table = seed_tables.first().copied();
-        let mut cache = self.cached_patch.lock().unwrap();
+        let mut cache = self
+            .cached_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.clear();
 
         for idx in 0..target_count {
@@ -11198,8 +11261,14 @@ impl Engine {
             advisor.by_table.remove(&key);
         }
 
-        self.cached_select.lock().unwrap().clear();
-        self.cached_patch.lock().unwrap().clear();
+        self.cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.cached_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
 
         remove_file_if_exists(&self.table_path(db, table))?;
         remove_file_if_exists(&self.table_segment_path(db, table))?;
@@ -32849,7 +32918,11 @@ mod tests {
         }
         // Drop the cached result so the streaming run actually re-executes (the etag is
         // data-derived and unchanged, so it would otherwise be a cache hit).
-        engine.cached_select.lock().unwrap().clear();
+        engine
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
 
         assert_eq!(
             run(&engine, false)?,
@@ -35913,12 +35986,11 @@ mod tests {
             join_cols: Vec::new(),
             projection_cols: Vec::new(),
         };
-        engine.index_advisor.lock().unwrap().record_query(
-            &table_key,
-            &query_info,
-            128,
-            now_micros(),
-        );
+        engine
+            .index_advisor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_query(&table_key, &query_info, 128, now_micros());
         let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
             table: table_ref.clone(),
             columns: vec!["city".to_string()],
@@ -44720,7 +44792,10 @@ mod tests {
             db: table.db.clone(),
             table: table.table.clone(),
         };
-        let snapshots = engine.snapshots.lock().unwrap();
+        let snapshots = engine
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(!snapshots.snapshots.contains_key(&key));
 
         fs::remove_dir_all(&dir).ok();
@@ -44842,7 +44917,10 @@ mod tests {
         let schema = engine.get_schema(&table.db, &table.table)?;
         let city_required = ["city".to_string()].into_iter().collect::<HashSet<_>>();
         let region_required = ["region".to_string()].into_iter().collect::<HashSet<_>>();
-        let manager = engine.snapshots.lock().unwrap();
+        let manager = engine
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(manager
             .snapshot_candidate_for_query(&key, &city_required, schema.table_version)
             .is_some());
@@ -52954,51 +53032,63 @@ mod tests {
             },
         ]];
         let keys = Some(vec![vec![Lit::U64 { v: 1 }]]);
-        engine.cached_select.lock().unwrap().insert(
-            "source_cache_0".to_string(),
-            CachedSelect {
-                columns: columns.clone(),
-                rows: rows.clone(),
-                keys: keys.clone(),
-                query: Some("replay.cache.seed.0".to_string()),
-                hits: 0,
-                created_ms: 0,
-                last_hit_ms: 0,
-                schema_version: 0,
-            },
-        );
-        engine.cached_select.lock().unwrap().insert(
-            "source_cache_1".to_string(),
-            CachedSelect {
-                columns: columns.clone(),
-                rows,
-                keys,
-                query: Some("replay.cache.seed.1".to_string()),
-                hits: 0,
-                created_ms: 0,
-                last_hit_ms: 0,
-                schema_version: 0,
-            },
-        );
-        engine.cached_patch.lock().unwrap().insert(
-            PatchCacheKey {
-                base: "source_base".to_string(),
-                cur: "source_cur".to_string(),
-            },
-            PatchDelta {
-                columns,
-                window: None,
-                added: Vec::new(),
-                updated: Vec::new(),
-                removed: Vec::new(),
-                moved: Vec::new(),
-                reorder: None,
-                partial: false,
-                removed_unknown: false,
-                updated_unknown: false,
-                reset_reason: None,
-            },
-        );
+        engine
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "source_cache_0".to_string(),
+                CachedSelect {
+                    columns: columns.clone(),
+                    rows: rows.clone(),
+                    keys: keys.clone(),
+                    query: Some("replay.cache.seed.0".to_string()),
+                    hits: 0,
+                    created_ms: 0,
+                    last_hit_ms: 0,
+                    schema_version: 0,
+                },
+            );
+        engine
+            .cached_select
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "source_cache_1".to_string(),
+                CachedSelect {
+                    columns: columns.clone(),
+                    rows,
+                    keys,
+                    query: Some("replay.cache.seed.1".to_string()),
+                    hits: 0,
+                    created_ms: 0,
+                    last_hit_ms: 0,
+                    schema_version: 0,
+                },
+            );
+        engine
+            .cached_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                PatchCacheKey {
+                    base: "source_base".to_string(),
+                    cur: "source_cur".to_string(),
+                },
+                PatchDelta {
+                    columns,
+                    window: None,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    moved: Vec::new(),
+                    reorder: None,
+                    partial: false,
+                    removed_unknown: false,
+                    updated_unknown: false,
+                    reset_reason: None,
+                },
+            );
 
         let exported = engine.maintenance_replay_export(MaintenanceReplayExportParams {
             db: Some("app".to_string()),
