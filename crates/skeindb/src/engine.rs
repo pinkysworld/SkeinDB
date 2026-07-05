@@ -1547,6 +1547,18 @@ pub struct CdcRuntimeStats {
     pub min_remaining_until_resnapshot: u64,
 }
 
+/// Cheap operational storage counters for frequent scrapes (see
+/// [`Engine::runtime_storage_metrics`]).
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeStorageMetrics {
+    pub tables: u64,
+    pub streaming_tables: u64,
+    pub dirty_tables: u64,
+    pub mutations_since_flush: u64,
+    pub wal_bytes: u64,
+    pub total_rows: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStorageStats {
     pub wal_bytes: u64,
@@ -2169,6 +2181,34 @@ impl Engine {
             mvcc_versions,
             delta_chains,
             core_lsm_active: self.core_lsm_files_active(),
+        }
+    }
+
+    /// Cheap (O(tables), never O(rows)) storage counters for frequent scrapes like the
+    /// `/metrics` endpoint — avoids the full row/byte accounting of `storage_stats_snapshot`.
+    /// `dirty_tables`/`mutations_since_flush` expose deferred-flush lag; `wal_bytes` the redo
+    /// log size; `streaming_tables` how many tables are segment-backed.
+    pub fn runtime_storage_metrics(&self) -> RuntimeStorageMetrics {
+        let mut streaming_tables = 0u64;
+        let mut total_rows = 0u64;
+        for tdata in self.tables.values() {
+            match &tdata.residency {
+                TableResidency::Resident => {
+                    total_rows = total_rows.saturating_add(tdata.rows.len() as u64);
+                }
+                TableResidency::Streaming { index, .. } => {
+                    streaming_tables += 1;
+                    total_rows = total_rows.saturating_add(index.row_count() as u64);
+                }
+            }
+        }
+        RuntimeStorageMetrics {
+            tables: self.tables.len() as u64,
+            streaming_tables,
+            dirty_tables: self.dirty_tables.len() as u64,
+            mutations_since_flush: self.mutations_since_flush,
+            wal_bytes: self.change_log_bytes(),
+            total_rows,
         }
     }
 
@@ -32964,6 +33004,26 @@ mod tests {
             err.to_string().contains("statement_timeout"),
             "expected statement_timeout, got: {err}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_storage_metrics_reports_cheap_counters() -> anyhow::Result<()> {
+        let dir = temp_dir("runtime_metrics");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?; // two rows into app.events
+
+        let m = engine.runtime_storage_metrics();
+        assert!(m.tables >= 1, "expected at least the events table");
+        assert!(m.total_rows >= 2, "expected the two seeded rows counted");
+        assert_eq!(m.streaming_tables, 0, "resident by default");
+        // The two deferred inserts left the table dirty (below the flush threshold).
+        assert!(m.dirty_tables >= 1, "seeded inserts should be dirty");
+
+        engine.flush_dirty_tables()?;
+        let flushed = engine.runtime_storage_metrics();
+        assert_eq!(flushed.dirty_tables, 0, "flush clears the dirty set");
+        assert_eq!(flushed.mutations_since_flush, 0);
         Ok(())
     }
 

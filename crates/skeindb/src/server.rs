@@ -17751,7 +17751,13 @@ async fn cdc_ws_handler(
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     let uptime = state.started.elapsed().as_secs_f64();
-    let advisor = state.engine.read().await.advisor_metrics_snapshot();
+    let (advisor, storage) = {
+        let eng = state.engine.read().await;
+        (
+            eng.advisor_metrics_snapshot(),
+            eng.runtime_storage_metrics(),
+        )
+    };
     let counters = state.counters.lock().unwrap();
 
     let mut body = String::new();
@@ -17802,6 +17808,120 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         "skeindb_advisor_estimated_saved_ms_total {}\n",
         advisor.estimated_saved_ms_total
     ));
+
+    // Per-method query latency/error/rows, aggregated across fingerprints, plus overall
+    // latency quantiles from the retained samples.
+    let mut by_method: BTreeMap<String, (u64, u64, u64, u64, u64)> = BTreeMap::new();
+    let mut all_latencies: Vec<u64> = Vec::new();
+    for agg in counters.query_stats.values() {
+        let e = by_method
+            .entry(agg.method.clone())
+            .or_insert((0, 0, 0, 0, 0));
+        e.0 = e.0.saturating_add(agg.count);
+        e.1 = e.1.saturating_add(agg.error_count);
+        e.2 = e.2.saturating_add(agg.total_ms);
+        e.3 = e.3.max(agg.max_ms);
+        e.4 = e.4.saturating_add(agg.rows_returned);
+        all_latencies.extend(agg.latency_samples_ms.iter().copied());
+    }
+    body.push_str("# HELP skeindb_query_count Completed queries by method\n");
+    body.push_str("# TYPE skeindb_query_count counter\n");
+    for (method, (count, ..)) in by_method.iter() {
+        body.push_str(&format!(
+            "skeindb_query_count{{method=\"{}\"}} {}\n",
+            escape_label(method),
+            count
+        ));
+    }
+    body.push_str("# HELP skeindb_query_errors_total Failed queries by method\n");
+    body.push_str("# TYPE skeindb_query_errors_total counter\n");
+    for (method, (_, errors, ..)) in by_method.iter() {
+        body.push_str(&format!(
+            "skeindb_query_errors_total{{method=\"{}\"}} {}\n",
+            escape_label(method),
+            errors
+        ));
+    }
+    body.push_str("# HELP skeindb_query_latency_ms_sum Summed query latency (ms) by method\n");
+    body.push_str("# TYPE skeindb_query_latency_ms_sum counter\n");
+    for (method, (_, _, total_ms, ..)) in by_method.iter() {
+        body.push_str(&format!(
+            "skeindb_query_latency_ms_sum{{method=\"{}\"}} {}\n",
+            escape_label(method),
+            total_ms
+        ));
+    }
+    body.push_str(
+        "# HELP skeindb_query_latency_ms_max Max observed query latency (ms) by method\n",
+    );
+    body.push_str("# TYPE skeindb_query_latency_ms_max gauge\n");
+    for (method, (_, _, _, max_ms, _)) in by_method.iter() {
+        body.push_str(&format!(
+            "skeindb_query_latency_ms_max{{method=\"{}\"}} {}\n",
+            escape_label(method),
+            max_ms
+        ));
+    }
+    body.push_str("# HELP skeindb_query_rows_returned_total Rows returned by method\n");
+    body.push_str("# TYPE skeindb_query_rows_returned_total counter\n");
+    for (method, (_, _, _, _, rows)) in by_method.iter() {
+        body.push_str(&format!(
+            "skeindb_query_rows_returned_total{{method=\"{}\"}} {}\n",
+            escape_label(method),
+            rows
+        ));
+    }
+    all_latencies.sort_unstable();
+    body.push_str(
+        "# HELP skeindb_query_latency_ms Query latency quantiles (ms) over recent samples\n",
+    );
+    body.push_str("# TYPE skeindb_query_latency_ms summary\n");
+    for (q, label) in [(50.0, "0.5"), (95.0, "0.95"), (99.0, "0.99")] {
+        body.push_str(&format!(
+            "skeindb_query_latency_ms{{quantile=\"{}\"}} {}\n",
+            label,
+            percentile_u64_slice(&all_latencies, q)
+        ));
+    }
+
+    // Storage engine internals (cheap counters; no full row scan).
+    for (name, help, kind, value) in [
+        ("skeindb_tables", "Tables loaded", "gauge", storage.tables),
+        (
+            "skeindb_streaming_tables",
+            "Segment-backed streaming tables",
+            "gauge",
+            storage.streaming_tables,
+        ),
+        (
+            "skeindb_dirty_tables",
+            "Tables with unflushed deferred writes",
+            "gauge",
+            storage.dirty_tables,
+        ),
+        (
+            "skeindb_mutations_since_flush",
+            "Row mutations since the last snapshot flush",
+            "gauge",
+            storage.mutations_since_flush,
+        ),
+        (
+            "skeindb_wal_bytes",
+            "Write-ahead log size in bytes",
+            "gauge",
+            storage.wal_bytes,
+        ),
+        (
+            "skeindb_rows_total",
+            "Total stored rows across tables",
+            "gauge",
+            storage.total_rows,
+        ),
+    ] {
+        body.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+        ));
+    }
 
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
@@ -18333,6 +18453,16 @@ fn estimate_query_io_bytes(
     }
 }
 
+/// Slow-query threshold in milliseconds, or `None` when disabled (the default). Opt-in via
+/// `SKEINDB_SLOW_QUERY_MS`: any completed RPC at or above this duration is logged at WARN.
+fn slow_query_threshold_ms() -> Option<u64> {
+    std::env::var("SKEINDB_SLOW_QUERY_MS")
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .filter(|&n| n > 0)
+}
+
 fn observe_rpc_call(
     state: &AppState,
     method: &str,
@@ -18348,6 +18478,22 @@ fn observe_rpc_call(
     let rows_returned = query_rows_returned(result);
     let workload_kind = classify_query_workload(method, params);
     let io_bytes = estimate_query_io_bytes(workload_kind, method, params, result);
+
+    // Slow-query log (opt-in): surface queries at/above the configured threshold at WARN so
+    // operators can spot latency outliers without scraping the stats RPCs.
+    if let Some(threshold) = slow_query_threshold_ms() {
+        if duration_ms >= threshold {
+            tracing::warn!(
+                method,
+                duration_ms,
+                rows_returned,
+                status = status.as_u16(),
+                ok,
+                fingerprint = %fingerprint,
+                "slow query"
+            );
+        }
+    }
 
     let mut counters = state.counters.lock().unwrap();
     let agg = counters
