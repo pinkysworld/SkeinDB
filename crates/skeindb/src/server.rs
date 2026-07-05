@@ -16781,8 +16781,37 @@ async fn run_mysql_listener(
     Ok(())
 }
 
+/// True when the HTTP RPC/admin surface would be reachable from the network with no
+/// authentication: bound to a non-loopback address while no bearer token is configured.
+fn is_exposed_without_auth(http_addr: &SocketAddr, token_set: bool) -> bool {
+    !http_addr.ip().is_loopback() && !token_set
+}
+
+/// Warn loudly at startup if the HTTP RPC + admin API is exposed to the network without a
+/// token. In that configuration anyone who can reach the port has full RPC/admin access (the
+/// RPC auth is a single optional bearer token; per-user RBAC is not yet enforced on the RPC
+/// data path). Loopback binds and token-protected binds are unaffected.
+fn warn_if_exposed_without_auth(http_addr: &SocketAddr) {
+    let token_set = std::env::var("SKEINDB_TOKEN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if is_exposed_without_auth(http_addr, token_set) {
+        tracing::warn!(
+            %http_addr,
+            "SECURITY: HTTP RPC + admin API bound to a non-loopback address with no \
+             SKEINDB_TOKEN set — reachable from the network WITHOUT authentication. Set \
+             SKEINDB_TOKEN to require a bearer token, or bind to 127.0.0.1."
+        );
+        eprintln!(
+            "WARNING: SkeinDB HTTP RPC/admin bound to {http_addr} without SKEINDB_TOKEN — \
+             unauthenticated network access. Set SKEINDB_TOKEN or bind to 127.0.0.1."
+        );
+    }
+}
+
 pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let http_addr: SocketAddr = format!("{}:{}", opts.bind, opts.http_port).parse()?;
+    warn_if_exposed_without_auth(&http_addr);
 
     // Ensure data dir exists.
     let data_dir = PathBuf::from(&opts.data_dir);
@@ -34003,6 +34032,21 @@ fn save_settings(state: &AppState) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_unauthenticated_network_exposure() {
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let loopback6: SocketAddr = "[::1]:8080".parse().unwrap();
+        let public: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        // Loopback binds are never flagged, token or not.
+        assert!(!is_exposed_without_auth(&loopback, false));
+        assert!(!is_exposed_without_auth(&loopback, true));
+        assert!(!is_exposed_without_auth(&loopback6, false));
+        // A non-loopback bind is exposed only when no token is configured.
+        assert!(is_exposed_without_auth(&public, false));
+        assert!(!is_exposed_without_auth(&public, true));
+    }
+
     use axum::{routing::post, Json};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
