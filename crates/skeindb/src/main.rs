@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -290,6 +290,86 @@ fn write_json_report<T: Serialize>(report: &T, out: Option<&str>) -> anyhow::Res
     } else {
         println!("{}", String::from_utf8(bytes)?);
     }
+    Ok(())
+}
+
+/// Recursively copy a directory tree, skipping in-flight atomic-write temp files. Returns
+/// (file_count, byte_count). Symlinks/special files are skipped — a data dir holds none.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<(u64, u64)> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        // A backup must contain only committed state, never a half-written temp file.
+        if name.to_string_lossy().contains(".skein-tmp.") {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let (f, b) = copy_dir_recursive(&from, &to)?;
+            files += f;
+            bytes += b;
+        } else if file_type.is_file() {
+            bytes += std::fs::copy(&from, &to)?;
+            files += 1;
+        }
+    }
+    Ok((files, bytes))
+}
+
+/// Copy the on-disk data directory to `out` as a crash-consistent backup. The atomic-write +
+/// WAL design means the copied tree restores correctly even if taken from a live instance
+/// (like recovering from a crash); for a fully-quiesced snapshot, take it against a stopped or
+/// idle server. `out` must be empty or absent so an existing backup is never clobbered.
+fn run_backup_command(data: &str, out: &str) -> anyhow::Result<()> {
+    let data_path = PathBuf::from(data);
+    let out_path = PathBuf::from(out);
+    if !data_path.exists() {
+        anyhow::bail!("data directory does not exist: {}", data_path.display());
+    }
+    let out_nonempty = std::fs::read_dir(&out_path)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if out_nonempty {
+        anyhow::bail!("backup destination is not empty: {}", out_path.display());
+    }
+    let (files, bytes) = copy_dir_recursive(&data_path, &out_path)?;
+    println!(
+        "backup complete: {files} files, {bytes} bytes -> {}",
+        out_path.display()
+    );
+    Ok(())
+}
+
+/// Restore a backup into a fresh `data` directory (must be empty or absent so live data is
+/// never overwritten), then open it once to verify it loads and replays cleanly.
+fn run_restore_command(from: &str, data: &str) -> anyhow::Result<()> {
+    let from_path = PathBuf::from(from);
+    let data_path = PathBuf::from(data);
+    if !from_path.exists() {
+        anyhow::bail!("backup source does not exist: {}", from_path.display());
+    }
+    let data_nonempty = std::fs::read_dir(&data_path)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if data_nonempty {
+        anyhow::bail!(
+            "refusing to restore over a non-empty data directory: {}",
+            data_path.display()
+        );
+    }
+    let (files, bytes) = copy_dir_recursive(&from_path, &data_path)?;
+    // Verify the restored tree opens (this also replays any WAL the backup carried).
+    let engine = engine::Engine::open(&data_path)?;
+    let dbs = engine.list_databases().len();
+    println!(
+        "restore complete: {files} files, {bytes} bytes -> {} ({dbs} databases)",
+        data_path.display()
+    );
     Ok(())
 }
 
@@ -694,6 +774,49 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn backup_and_restore_round_trip_preserves_data() -> anyhow::Result<()> {
+        let src = temp_dir("backup_src");
+        {
+            let mut engine = engine::Engine::open(&src)?;
+            engine.create_table(
+                "app",
+                "logs",
+                vec![engine::ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.checkpoint_for_shutdown()?;
+        }
+
+        // temp_dir() returns an empty directory, which the guardrails accept.
+        let backup = temp_dir("backup_dst");
+        run_backup_command(src.to_str().unwrap(), backup.to_str().unwrap())?;
+
+        let restored = temp_dir("backup_restore");
+        run_restore_command(backup.to_str().unwrap(), restored.to_str().unwrap())?;
+
+        // The restored directory carries the database + table across the round trip.
+        let engine = engine::Engine::open(&restored)?;
+        assert!(engine.list_databases().iter().any(|d| d == "app"));
+        assert!(engine
+            .list_tables("app")
+            .unwrap_or_default()
+            .iter()
+            .any(|t| t == "logs"));
+
+        // Guardrails: refuse to back up into / restore over a non-empty directory.
+        assert!(run_backup_command(src.to_str().unwrap(), src.to_str().unwrap()).is_err());
+        assert!(run_restore_command(backup.to_str().unwrap(), src.to_str().unwrap()).is_err());
+        Ok(())
+    }
+
     fn type_desc(kind: &str) -> TypeDesc {
         TypeDesc {
             kind: kind.to_string(),
@@ -916,6 +1039,28 @@ enum Commands {
         json: bool,
     },
 
+    /// Create a crash-consistent backup of a data directory into an empty destination.
+    Backup {
+        /// Data directory to back up
+        #[arg(long, default_value = "./data")]
+        data: String,
+
+        /// Destination directory for the backup (must be empty or absent)
+        #[arg(long)]
+        out: String,
+    },
+
+    /// Restore a backup into a fresh (empty or absent) data directory.
+    Restore {
+        /// Backup directory to restore from
+        #[arg(long)]
+        from: String,
+
+        /// Target data directory (must be empty or absent)
+        #[arg(long, default_value = "./data")]
+        data: String,
+    },
+
     /// Evaluate NL-to-SkeinQL datasets (experimental).
     NlEval {
         /// Dataset JSONL path
@@ -1113,6 +1258,8 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Info { data, json } => run_info_command(&data, json),
+        Commands::Backup { data, out } => run_backup_command(&data, &out),
+        Commands::Restore { from, data } => run_restore_command(&from, &data),
         Commands::AuditVerify { data } => {
             let report = collect_audit_verify_report(&data)?;
             println!(
