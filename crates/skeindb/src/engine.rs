@@ -10907,14 +10907,26 @@ impl Engine {
     ) -> anyhow::Result<()> {
         match &tdata.residency {
             TableResidency::Resident => {
+                let mut scanned: u32 = 0;
                 for entry in tdata.rows.iter() {
+                    scanned = scanned.wrapping_add(1);
+                    if scanned.is_multiple_of(DEADLINE_CHECK_INTERVAL) {
+                        check_query_deadline()?;
+                    }
                     visit(entry)?;
                 }
                 Ok(())
             }
             TableResidency::Streaming { segment, .. } => {
                 let codec = self.row_encryption_codec(db, table);
-                stream_segment_rows_visit(segment, Some(&codec), |entry| visit(&entry))
+                let mut scanned: u32 = 0;
+                stream_segment_rows_visit(segment, Some(&codec), |entry| {
+                    scanned = scanned.wrapping_add(1);
+                    if scanned.is_multiple_of(DEADLINE_CHECK_INTERVAL) {
+                        check_query_deadline()?;
+                    }
+                    visit(&entry)
+                })
             }
         }
     }
@@ -14738,6 +14750,7 @@ fn execute_select_batches(
     while let Some((batch, next_cursor, batch_rows_scanned)) =
         scan_row_entries_batch(schema, &tdata.rows, cursor, batch_columns, as_of_ms)
     {
+        check_query_deadline()?;
         cursor = next_cursor;
         rows_scanned = rows_scanned.saturating_add(batch_rows_scanned);
         let selected_rows = filter_select_batch(
@@ -15048,12 +15061,78 @@ fn try_execute_select_base_table(
     Ok(Some((columns, rows, rows_scanned)))
 }
 
+/// How often the executor's row/batch scan loops check the statement deadline. Amortizes the
+/// `Instant::now()` cost to roughly nothing per row while keeping timeout overshoot small.
+const DEADLINE_CHECK_INTERVAL: u32 = 1024;
+
+thread_local! {
+    /// Absolute deadline for the query currently executing on this thread, or `None` if no
+    /// statement timeout is in effect. Queries run synchronously start-to-finish on one
+    /// worker thread (no `.await` inside the executor), so a per-thread cell correctly scopes
+    /// the deadline to one query even with many queries running concurrently under the read
+    /// lock. Installed by [`QueryDeadlineGuard`], read by [`check_query_deadline`].
+    static QUERY_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// The configured statement-timeout deadline from now, or `None` when disabled. Opt-in via
+/// `SKEINDB_STATEMENT_TIMEOUT_MS` (0 or unset ⇒ no timeout, so behavior is unchanged by
+/// default). Recommended to set in production so a runaway query cannot hold the engine lock
+/// indefinitely.
+fn configured_statement_deadline() -> Option<Instant> {
+    let ms: u64 = std::env::var("SKEINDB_STATEMENT_TIMEOUT_MS")
+        .ok()?
+        .parse()
+        .ok()?;
+    if ms == 0 {
+        return None;
+    }
+    Instant::now().checked_add(Duration::from_millis(ms))
+}
+
+/// RAII guard that installs a statement deadline for the current thread and restores the
+/// previous one on drop (including on panic/unwind). Nested executor calls (subqueries, CTEs)
+/// inherit the outermost deadline rather than resetting it, so the whole statement shares one
+/// budget.
+struct QueryDeadlineGuard {
+    previous: Option<Instant>,
+}
+
+impl QueryDeadlineGuard {
+    fn install(deadline: Option<Instant>) -> Self {
+        let previous = QUERY_DEADLINE.with(|d| d.get());
+        // Only the outermost query sets the deadline; nested calls keep the existing budget.
+        if previous.is_none() {
+            QUERY_DEADLINE.with(|d| d.set(deadline));
+        }
+        QueryDeadlineGuard { previous }
+    }
+}
+
+impl Drop for QueryDeadlineGuard {
+    fn drop(&mut self) {
+        QUERY_DEADLINE.with(|d| d.set(self.previous));
+    }
+}
+
+/// Cheap cooperative cancellation check for the executor's scan/batch loops: errors once the
+/// current query's statement deadline (if any) has passed. Callers propagate the error, which
+/// surfaces to the client as a statement-timeout failure instead of an unbounded query.
+fn check_query_deadline() -> anyhow::Result<()> {
+    QUERY_DEADLINE.with(|d| match d.get() {
+        Some(deadline) if Instant::now() >= deadline => {
+            anyhow::bail!("statement_timeout: query exceeded the configured time limit")
+        }
+        _ => Ok(()),
+    })
+}
+
 fn execute_select(
     engine: &Engine,
     query: &Query,
     args: &[Lit],
     as_of_ms: Option<u64>,
 ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>)> {
+    let _deadline_guard = QueryDeadlineGuard::install(configured_statement_deadline());
     let snapshot_info = query_snapshot_info(query);
     let index_infos = query_index_infos(query);
     let QueryBody::Select { select } = query.body.as_ref() else {
@@ -15484,6 +15563,7 @@ fn execute_select_with_keys(
     args: &[Lit],
     as_of_ms: Option<u64>,
 ) -> anyhow::Result<QuerySelectWithKeys> {
+    let _deadline_guard = QueryDeadlineGuard::install(configured_statement_deadline());
     let snapshot_info = query_snapshot_info(query);
     let index_infos = query_index_infos(query);
     let QueryBody::Select { select } = query.body.as_ref() else {
@@ -32838,6 +32918,52 @@ mod tests {
         assert!(engine
             .try_load_streaming_table("app", "missing", 1)
             .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn statement_timeout_aborts_a_running_query() -> anyhow::Result<()> {
+        let dir = temp_dir("statement_timeout");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "alpha", "beta")?;
+        let query = base_query(
+            "app",
+            "events",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let run = |engine: &Engine| {
+            engine.query_select(
+                &query,
+                &[],
+                ResultFormat::RowsJson,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+        };
+
+        // With no deadline installed the query runs normally.
+        assert!(run(&engine).is_ok());
+
+        // Install an already-expired deadline on this thread; the executor's cooperative
+        // deadline checks must abort the scan with a statement_timeout error rather than
+        // returning rows. (The guard's Drop restores the previous deadline for this thread.)
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let _guard = QueryDeadlineGuard::install(Some(past));
+        let err = run(&engine).expect_err("expired deadline must abort the query");
+        assert!(
+            err.to_string().contains("statement_timeout"),
+            "expected statement_timeout, got: {err}"
+        );
         Ok(())
     }
 
