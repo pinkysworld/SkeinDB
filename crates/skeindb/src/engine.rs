@@ -3724,7 +3724,7 @@ impl Engine {
 
             bump_table_version(schema);
             set_secondary_indexes_built_version(tdata, schema.table_version)?;
-            catalog_persist_needed =
+            catalog_persist_needed |=
                 affected > 0 && schema.columns.iter().any(|c| c.auto_increment);
         }
 
