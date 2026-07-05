@@ -32474,6 +32474,91 @@ mod tests {
         Ok(())
     }
 
+    fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir_all(&entry.path(), &to)?;
+            } else if entry.file_type()?.is_file() {
+                fs::copy(entry.path(), &to)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Crash/fault-injection harness for the WAL durability path. Simulates a crash at many
+    // byte offsets of the WAL (a torn append / interrupted fsync) and asserts recovery is
+    // always safe: it opens without error, recovers only complete committed transactions
+    // (never a partial one), and recovers monotonically more as more of the WAL survives.
+    // This pins the durability robustness that the fsync-off-the-write-lock rewrite must
+    // preserve.
+    #[test]
+    fn wal_recovery_is_robust_to_torn_tail_at_every_offset() -> anyhow::Result<()> {
+        let base = temp_dir("wal_torn_base");
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        // 8 committed single-row inserts, each its own WAL transaction; drop without a
+        // checkpoint so all 8 live in the on-disk WAL and none has been flushed to a snapshot.
+        {
+            let mut engine = Engine::open(&base)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            for i in 1..=8u64 {
+                engine.data_insert(&table_ref, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
+            }
+        }
+        let full_wal = fs::read(base.join("wal-000001.log"))?;
+        assert!(!full_wal.is_empty(), "inserts must be logged in the WAL");
+
+        let steps = 24usize;
+        let mut prev_live = 0usize;
+        for step in 0..=steps {
+            let trunc = full_wal.len() * step / steps;
+            let dir = temp_dir(&format!("wal_torn_{step}"));
+            copy_dir_all(&base, &dir)?;
+            // Force WAL-only recovery so the truncation length alone controls recovered rows.
+            fs::remove_dir_all(dir.join("tables")).ok();
+            fs::write(dir.join("wal-000001.log"), &full_wal[..trunc])?;
+
+            // Reopening a torn WAL must never panic or error out.
+            let engine = Engine::open(&dir)?;
+            let live = engine
+                .get_table(&table_ref)
+                .map(|(_, t)| t.rows.iter().filter(|r| !r.deleted).count())
+                .unwrap_or(0);
+            assert!(
+                live <= 8,
+                "recovered {live} rows, more than the 8 committed"
+            );
+            assert!(
+                live >= prev_live,
+                "recovery not monotonic in WAL length: {prev_live} -> {live} at step {step}"
+            );
+            prev_live = live;
+        }
+        assert_eq!(
+            prev_live, 8,
+            "the full WAL must recover every committed row"
+        );
+        Ok(())
+    }
+
     #[test]
     fn corrupt_segment_file_loads_empty_and_refuses_overwrite() -> anyhow::Result<()> {
         let dir = temp_dir("corrupt_segment_guard");
