@@ -225,8 +225,52 @@ OPTIONS:
 <td>unset</td>
 <td>Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). <strong>Unset = no HTTP RPC authentication.</strong> Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration.</td>
 </tr>
+<tr>
+<td><code>SKEINDB_RBAC</code></td>
+<td><code>0</code> (disabled)</td>
+<td>Opt-in per-role authorization on the HTTP RPC data path. When enabled, every RPC must present a valid credential and its method is checked against the caller's role (see <a href="#rbac-role-based-access-control-on-the-rpc-path">RBAC</a> below). When disabled, the legacy single-shared-<code>SKEINDB_TOKEN</code> behavior is unchanged.</td>
+</tr>
 </tbody>
 </table>
+<hr />
+<h2 id="rbac-role-based-access-control-on-the-rpc-path">RBAC (role-based access control) on the RPC path<a class="headerlink" href="#rbac-role-based-access-control-on-the-rpc-path" title="Permanent link">¶</a></h2>
+<p>By default the HTTP RPC/admin API uses a single shared bearer token (<code>SKEINDB_TOKEN</code>): a caller either has full access or none. Setting <code>SKEINDB_RBAC=1</code> (also accepts <code>true</code>/<code>on</code>) turns on per-role authorization so you can hand out least-privilege credentials.</p>
+<p><strong>Principals.</strong> With RBAC on, each request is resolved to a principal from its <code>Authorization: Bearer &lt;secret&gt;</code> header:</p>
+<ul>
+<li>The <code>SKEINDB_TOKEN</code> value → <strong>superuser</strong> (all privileges). This is the bootstrap admin credential; set it when enabling RBAC. If it is unset, only API tokens can authenticate and startup logs a warning.</li>
+<li>An <strong>API-token secret</strong> (created via <code>security.token.create</code> with a <code>role</code>) → the privilege its role confers. Secrets are compared in constant time and expired tokens are rejected.</li>
+<li>No/unknown credential → <code>401 unauthorized</code>.</li>
+</ul>
+<p><strong>Roles → privileges.</strong> Privileges are ordered <code>read &lt; write &lt; admin</code> (a higher level implies the lower ones):</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Privilege</th>
+<th>Can do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>admin</code> / <code>superuser</code></td>
+<td>admin</td>
+<td>Everything, including user/token/cluster/encryption/settings control-plane</td>
+</tr>
+<tr>
+<td><code>readwrite</code></td>
+<td>write</td>
+<td>Reads <strong>and</strong> data mutations + schema DDL</td>
+</tr>
+<tr>
+<td><code>readonly</code></td>
+<td>read</td>
+<td>Read-only methods only</td>
+</tr>
+</tbody>
+</table>
+<p>Unknown or empty role strings fail safe to <code>read</code> (least privilege). Tokens created without an explicit role default to <code>admin</code>, so tokens issued before enabling RBAC keep full access.</p>
+<p><strong>Method classification.</strong> Read-only methods (e.g. <code>query.select</code>, <code>data.get</code>, <code>schema.list_tables</code>, <code>stats.*</code>) require <code>read</code>. Control-plane methods (<code>admin.user.*</code>, <code>security.token.*</code>, <code>cluster.*</code> mutations, <code>settings.set</code>, <code>settings.encryption.*</code>, <code>system.shutdown</code>, <code>maintenance.*.set_policy</code>, <code>maintenance.history.gc</code>, …) require <code>admin</code> — including the <em>listing</em> ones (<code>admin.user.list</code>, <code>security.token.list</code>), since they expose security configuration. Everything else — data mutations and schema DDL — requires <code>write</code>. <code>sql.exec</code> is classified by whether the statement is read-only. Unknown methods fail safe to <code>write</code> (a <code>readonly</code> principal is denied). A denied call returns <code>403 forbidden</code> and is logged at WARN.</p>
+<p><strong>Scope (current slice).</strong> Enforcement is role-based and keyed on API tokens. Per-database grants (<code>admin.user.grant</code>) and a user-credential (username/secret) login are stored but not yet consulted on the RPC path; finer per-database/per-table scoping and a stricter DDL/admin split are follow-ons.</p>
 <hr />
 <h2 id="http-services">HTTP services<a class="headerlink" href="#http-services" title="Permanent link">¶</a></h2>
 <p>When enabled, the HTTP listener serves:
@@ -310,6 +354,7 @@ Current coverage:
 <li><a href="#operational-tuning-all-opt-in-unset-previous-behavior">Operational tuning (all opt-in; unset = previous behavior)</a></li>
 </ul>
 </li>
+<li><a href="#rbac-role-based-access-control-on-the-rpc-path">RBAC (role-based access control) on the RPC path</a></li>
 <li><a href="#http-services">HTTP services</a></li>
 <li><a href="#mysql-listener">MySQL listener</a></li>
 <li><a href="#postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)</a></li>
