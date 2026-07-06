@@ -65,9 +65,9 @@ use skeindb_skeinql::{
 };
 
 use crate::engine::{
-    cdc_event_delivery_string, cdc_event_delivery_value, CdcEventFormat, CdcPollResult,
-    CdcRuntimeStats, CdcSubscriptionOptions, ChangeEvent, ColumnSchema, Engine, ObjectManifest,
-    Subscriptions,
+    cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, CdcEventFormat,
+    CdcPollResult, CdcRuntimeStats, CdcSubscriptionOptions, ChangeEvent, ColumnSchema, Engine,
+    ObjectManifest, Subscriptions,
 };
 use crate::pg_wire;
 use crate::quic;
@@ -16787,20 +16787,35 @@ fn is_exposed_without_auth(http_addr: &SocketAddr, token_set: bool) -> bool {
     !http_addr.ip().is_loopback() && !token_set
 }
 
-/// Warn loudly at startup if the HTTP RPC + admin API is exposed to the network without a
-/// token. In that configuration anyone who can reach the port has full RPC/admin access (the
-/// RPC auth is a single optional bearer token; per-user RBAC is not yet enforced on the RPC
-/// data path). Loopback binds and token-protected binds are unaffected.
+/// Warn loudly at startup if the HTTP RPC + admin API is exposed to the network without
+/// authentication. RPC auth is a single optional bearer token (`SKEINDB_TOKEN`); with opt-in
+/// per-role RBAC (`SKEINDB_RBAC=1`) every request must instead present a valid credential
+/// (the `SKEINDB_TOKEN` superuser or an API-token secret). Loopback binds and authenticated
+/// binds are unaffected.
 fn warn_if_exposed_without_auth(http_addr: &SocketAddr) {
     let token_set = std::env::var("SKEINDB_TOKEN")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    if is_exposed_without_auth(http_addr, token_set) {
+    let rbac = rbac_enforced();
+    // With RBAC on, unauthenticated requests are always rejected, so a token-less bind is not
+    // "open" — but it then has no bootstrap superuser: only previously-issued API tokens work.
+    if rbac && !token_set {
+        tracing::warn!(
+            "SKEINDB_RBAC is enabled without SKEINDB_TOKEN: there is no bootstrap superuser, so \
+             only previously-issued API tokens can authenticate. Set SKEINDB_TOKEN to define a \
+             superuser credential."
+        );
+        eprintln!(
+            "WARNING: SKEINDB_RBAC enabled without SKEINDB_TOKEN — no bootstrap superuser; only \
+             API tokens can authenticate. Set SKEINDB_TOKEN to define a superuser credential."
+        );
+    }
+    if !rbac && is_exposed_without_auth(http_addr, token_set) {
         tracing::warn!(
             %http_addr,
             "SECURITY: HTTP RPC + admin API bound to a non-loopback address with no \
              SKEINDB_TOKEN set — reachable from the network WITHOUT authentication. Set \
-             SKEINDB_TOKEN to require a bearer token, or bind to 127.0.0.1."
+             SKEINDB_TOKEN to require a bearer token, enable SKEINDB_RBAC, or bind to 127.0.0.1."
         );
         eprintln!(
             "WARNING: SkeinDB HTTP RPC/admin bound to {http_addr} without SKEINDB_TOKEN — \
@@ -18923,8 +18938,72 @@ pub(crate) async fn handle_rpc(
         *c.per_method.entry(req.method.clone()).or_insert(0) += 1;
     }
 
-    // Very small auth placeholder: if SKEINDB_TOKEN is set, require matching bearer.
-    if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
+    // Authentication + authorization.
+    if rbac_enforced() {
+        // RBAC on: resolve the bearer credential to a principal and check the method's
+        // required privilege against its role before dispatch.
+        let bearer = headers
+            .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim);
+        let env_token = std::env::var("SKEINDB_TOKEN").ok();
+        let principal = resolve_rpc_principal(state, env_token.as_deref(), bearer).await;
+        match rpc_authorize(principal.as_ref(), &req.method, req.params.as_ref()) {
+            RpcAuthDecision::Allow => {}
+            RpcAuthDecision::Unauthenticated => {
+                let resp: RpcResponse = RpcResponse::err(
+                    req.id.clone(),
+                    RpcError::new("unauthorized", "Missing/invalid bearer token"),
+                );
+                observe_rpc_call(
+                    state,
+                    &req.method,
+                    req.params.as_ref(),
+                    StatusCode::UNAUTHORIZED,
+                    false,
+                    None,
+                    started_at.elapsed(),
+                );
+                return RpcOutcome {
+                    status: StatusCode::UNAUTHORIZED,
+                    response: Some(resp),
+                };
+            }
+            RpcAuthDecision::Forbidden { required } => {
+                let label = principal.as_ref().map(|p| p.label.as_str()).unwrap_or("");
+                tracing::warn!(
+                    method = %req.method,
+                    principal = %label,
+                    required = ?required,
+                    "RBAC denied RPC call"
+                );
+                let resp: RpcResponse = RpcResponse::err(
+                    req.id.clone(),
+                    RpcError::new(
+                        "forbidden",
+                        format!(
+                            "principal lacks {required:?} privilege for method '{}'",
+                            req.method
+                        ),
+                    ),
+                );
+                observe_rpc_call(
+                    state,
+                    &req.method,
+                    req.params.as_ref(),
+                    StatusCode::FORBIDDEN,
+                    false,
+                    None,
+                    started_at.elapsed(),
+                );
+                return RpcOutcome {
+                    status: StatusCode::FORBIDDEN,
+                    response: Some(resp),
+                };
+            }
+        }
+    } else if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
+        // RBAC off (legacy): if SKEINDB_TOKEN is set, require a matching shared bearer.
         let auth_ok = headers
             .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
             .map(|v| v == format!("Bearer {}", expected))
@@ -31836,6 +31915,182 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
     }
 }
 
+// ── RBAC: per-principal authorization on the RPC data path ──────────────────────────────
+//
+// Opt-in (SKEINDB_RBAC=1). When off, the RPC auth path is byte-for-byte the legacy single
+// shared-bearer behavior. When on, each request resolves to a principal (the bootstrap
+// `SKEINDB_TOKEN` → superuser, or an API-token secret → that token's role) and the method's
+// required privilege is checked against the principal's role before dispatch.
+
+/// Privilege levels ordered least→most. A principal holding privilege `P` may invoke any
+/// method whose required privilege is `<= P` (so `Admin` implies `Write` implies `Read`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RpcPrivilege {
+    Read,
+    Write,
+    Admin,
+}
+
+impl RpcPrivilege {
+    /// Whether a principal holding `self` is permitted an operation requiring `required`.
+    fn allows(self, required: RpcPrivilege) -> bool {
+        self >= required
+    }
+}
+
+/// Control-plane methods that manage principals, cluster membership, encryption keys, global
+/// policy, or server lifecycle. These require `Admin` even when they only read (listing users
+/// or tokens still exposes security configuration), so this check takes precedence over the
+/// read-only classification below.
+fn is_admin_rpc_method(method: &str) -> bool {
+    matches!(
+        method,
+        // Principal + credential management
+        "admin.user.create"
+            | "admin.user.drop"
+            | "admin.user.grant"
+            | "admin.user.revoke"
+            | "admin.user.list"
+            | "security.token.create"
+            | "security.token.revoke"
+            | "security.token.list"
+            // Cluster control-plane mutations
+            | "cluster.join_token.create"
+            | "cluster.node.join"
+            | "cluster.node.leave"
+            | "cluster.node.remove"
+            | "cluster.replica.promote"
+            | "cluster.shard.create"
+            | "cluster.shard.move"
+            | "cluster.shard.rebalance"
+            // Encryption key management
+            | "settings.encryption.register_key"
+            | "settings.encryption.rotate_key"
+            | "settings.encryption.set_active_key"
+            | "settings.encryption.set_mode"
+            | "settings.encryption.reencrypt_table"
+            // Global settings, privacy/security policy, maintenance policy, lifecycle
+            | "settings.set"
+            | "system.shutdown"
+            | "maintenance.compaction.set_policy"
+            | "maintenance.history.set_policy"
+            | "maintenance.history.gc"
+            | "dp.budget.set"
+            | "oblivious.policy.set"
+            | "plan_cache.clear"
+    )
+}
+
+/// The minimum privilege required to invoke `method`. Admin-plane methods take precedence;
+/// `sql.exec` is read-only-aware; the remaining read-only methods need `Read`; everything
+/// else (including unknown methods) fails safe to `Write` so a read-only principal is denied.
+fn required_rpc_privilege(method: &str, params: Option<&Value>) -> RpcPrivilege {
+    if is_admin_rpc_method(method) {
+        return RpcPrivilege::Admin;
+    }
+    if method == "sql.exec" {
+        return if sql_exec_is_read_only(params) {
+            RpcPrivilege::Read
+        } else {
+            RpcPrivilege::Write
+        };
+    }
+    if is_read_only_method(method) {
+        return RpcPrivilege::Read;
+    }
+    RpcPrivilege::Write
+}
+
+/// Map a role name to the privilege it confers. Canonical roles are `admin` (full control),
+/// `readwrite` (data reads + writes), and `readonly` (reads only). Unknown/empty role strings
+/// fail safe to the least privilege (`Read`). Tokens created without an explicit role default
+/// to `admin` at creation time, so legacy tokens keep full access under RBAC.
+fn privilege_for_role(role: &str) -> RpcPrivilege {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "admin" | "superuser" | "root" | "owner" => RpcPrivilege::Admin,
+        "readwrite" | "read_write" | "write" | "editor" => RpcPrivilege::Write,
+        "readonly" | "read_only" | "read" | "viewer" => RpcPrivilege::Read,
+        _ => RpcPrivilege::Read,
+    }
+}
+
+/// A resolved RPC caller: the privilege its credential confers plus a short label for logging.
+#[derive(Debug, Clone)]
+struct RpcPrincipal {
+    privilege: RpcPrivilege,
+    label: String,
+}
+
+/// The outcome of authorizing a resolved principal for a method. Pure and env-free so the
+/// security policy is exhaustively unit-testable without HTTP, locks, or process env.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcAuthDecision {
+    Allow,
+    /// No valid credential was presented → 401.
+    Unauthenticated,
+    /// A valid principal lacks the required privilege → 403.
+    Forbidden {
+        required: RpcPrivilege,
+    },
+}
+
+fn rpc_authorize(
+    principal: Option<&RpcPrincipal>,
+    method: &str,
+    params: Option<&Value>,
+) -> RpcAuthDecision {
+    match principal {
+        None => RpcAuthDecision::Unauthenticated,
+        Some(p) => {
+            let required = required_rpc_privilege(method, params);
+            if p.privilege.allows(required) {
+                RpcAuthDecision::Allow
+            } else {
+                RpcAuthDecision::Forbidden { required }
+            }
+        }
+    }
+}
+
+/// Whether RBAC enforcement is enabled (`SKEINDB_RBAC` = `1`/`true`/`on`). Read per request to
+/// match the existing `SKEINDB_TOKEN` handling; the check is a cheap env lookup.
+fn rbac_enforced() -> bool {
+    std::env::var("SKEINDB_RBAC")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve the bearer credential to a principal: the bootstrap `SKEINDB_TOKEN` maps to a
+/// superuser (Admin); otherwise a matching live API-token secret maps to that token's role.
+/// Returns `None` when no credential is presented or none matches.
+async fn resolve_rpc_principal(
+    state: &AppState,
+    env_token: Option<&str>,
+    bearer: Option<&str>,
+) -> Option<RpcPrincipal> {
+    let bearer = bearer?;
+    if let Some(t) = env_token {
+        if constant_time_eq(t.as_bytes(), bearer.as_bytes()) {
+            return Some(RpcPrincipal {
+                privilege: RpcPrivilege::Admin,
+                label: "root-token".to_string(),
+            });
+        }
+    }
+    let (role, token_id) = state
+        .engine
+        .read()
+        .await
+        .api_token_role_for_secret(bearer)?;
+    Some(RpcPrincipal {
+        privilege: privilege_for_role(&role),
+        label: token_id,
+    })
+}
+
 fn is_read_only_method(method: &str) -> bool {
     matches!(
         method,
@@ -34045,6 +34300,224 @@ mod tests {
         // A non-loopback bind is exposed only when no token is configured.
         assert!(is_exposed_without_auth(&public, false));
         assert!(!is_exposed_without_auth(&public, true));
+    }
+
+    // ── RBAC authorization policy (pure, env-free) ──────────────────────────────
+
+    #[test]
+    fn rpc_privilege_is_ordered_and_implies_lower() {
+        assert!(RpcPrivilege::Read < RpcPrivilege::Write);
+        assert!(RpcPrivilege::Write < RpcPrivilege::Admin);
+        // Admin implies Write implies Read.
+        assert!(RpcPrivilege::Admin.allows(RpcPrivilege::Admin));
+        assert!(RpcPrivilege::Admin.allows(RpcPrivilege::Write));
+        assert!(RpcPrivilege::Admin.allows(RpcPrivilege::Read));
+        assert!(RpcPrivilege::Write.allows(RpcPrivilege::Write));
+        assert!(RpcPrivilege::Write.allows(RpcPrivilege::Read));
+        assert!(!RpcPrivilege::Write.allows(RpcPrivilege::Admin));
+        assert!(RpcPrivilege::Read.allows(RpcPrivilege::Read));
+        assert!(!RpcPrivilege::Read.allows(RpcPrivilege::Write));
+        assert!(!RpcPrivilege::Read.allows(RpcPrivilege::Admin));
+    }
+
+    #[test]
+    fn required_privilege_classifies_methods() {
+        for m in [
+            "query.select",
+            "data.get",
+            "schema.list_tables",
+            "schema.describe_table",
+            "stats.snapshot",
+            "settings.get",
+            "cluster.status",
+            "forensic.query",
+            "vector.search",
+            "cdc.poll",
+        ] {
+            assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Read, "{m}");
+        }
+        // Mutations, DDL, and unknown methods fail safe to Write.
+        for m in [
+            "data.insert",
+            "data.update",
+            "data.delete",
+            "schema.create_table",
+            "schema.drop_table",
+            "schema.create_database",
+            "schema.drop_database",
+            "merge.apply",
+            "vector.insert",
+            "view.create",
+            "view.drop",
+            "cdc.subscribe_table",
+            "advisor.apply_index",
+            "totally.unknown.method",
+        ] {
+            assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Write, "{m}");
+        }
+        // Control-plane methods require Admin.
+        for m in [
+            "admin.user.create",
+            "admin.user.drop",
+            "admin.user.grant",
+            "admin.user.revoke",
+            "security.token.create",
+            "security.token.revoke",
+            "cluster.node.join",
+            "cluster.replica.promote",
+            "cluster.shard.rebalance",
+            "settings.set",
+            "settings.encryption.rotate_key",
+            "system.shutdown",
+            "maintenance.history.gc",
+            "dp.budget.set",
+            "plan_cache.clear",
+        ] {
+            assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Admin, "{m}");
+        }
+    }
+
+    #[test]
+    fn admin_plane_reads_still_require_admin() {
+        // These are in the read-only set but expose security config, so the admin check must
+        // take precedence over the read-only classification.
+        assert!(is_read_only_method("admin.user.list"));
+        assert!(is_read_only_method("security.token.list"));
+        assert_eq!(
+            required_rpc_privilege("admin.user.list", None),
+            RpcPrivilege::Admin
+        );
+        assert_eq!(
+            required_rpc_privilege("security.token.list", None),
+            RpcPrivilege::Admin
+        );
+    }
+
+    #[test]
+    fn sql_exec_privilege_tracks_read_only() {
+        let select = json!({"sql": "SELECT * FROM app.logs"});
+        let insert = json!({"sql": "INSERT INTO app.logs (id) VALUES (1)"});
+        assert_eq!(
+            required_rpc_privilege("sql.exec", Some(&select)),
+            RpcPrivilege::Read
+        );
+        assert_eq!(
+            required_rpc_privilege("sql.exec", Some(&insert)),
+            RpcPrivilege::Write
+        );
+        // Unparseable / absent params are not provably read-only → Write (fail safe).
+        assert_eq!(
+            required_rpc_privilege("sql.exec", None),
+            RpcPrivilege::Write
+        );
+    }
+
+    #[test]
+    fn privilege_for_role_maps_canonical_and_unknown() {
+        assert_eq!(privilege_for_role("admin"), RpcPrivilege::Admin);
+        assert_eq!(privilege_for_role("ADMIN"), RpcPrivilege::Admin);
+        assert_eq!(privilege_for_role("superuser"), RpcPrivilege::Admin);
+        assert_eq!(privilege_for_role("readwrite"), RpcPrivilege::Write);
+        assert_eq!(privilege_for_role("read_write"), RpcPrivilege::Write);
+        assert_eq!(privilege_for_role("readonly"), RpcPrivilege::Read);
+        assert_eq!(privilege_for_role("viewer"), RpcPrivilege::Read);
+        // Unknown / empty roles fail safe to the least privilege.
+        assert_eq!(privilege_for_role("banana"), RpcPrivilege::Read);
+        assert_eq!(privilege_for_role(""), RpcPrivilege::Read);
+    }
+
+    #[test]
+    fn rpc_authorize_enforces_least_privilege() {
+        let admin = RpcPrincipal {
+            privilege: RpcPrivilege::Admin,
+            label: "a".to_string(),
+        };
+        let writer = RpcPrincipal {
+            privilege: RpcPrivilege::Write,
+            label: "w".to_string(),
+        };
+        let reader = RpcPrincipal {
+            privilege: RpcPrivilege::Read,
+            label: "r".to_string(),
+        };
+
+        // No credential → unauthenticated (401).
+        assert_eq!(
+            rpc_authorize(None, "query.select", None),
+            RpcAuthDecision::Unauthenticated
+        );
+
+        // Reader: reads allowed; writes and admin denied.
+        assert_eq!(
+            rpc_authorize(Some(&reader), "query.select", None),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&reader), "data.insert", None),
+            RpcAuthDecision::Forbidden {
+                required: RpcPrivilege::Write
+            }
+        );
+        assert_eq!(
+            rpc_authorize(Some(&reader), "admin.user.create", None),
+            RpcAuthDecision::Forbidden {
+                required: RpcPrivilege::Admin
+            }
+        );
+
+        // Writer: reads + writes allowed; admin denied.
+        assert_eq!(
+            rpc_authorize(Some(&writer), "data.insert", None),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&writer), "security.token.create", None),
+            RpcAuthDecision::Forbidden {
+                required: RpcPrivilege::Admin
+            }
+        );
+
+        // Admin: everything allowed.
+        assert_eq!(
+            rpc_authorize(Some(&admin), "query.select", None),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&admin), "data.insert", None),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&admin), "admin.user.create", None),
+            RpcAuthDecision::Allow
+        );
+    }
+
+    #[test]
+    fn api_token_secret_resolves_to_role() -> anyhow::Result<()> {
+        let dir = temp_dir("rbac_token_resolve");
+        let mut engine = Engine::open(&dir)?;
+        let ro = engine.create_api_token("readonly", "reporting", 0);
+        let rw = engine.create_api_token("readwrite", "ingest", 0);
+
+        let (role, id) = engine
+            .api_token_role_for_secret(&ro.secret)
+            .expect("readonly secret resolves");
+        assert_eq!(role, "readonly");
+        assert_eq!(id, ro.token_id);
+        assert_eq!(privilege_for_role(&role), RpcPrivilege::Read);
+
+        let (role2, _) = engine
+            .api_token_role_for_secret(&rw.secret)
+            .expect("readwrite secret resolves");
+        assert_eq!(privilege_for_role(&role2), RpcPrivilege::Write);
+
+        // A non-matching secret resolves to no principal.
+        assert!(engine
+            .api_token_role_for_secret("sk_not_a_real_secret")
+            .is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     use axum::{routing::post, Json};
