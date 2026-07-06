@@ -226,6 +226,9 @@ impl Engine {
             self.persist_table(&key.db, &key.table)?;
             self.dirty_tables.remove(key);
         }
+        // Compact the append-only CDC + forensic sidecars into their snapshots and truncate
+        // them, bounding sidecar size + recovery replay to one flush interval.
+        self.compact_change_forensic_logs();
         self.mutations_since_flush = 0;
         self.wal_truncate();
         Ok(())

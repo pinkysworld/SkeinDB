@@ -877,6 +877,10 @@ mod tests {
             ])],
             None,
         )?;
+        // Compact the append-only CDC + forensic sidecars into their durable snapshots
+        // (forensic_chain.json) and truncate the tail, mirroring steady state after a flush
+        // or clean shutdown — the compacted chain is what an auditor inspects on disk.
+        engine.checkpoint_for_shutdown()?;
         Ok(())
     }
 
@@ -913,6 +917,65 @@ mod tests {
         let mut disk: serde_json::Value = serde_json::from_slice(&fs::read(&forensic_path)?)?;
         disk["records"][0]["hash"] = serde_json::Value::String("tampered".to_string());
         fs::write(&forensic_path, serde_json::to_vec_pretty(&disk)?)?;
+
+        let report = collect_audit_verify_report(dir.to_str().expect("temp dir utf8"))?;
+        assert!(!report.is_ok());
+        assert_eq!(report.reason(), Some("hash_mismatch"));
+        assert!(audit_verify_failure_message(&report).contains("hash_mismatch"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    // Forensic records committed since the last checkpoint live in the append-only
+    // `forensic.flog` sidecar, not yet folded into `forensic_chain.json`. Tampering that
+    // tail must be caught on audit exactly like tampering the compacted snapshot: the
+    // hash-chain verifier checks the loaded chain regardless of which store each record
+    // came from.
+    #[test]
+    fn audit_verify_command_detects_tampered_forensic_flog() -> anyhow::Result<()> {
+        let dir = temp_dir("audit_verify_tampered_flog");
+        // Seed compacts a valid chain into forensic_chain.json (and truncates the sidecar).
+        seed_forensic_chain(&dir)?;
+
+        // Append one more mutation WITHOUT checkpointing, so its forensic record lands in the
+        // append-only sidecar as a fresh tail on top of the compacted snapshot.
+        {
+            let mut engine = engine::Engine::open(&dir)?;
+            engine.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "logs".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "message",
+                        Lit::Str {
+                            v: "world".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            // Drop without checkpoint: the record stays in forensic.flog.
+        }
+
+        // Tamper the first record in the sidecar (`[u32 LE len][json]` framing), preserving any
+        // trailing records, then re-frame with the new length.
+        let flog = dir.join("forensic.flog");
+        let bytes = fs::read(&flog)?;
+        assert!(bytes.len() > 4, "expected a forensic.flog tail record");
+        let len = u32::from_le_bytes(bytes[0..4].try_into().expect("len prefix")) as usize;
+        let mut rec: serde_json::Value = serde_json::from_slice(&bytes[4..4 + len])?;
+        rec["hash"] = serde_json::Value::String("tampered".to_string());
+        let new_json = serde_json::to_vec(&rec)?;
+        let mut out = Vec::new();
+        out.extend_from_slice(&(new_json.len() as u32).to_le_bytes());
+        out.extend_from_slice(&new_json);
+        out.extend_from_slice(&bytes[4 + len..]);
+        fs::write(&flog, &out)?;
 
         let report = collect_audit_verify_report(dir.to_str().expect("temp dir utf8"))?;
         assert!(!report.is_ok());
