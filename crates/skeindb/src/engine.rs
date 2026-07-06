@@ -3759,7 +3759,6 @@ impl Engine {
         // between here and the snapshot write is recoverable on the next open.
         self.wal_log_rows(&wal_records)?;
         self.persist_table_deferred(&table.db, &table.table)?;
-        self.persist_changes_best_effort();
 
         Ok(WriteResult {
             affected,
@@ -3945,7 +3944,6 @@ impl Engine {
             self.persist_catalog()?;
             self.wal_log_rows(&wal_records)?;
             self.persist_table_deferred(&table.db, &table.table)?;
-            self.persist_changes_best_effort();
         }
 
         Ok(WriteResult {
@@ -4042,7 +4040,6 @@ impl Engine {
             self.persist_catalog()?;
             self.wal_log_rows(&wal_records)?;
             self.persist_table_deferred(&table.db, &table.table)?;
-            self.persist_changes_best_effort();
         }
 
         Ok(WriteResult {
@@ -5916,7 +5913,6 @@ impl Engine {
         if inserted + updated > 0 {
             self.persist_catalog()?;
             self.persist_table(&params.table.db, &params.table.table)?;
-            self.persist_changes_best_effort();
 
             // Rebuild HNSW index for this table+column.
             self.rebuild_hnsw_index(&params.table, &params.column);
@@ -9236,7 +9232,6 @@ impl Engine {
             }
             self.persist_catalog()?;
             self.persist_table(&params.table.db, &params.table.table)?;
-            self.persist_changes_best_effort();
         }
 
         Ok(MergeApplyResult {
@@ -10511,7 +10506,10 @@ impl Engine {
         };
         self.forensic_next_id = self.forensic_next_id.saturating_add(1);
         self.forensic_chain.push(record);
-        self.persist_forensic_best_effort();
+        let forensic_flog = self.forensic_flog_path();
+        if let Some(rec) = self.forensic_chain.last() {
+            append_log_record(&forensic_flog, rec);
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -11653,6 +11651,10 @@ impl Engine {
         self.persist_oblivious_best_effort();
         self.persist_advisor_patterns_best_effort();
         self.persist_advisor_history_best_effort();
+        // The CDC + forensic snapshots were just written above; discard their now-redundant
+        // append-only sidecars so a clean shutdown leaves no replay tail.
+        let _ = fs::remove_file(self.changes_flog_path());
+        let _ = fs::remove_file(self.forensic_flog_path());
         // Every table snapshot is now durable (the loop above persisted them all), so the
         // deferred-flush dirty set is fully covered and the WAL is redundant: reset both.
         self.dirty_tables.clear();
@@ -11837,6 +11839,27 @@ impl Engine {
         self.data_dir.join("changes.json")
     }
 
+    fn changes_flog_path(&self) -> PathBuf {
+        self.data_dir.join("changes.flog")
+    }
+
+    fn forensic_flog_path(&self) -> PathBuf {
+        self.data_dir.join("forensic.flog")
+    }
+
+    /// Compact the append-only CDC + forensic sidecar logs into their full-snapshot files and
+    /// truncate the sidecars. Called at the flush/checkpoint boundary: the snapshots are written
+    /// durably (fsync), so the sidecars' records are now durable and can be discarded, bounding
+    /// each sidecar's size and the crash-recovery replay to one flush interval. Ordering
+    /// (snapshot then truncate) means a crash between the two leaves duplicate records that the
+    /// loaders drop by `seq`/`id`.
+    fn compact_change_forensic_logs(&self) {
+        self.persist_changes_best_effort();
+        self.persist_forensic_best_effort();
+        let _ = fs::remove_file(self.changes_flog_path());
+        let _ = fs::remove_file(self.forensic_flog_path());
+    }
+
     fn cdc_subscriptions_path(&self) -> PathBuf {
         self.data_dir.join("cdc_subscriptions.json")
     }
@@ -11861,6 +11884,18 @@ impl Engine {
             .or_else(|| load_json::<Vec<ChangeEvent>>(&path))
             .unwrap_or_default();
         self.changes = events;
+        // Replay the append-only sidecar (records committed since the last snapshot compaction),
+        // keeping only records newer than the snapshot so a crash between snapshot-write and
+        // sidecar-truncate never double-counts.
+        let tail = read_log_records::<ChangeEvent>(&self.changes_flog_path());
+        if !tail.is_empty() {
+            let snapshot_max_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
+            for ev in tail {
+                if ev.seq > snapshot_max_seq {
+                    self.changes.push(ev);
+                }
+            }
+        }
         self.trim_retained_change_log();
         self.change_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
     }
@@ -12341,6 +12376,19 @@ impl Engine {
                 self.forensic_chain = disk.records;
                 self.checkpoint_anchors = disk.checkpoint_anchors;
                 self.audit_last_verified_ms = disk.last_verified_ms;
+            }
+        }
+        // Replay the append-only sidecar (hash-chain records committed since the last snapshot
+        // compaction), keeping only records newer than the snapshot so a crash between
+        // snapshot-write and sidecar-truncate never double-appends and breaks chain continuity.
+        let tail = read_log_records::<ForensicRecord>(&self.forensic_flog_path());
+        if !tail.is_empty() {
+            let snapshot_max_id = self.forensic_chain.last().map(|r| r.id).unwrap_or(0);
+            for rec in tail {
+                if rec.id > snapshot_max_id {
+                    self.forensic_next_id = self.forensic_next_id.max(rec.id + 1);
+                    self.forensic_chain.push(rec);
+                }
             }
         }
     }
@@ -12830,6 +12878,10 @@ impl Engine {
             commit_ts_ms: now_millis(),
             lsn: Some(self.change_seq),
         });
+        let changes_flog = self.changes_flog_path();
+        if let Some(ev) = self.changes.last() {
+            append_log_record(&changes_flog, ev);
+        }
         self.trim_retained_change_log();
         self.append_forensic_record(db, table, op, self.change_seq, pk_for_forensic);
         self.mark_views_stale(db, table);
@@ -32179,6 +32231,48 @@ fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Append one length-prefixed JSON record to an append-only `.flog` sidecar. No fsync on the
+/// hot path — the tail is made durable when the log is compacted to its full-snapshot file at
+/// the flush/checkpoint boundary (and survives a clean restart via the OS page cache). This
+/// replaces rewriting + fsyncing the whole change-log / forensic chain on every mutation, which
+/// was the dominant write cost. Best-effort: a write failure just leaves the record in memory.
+fn append_log_record<T: serde::Serialize>(path: &Path, record: &T) {
+    use std::io::Write as _;
+    let Ok(bytes) = serde_json::to_vec(record) else {
+        return;
+    };
+    let Ok(len) = u32::try_from(bytes.len()) else {
+        return;
+    };
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(&len.to_le_bytes());
+        let _ = f.write_all(&bytes);
+    }
+}
+
+/// Read every length-prefixed record appended to a `.flog` sidecar since its last compaction.
+/// Stops cleanly at a torn trailing record (a crash mid-append), returning the complete prefix.
+fn read_log_records<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 4 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        if off + len > bytes.len() {
+            break; // torn trailing record
+        }
+        match serde_json::from_slice::<T>(&bytes[off..off + len]) {
+            Ok(rec) => out.push(rec),
+            Err(_) => break,
+        }
+        off += len;
+    }
+    out
 }
 
 /// Recursively remove stale atomic-write temp files (`*.skein-tmp.*`) left behind if a
