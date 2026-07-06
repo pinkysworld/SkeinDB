@@ -81,6 +81,33 @@ Notes:
 | `SKEINDB_WAL_SYNC_BATCH` | `1` | WAL group commit: `fsync` the write-ahead log once every N committed transactions instead of every one. `1` = fsync every commit (strongest durability). A larger value amortizes the fsync-under-lock cost; it can lose at most `N-1` most-recent commits on a *power-loss* crash (a clean restart still recovers everything), and recovery always yields a consistent committed prefix. |
 | `SKEINDB_STREAMING_MIN_BYTES` | `0` (disabled) | Query-time streaming: a segment-backed table whose on-disk file is at least this many bytes, has a primary key, and uses no embedding/oblivious features loads as a *streaming* table — its rows stay on disk and are read on demand (with a seek-based pk index for point lookups) instead of being materialized into memory. Writes materialize the table on demand. |
 | `SKEINDB_TOKEN` | unset | Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). **Unset = no HTTP RPC authentication.** Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration. |
+| `SKEINDB_RBAC` | `0` (disabled) | Opt-in per-role authorization on the HTTP RPC data path. When enabled, every RPC must present a valid credential and its method is checked against the caller's role (see [RBAC](#rbac-role-based-access-control-on-the-rpc-path) below). When disabled, the legacy single-shared-`SKEINDB_TOKEN` behavior is unchanged. |
+
+---
+
+## RBAC (role-based access control) on the RPC path
+
+By default the HTTP RPC/admin API uses a single shared bearer token (`SKEINDB_TOKEN`): a caller either has full access or none. Setting `SKEINDB_RBAC=1` (also accepts `true`/`on`) turns on per-role authorization so you can hand out least-privilege credentials.
+
+**Principals.** With RBAC on, each request is resolved to a principal from its `Authorization: Bearer <secret>` header:
+
+- The `SKEINDB_TOKEN` value → **superuser** (all privileges). This is the bootstrap admin credential; set it when enabling RBAC. If it is unset, only API tokens can authenticate and startup logs a warning.
+- An **API-token secret** (created via `security.token.create` with a `role`) → the privilege its role confers. Secrets are compared in constant time and expired tokens are rejected.
+- No/unknown credential → `401 unauthorized`.
+
+**Roles → privileges.** Privileges are ordered `read < write < admin` (a higher level implies the lower ones):
+
+| Role | Privilege | Can do |
+|---|---|---|
+| `admin` / `superuser` | admin | Everything, including user/token/cluster/encryption/settings control-plane |
+| `readwrite` | write | Reads **and** data mutations + schema DDL |
+| `readonly` | read | Read-only methods only |
+
+Unknown or empty role strings fail safe to `read` (least privilege). Tokens created without an explicit role default to `admin`, so tokens issued before enabling RBAC keep full access.
+
+**Method classification.** Read-only methods (e.g. `query.select`, `data.get`, `schema.list_tables`, `stats.*`) require `read`. Control-plane methods (`admin.user.*`, `security.token.*`, `cluster.*` mutations, `settings.set`, `settings.encryption.*`, `system.shutdown`, `maintenance.*.set_policy`, `maintenance.history.gc`, …) require `admin` — including the *listing* ones (`admin.user.list`, `security.token.list`), since they expose security configuration. Everything else — data mutations and schema DDL — requires `write`. `sql.exec` is classified by whether the statement is read-only. Unknown methods fail safe to `write` (a `readonly` principal is denied). A denied call returns `403 forbidden` and is logged at WARN.
+
+**Scope (current slice).** Enforcement is role-based and keyed on API tokens. Per-database grants (`admin.user.grant`) and a user-credential (username/secret) login are stored but not yet consulted on the RPC path; finer per-database/per-table scoping and a stricter DDL/admin split are follow-ons.
 
 ---
 

@@ -4145,6 +4145,28 @@ impl Engine {
         self.api_tokens.remove(token_id).is_some()
     }
 
+    /// Resolve an API-token *secret* (presented as an HTTP bearer credential) to the
+    /// `(role, token_id)` of a live, non-expired token that owns it, if any. Used by RBAC
+    /// enforcement on the RPC path to map a credential to a principal's role.
+    ///
+    /// Every stored secret is compared in constant time and the loop never breaks early, so
+    /// a caller cannot learn a valid secret — or even how many tokens exist — from the time
+    /// the comparison takes.
+    pub fn api_token_role_for_secret(&self, secret: &str) -> Option<(String, String)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut found: Option<(String, String)> = None;
+        for tok in self.api_tokens.values() {
+            let live = tok.expires_at_ms == 0 || tok.expires_at_ms > now;
+            if constant_time_eq(tok.secret.as_bytes(), secret.as_bytes()) && live {
+                found = Some((tok.role.clone(), tok.token_id.clone()));
+            }
+        }
+        found
+    }
+
     // ── T044: User management ───────────────────────────────────────────────
     pub fn user_create(&mut self, username: &str, role: &str) -> DbUser {
         let now = std::time::SystemTime::now()
@@ -32238,6 +32260,21 @@ fn durable_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// the flush/checkpoint boundary (and survives a clean restart via the OS page cache). This
 /// replaces rewriting + fsyncing the whole change-log / forensic chain on every mutation, which
 /// was the dominant write cost. Best-effort: a write failure just leaves the record in memory.
+/// Constant-time byte-slice equality: the running time depends only on the input lengths,
+/// not on where the first differing byte is. Used for comparing secrets (API-token secrets,
+/// bearer tokens) so a match can't be discovered incrementally via a timing side channel.
+/// The length is allowed to leak (secrets here are fixed-width), but the contents are not.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn append_log_record<T: serde::Serialize>(path: &Path, record: &T) {
     use std::io::Write as _;
     let Ok(bytes) = serde_json::to_vec(record) else {
