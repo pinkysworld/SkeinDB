@@ -19253,6 +19253,15 @@ pub(crate) async fn handle_rpc(
                     };
                     cluster_nodes(state, p)
                 }
+                "cluster.failover.status" => Ok(cluster_failover_status(state)),
+                "cluster.node.heartbeat" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        node_id: String,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    cluster_node_heartbeat(state, &p.node_id)
+                }
                 "cluster.join_token.create" => {
                     let p = if params.is_some() {
                         parse_params::<ClusterJoinTokenCreateParams>(params.clone())?
@@ -21567,24 +21576,46 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
     let methods = vec![
         "cluster.status",
         "cluster.nodes",
+        "cluster.failover.status",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
         "cluster.node.leave",
+        "cluster.node.heartbeat",
         "cluster.replica.promote",
         "cluster.shard.create",
         "cluster.shard.move",
         "cluster.shard.rebalance",
     ];
+    let now = now_unix_ms_u64();
+    let timeout = cluster_node_timeout_ms();
+    let primary_healthy = cluster
+        .nodes
+        .iter()
+        .find(|n| n.node_id == cluster.primary_node_id)
+        .map(|p| {
+            evaluate_node_health(p, &cluster.local_node_id, now, timeout) == NodeHealth::Online
+        })
+        .unwrap_or(false);
+    let failover = elect_failover_candidate(
+        &cluster.nodes,
+        &cluster.primary_node_id,
+        &cluster.local_node_id,
+        now,
+        timeout,
+    );
     Ok(serde_json::json!({
         "enabled": cluster.enabled,
         "cluster_id": cluster.cluster_id,
         "local_node_id": cluster.local_node_id,
         "primary_node_id": cluster.primary_node_id,
+        "primary_healthy": primary_healthy,
         "local_role": cluster.local_role(),
         "nodes": cluster.nodes,
         "shards": cluster.shards,
         "replication": cluster_replication_status_json(state),
+        "failover_recommended": failover.is_some(),
+        "recommended_candidate": failover.as_ref().map(|p| p.candidate_node_id.clone()),
         "methods": methods,
     }))
 }
@@ -21838,6 +21869,185 @@ fn cluster_node_leave(state: &AppState, params: ClusterNodeLeaveParams) -> Resul
         "node_id": params.node_id,
         "status": "offline",
         "new_primary": new_primary,
+    }))
+}
+
+// ── HA: heartbeat-driven failure detection + failover-candidate election ────────────────
+//
+// A node's liveness is inferred from the age of its last heartbeat (`last_seen_ms`). Nodes
+// refresh it via `cluster.node.heartbeat`; `cluster.failover.status` reports each node's
+// derived health and, when the primary is unreachable, the replica that should be promoted.
+// The election is deterministic so every observer computes the same candidate. Acting on the
+// recommendation (automated promotion) needs fencing/consensus and is a separate slice.
+
+const CLUSTER_NODE_TIMEOUT_MS_DEFAULT: u64 = 15_000;
+
+/// How long a node may go without a heartbeat before it is considered offline. Configurable via
+/// `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` (must be > 0); defaults to 15s.
+fn cluster_node_timeout_ms() -> u64 {
+    std::env::var("SKEINDB_CLUSTER_NODE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(CLUSTER_NODE_TIMEOUT_MS_DEFAULT)
+}
+
+/// Derived liveness of a node, distinct from its administrative `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeHealth {
+    Online,
+    Offline,
+}
+
+impl NodeHealth {
+    fn as_str(self) -> &'static str {
+        match self {
+            NodeHealth::Online => "online",
+            NodeHealth::Offline => "offline",
+        }
+    }
+}
+
+/// Liveness of a node from its last heartbeat, as observed by `local_node_id`. The observer is
+/// always Online (it is answering this request). A node administratively marked `offline` stays
+/// Offline. Otherwise it is Offline once its last heartbeat is older than `timeout_ms`.
+fn evaluate_node_health(
+    node: &ClusterNode,
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> NodeHealth {
+    if node.node_id == local_node_id {
+        return NodeHealth::Online;
+    }
+    if node.status == "offline" {
+        return NodeHealth::Offline;
+    }
+    if now_ms.saturating_sub(node.last_seen_ms) > timeout_ms {
+        NodeHealth::Offline
+    } else {
+        NodeHealth::Online
+    }
+}
+
+/// A recommended failover: promote `candidate_node_id` because the current primary is down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FailoverPlan {
+    candidate_node_id: String,
+    reason: String,
+}
+
+/// Decide whether a failover is warranted and, if so, which replica to promote. Returns `None`
+/// when the primary is healthy (or absent) or no online replica exists. Deterministic: among the
+/// online replicas the freshest heartbeat wins (least data loss), ties broken by `node_id`
+/// ascending so every observer with the same view elects the same candidate.
+fn elect_failover_candidate(
+    nodes: &[ClusterNode],
+    primary_node_id: &str,
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> Option<FailoverPlan> {
+    let primary = nodes.iter().find(|n| n.node_id == primary_node_id)?;
+    if evaluate_node_health(primary, local_node_id, now_ms, timeout_ms) == NodeHealth::Online {
+        return None;
+    }
+    let mut candidates: Vec<&ClusterNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.node_id != primary_node_id
+                && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.last_seen_ms
+            .cmp(&a.last_seen_ms)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    candidates.first().map(|c| FailoverPlan {
+        candidate_node_id: c.node_id.clone(),
+        reason: format!(
+            "primary '{primary_node_id}' has not heartbeat in >{timeout_ms}ms; \
+             promote the freshest online replica"
+        ),
+    })
+}
+
+/// Read-only failover readiness: derived health of every node plus, when the primary is down,
+/// the recommended promotion target. Does not mutate cluster state or perform the failover.
+fn cluster_failover_status(state: &AppState) -> Value {
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let now = now_unix_ms_u64();
+    let timeout = cluster_node_timeout_ms();
+    let primary_healthy = cluster
+        .nodes
+        .iter()
+        .find(|n| n.node_id == cluster.primary_node_id)
+        .map(|p| {
+            evaluate_node_health(p, &cluster.local_node_id, now, timeout) == NodeHealth::Online
+        })
+        .unwrap_or(false);
+    let plan = elect_failover_candidate(
+        &cluster.nodes,
+        &cluster.primary_node_id,
+        &cluster.local_node_id,
+        now,
+        timeout,
+    );
+    let node_health: Vec<Value> = cluster
+        .nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "node_id": n.node_id,
+                "role": n.role,
+                "rpc_url": n.rpc_url,
+                "admin_status": n.status,
+                "health": evaluate_node_health(n, &cluster.local_node_id, now, timeout).as_str(),
+                "last_seen_ms": n.last_seen_ms,
+                "last_seen_age_ms": now.saturating_sub(n.last_seen_ms),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "enabled": cluster.enabled,
+        "observer_node_id": cluster.local_node_id,
+        "primary_node_id": cluster.primary_node_id,
+        "primary_healthy": primary_healthy,
+        "node_timeout_ms": timeout,
+        "failover_recommended": plan.is_some(),
+        "recommended_candidate": plan.as_ref().map(|p| p.candidate_node_id.clone()),
+        "reason": plan.as_ref().map(|p| p.reason.clone()),
+        "nodes": node_health,
+    })
+}
+
+/// Record a heartbeat from `node_id`, refreshing its liveness (`last_seen_ms` + `status =
+/// online`). This is the signal `cluster.failover.status` uses to detect a dead primary.
+fn cluster_node_heartbeat(state: &AppState, node_id: &str) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    {
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let node = cluster
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == node_id)
+            .ok_or_else(|| RpcError::new("not_found", "node not found"))?;
+        node.last_seen_ms = now;
+        node.status = "online".to_string();
+    }
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "node_id": node_id,
+        "last_seen_ms": now,
     }))
 }
 
@@ -31997,6 +32207,7 @@ fn is_admin_rpc_method(method: &str) -> bool {
             | "cluster.node.join"
             | "cluster.node.leave"
             | "cluster.node.remove"
+            | "cluster.node.heartbeat"
             | "cluster.replica.promote"
             | "cluster.shard.create"
             | "cluster.shard.move"
@@ -32333,6 +32544,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "objects.fetch"
             | "cluster.route_query"
             | "cluster.replication_stats"
+            | "cluster.failover.status"
     )
 }
 
@@ -32414,10 +32626,12 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "settings.set",
         "cluster.status",
         "cluster.nodes",
+        "cluster.failover.status",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
         "cluster.node.leave",
+        "cluster.node.heartbeat",
         "cluster.replica.promote",
         "cluster.shard.create",
         "cluster.shard.move",
@@ -34831,6 +35045,186 @@ mod tests {
         Ok(())
     }
 
+    // ── HA: failure detection + failover election (pure) ────────────────────────
+
+    fn cnode(id: &str, role: &str, status: &str, last_seen_ms: u64) -> ClusterNode {
+        ClusterNode {
+            node_id: id.to_string(),
+            rpc_url: format!("http://{id}"),
+            role: role.to_string(),
+            status: status.to_string(),
+            joined_at_ms: 0,
+            last_seen_ms,
+        }
+    }
+
+    #[test]
+    fn node_health_reflects_heartbeat_age() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // The observer (local node) is always Online, even with an ancient heartbeat.
+        assert_eq!(
+            evaluate_node_health(&cnode("n1", "primary", "online", 0), "n1", now, timeout),
+            NodeHealth::Online
+        );
+        // A fresh remote heartbeat is Online.
+        assert_eq!(
+            evaluate_node_health(
+                &cnode("n2", "replica", "online", now - 1_000),
+                "n1",
+                now,
+                timeout
+            ),
+            NodeHealth::Online
+        );
+        // A stale remote heartbeat is Offline.
+        assert_eq!(
+            evaluate_node_health(
+                &cnode("n3", "replica", "online", now - 20_000),
+                "n1",
+                now,
+                timeout
+            ),
+            NodeHealth::Offline
+        );
+        // Administratively offline is Offline even if recently seen.
+        assert_eq!(
+            evaluate_node_health(
+                &cnode("n4", "replica", "offline", now - 100),
+                "n1",
+                now,
+                timeout
+            ),
+            NodeHealth::Offline
+        );
+        // Age exactly at the timeout is still Online (only strictly older is Offline).
+        assert_eq!(
+            evaluate_node_health(
+                &cnode("n5", "replica", "online", now - timeout),
+                "n1",
+                now,
+                timeout
+            ),
+            NodeHealth::Online
+        );
+    }
+
+    #[test]
+    fn failover_election_picks_freshest_online_replica() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        let obs = "obs"; // external observer: every node is evaluated by heartbeat age
+
+        // A healthy primary means no failover.
+        let healthy = vec![
+            cnode("p", "primary", "online", now - 1_000),
+            cnode("r1", "replica", "online", now - 2_000),
+        ];
+        assert_eq!(
+            elect_failover_candidate(&healthy, "p", obs, now, timeout),
+            None
+        );
+
+        // A dead primary elects the freshest online replica.
+        let down = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 5_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert_eq!(
+            elect_failover_candidate(&down, "p", obs, now, timeout)
+                .expect("failover")
+                .candidate_node_id,
+            "r2"
+        );
+
+        // A tie on freshness is broken by node_id ascending (deterministic across observers).
+        let tie = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("rb", "replica", "online", now - 3_000),
+            cnode("ra", "replica", "online", now - 3_000),
+        ];
+        assert_eq!(
+            elect_failover_candidate(&tie, "p", obs, now, timeout)
+                .expect("failover")
+                .candidate_node_id,
+            "ra"
+        );
+
+        // A dead primary with no online replica yields no candidate.
+        let no_replica = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 90_000),
+        ];
+        assert_eq!(
+            elect_failover_candidate(&no_replica, "p", obs, now, timeout),
+            None
+        );
+
+        // An offline replica is never a candidate.
+        let one_off = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "offline", now - 100),
+            cnode("r2", "replica", "online", now - 4_000),
+        ];
+        assert_eq!(
+            elect_failover_candidate(&one_off, "p", obs, now, timeout)
+                .expect("failover")
+                .candidate_node_id,
+            "r2"
+        );
+    }
+
+    #[test]
+    fn cluster_node_heartbeat_refreshes_liveness() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_heartbeat");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        // Register a replica whose heartbeat is stale, then heartbeat it.
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster
+                .nodes
+                .push(cnode("replica-1", "replica", "online", 0));
+        }
+        let before = cluster_failover_status(&state);
+        // With a zero heartbeat the replica reads as offline.
+        let replica_health = before["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["node_id"] == "replica-1")
+            .unwrap()["health"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(replica_health, "offline");
+
+        cluster_node_heartbeat(&state, "replica-1").expect("heartbeat ok");
+
+        let after = cluster_failover_status(&state);
+        let replica_health = after["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["node_id"] == "replica-1")
+            .unwrap()["health"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(replica_health, "online");
+
+        // An unknown node cannot heartbeat.
+        assert!(cluster_node_heartbeat(&state, "ghost").is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
     use axum::{routing::post, Json};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
@@ -34915,7 +35309,9 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 147);
+        assert_eq!(methods.len(), 149);
+        assert!(methods.contains(&"cluster.failover.status"));
+        assert!(methods.contains(&"cluster.node.heartbeat"));
         assert!(methods.contains(&"migration.report_export"));
         assert!(methods.contains(&"stats.query_fingerprint_latency"));
         assert!(methods.contains(&"cdc.pause"));
