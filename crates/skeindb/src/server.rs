@@ -65,9 +65,9 @@ use skeindb_skeinql::{
 };
 
 use crate::engine::{
-    cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, CdcEventFormat,
-    CdcPollResult, CdcRuntimeStats, CdcSubscriptionOptions, ChangeEvent, ColumnSchema, Engine,
-    ObjectManifest, Subscriptions,
+    cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, query_referenced_dbs,
+    ApiTokenAuth, CdcEventFormat, CdcPollResult, CdcRuntimeStats, CdcSubscriptionOptions,
+    ChangeEvent, ColumnSchema, Engine, ObjectManifest, Subscriptions,
 };
 use crate::pg_wire;
 use crate::quic;
@@ -19001,6 +19001,39 @@ pub(crate) async fn handle_rpc(
                     response: Some(resp),
                 };
             }
+            RpcAuthDecision::ForbiddenDbScope { db } => {
+                let label = principal.as_ref().map(|p| p.label.as_str()).unwrap_or("");
+                tracing::warn!(
+                    method = %req.method,
+                    principal = %label,
+                    db = %db.as_deref().unwrap_or("*"),
+                    "RBAC denied out-of-scope RPC call"
+                );
+                let detail = match &db {
+                    Some(db) => format!(
+                        "database-scoped credential is not permitted to access database '{db}'"
+                    ),
+                    None => format!(
+                        "database-scoped credential is not permitted to call method '{}'",
+                        req.method
+                    ),
+                };
+                let resp: RpcResponse =
+                    RpcResponse::err(req.id.clone(), RpcError::new("forbidden", detail));
+                observe_rpc_call(
+                    state,
+                    &req.method,
+                    req.params.as_ref(),
+                    StatusCode::FORBIDDEN,
+                    false,
+                    None,
+                    started_at.elapsed(),
+                );
+                return RpcOutcome {
+                    status: StatusCode::FORBIDDEN,
+                    response: Some(resp),
+                };
+            }
         }
     } else if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
         // RBAC off (legacy): if SKEINDB_TOKEN is set, require a matching shared bearer.
@@ -19993,13 +20026,18 @@ pub(crate) async fn handle_rpc(
                         label: Option<String>,
                         #[serde(default)]
                         ttl_ms: Option<u64>,
+                        /// Optional database scope: when present, the token is restricted to
+                        /// data-plane operations on exactly these databases (RBAC).
+                        #[serde(default)]
+                        db_scope: Option<Vec<String>>,
                     }
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
-                    let token = eng.create_api_token(
+                    let token = eng.create_api_token_scoped(
                         p.role.as_deref().unwrap_or("admin"),
                         p.label.as_deref().unwrap_or(""),
                         p.ttl_ms.unwrap_or(0),
+                        p.db_scope,
                     );
                     Ok(serde_json::to_value(&token)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
@@ -32014,16 +32052,18 @@ fn privilege_for_role(role: &str) -> RpcPrivilege {
     }
 }
 
-/// A resolved RPC caller: the privilege its credential confers plus a short label for logging.
+/// A resolved RPC caller: the privilege its credential confers, an optional database scope
+/// (`None` = unrestricted), plus a short label for logging.
 #[derive(Debug, Clone)]
 struct RpcPrincipal {
     privilege: RpcPrivilege,
+    db_scope: Option<Vec<String>>,
     label: String,
 }
 
 /// The outcome of authorizing a resolved principal for a method. Pure and env-free so the
 /// security policy is exhaustively unit-testable without HTTP, locks, or process env.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RpcAuthDecision {
     Allow,
     /// No valid credential was presented → 401.
@@ -32032,6 +32072,102 @@ enum RpcAuthDecision {
     Forbidden {
         required: RpcPrivilege,
     },
+    /// A database-scoped credential invoked a method outside its scope → 403. `db` names the
+    /// out-of-scope database when known, or `None` when the method is not scopable at all.
+    ForbiddenDbScope {
+        db: Option<String>,
+    },
+}
+
+/// How a method relates to a database-scoped credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DbScopeTarget {
+    /// No database target; safe for any authenticated principal (e.g. `system.ping`, `tx.*`).
+    Neutral,
+    /// The method reads/writes exactly these databases; allowed iff all are in scope.
+    Dbs(Vec<String>),
+    /// Not permitted for a database-scoped credential: a global/cross-database or control-plane
+    /// method, or a data method whose target database could not be determined (fail closed).
+    Restricted,
+}
+
+/// Extract the single database at `path` within `params` as a one-element `Dbs`, or `Restricted`
+/// if it is missing / not a string (fail closed).
+fn single_db_target(params: Option<&Value>, path: &[&str]) -> DbScopeTarget {
+    let Some(mut cur) = params else {
+        return DbScopeTarget::Restricted;
+    };
+    for part in path {
+        match cur.get(*part) {
+            Some(next) => cur = next,
+            None => return DbScopeTarget::Restricted,
+        }
+    }
+    match cur.as_str() {
+        Some(db) if !db.is_empty() => DbScopeTarget::Dbs(vec![db.to_string()]),
+        _ => DbScopeTarget::Restricted,
+    }
+}
+
+/// Classify a method (with its params) for database-scope enforcement. Only consulted for
+/// database-scoped credentials; unrestricted credentials never reach this.
+fn rpc_method_db_targets(method: &str, params: Option<&Value>) -> DbScopeTarget {
+    match method {
+        // Scope-neutral: no database target and safe for any authenticated caller.
+        "system.ping"
+        | "system.version"
+        | "system.capabilities"
+        | "transport.capabilities"
+        | "tx.begin"
+        | "tx.commit"
+        | "tx.rollback" => DbScopeTarget::Neutral,
+
+        // Multi-database read: walk the query AST for every base-table database it touches.
+        "query.select" => match params
+            .and_then(|p| p.get("query"))
+            .and_then(|q| serde_json::from_value::<Query>(q.clone()).ok())
+        {
+            Some(query) => DbScopeTarget::Dbs(query_referenced_dbs(&query)),
+            None => DbScopeTarget::Restricted,
+        },
+
+        // Single-database reads.
+        "schema.list_tables" | "schema.describe_table" => single_db_target(params, &["db"]),
+        "data.get" => single_db_target(params, &["table", "db"]),
+        "vector.search" | "vector.index.status" => single_db_target(params, &["table", "db"]),
+
+        // Writes (and write-shaped `sql.exec`): reuse the cluster-guard write-target extractor.
+        _ if is_scopable_write_method(method) => match write_target_from_params(method, params).0 {
+            Some(db) => DbScopeTarget::Dbs(vec![db]),
+            None => DbScopeTarget::Restricted,
+        },
+
+        // Everything else (global aggregates, control-plane, prepared/patch/subscribe, …) is not
+        // permitted for a database-scoped credential.
+        _ => DbScopeTarget::Restricted,
+    }
+}
+
+/// Methods whose target database `write_target_from_params` can extract. Kept in lockstep with
+/// that function's match so scope extraction never silently fails open.
+fn is_scopable_write_method(method: &str) -> bool {
+    matches!(
+        method,
+        "schema.create_database"
+            | "schema.drop_database"
+            | "schema.create_table"
+            | "schema.drop_table"
+            | "schema.apply_merge"
+            | "data.insert"
+            | "data.update"
+            | "data.delete"
+            | "vector.insert"
+            | "merge.apply"
+            | "view.create"
+            | "view.drop"
+            | "view.refresh"
+            | "sql.exec"
+    )
 }
 
 fn rpc_authorize(
@@ -32039,17 +32175,32 @@ fn rpc_authorize(
     method: &str,
     params: Option<&Value>,
 ) -> RpcAuthDecision {
-    match principal {
-        None => RpcAuthDecision::Unauthenticated,
-        Some(p) => {
-            let required = required_rpc_privilege(method, params);
-            if p.privilege.allows(required) {
-                RpcAuthDecision::Allow
-            } else {
-                RpcAuthDecision::Forbidden { required }
+    let Some(p) = principal else {
+        return RpcAuthDecision::Unauthenticated;
+    };
+    let required = required_rpc_privilege(method, params);
+    if !p.privilege.allows(required) {
+        return RpcAuthDecision::Forbidden { required };
+    }
+    // Database-scope check (only for scoped credentials; unrestricted ones skip it).
+    if let Some(scope) = &p.db_scope {
+        match rpc_method_db_targets(method, params) {
+            DbScopeTarget::Neutral => {}
+            DbScopeTarget::Dbs(dbs) => {
+                for db in &dbs {
+                    if !scope.iter().any(|s| s == db) {
+                        return RpcAuthDecision::ForbiddenDbScope {
+                            db: Some(db.clone()),
+                        };
+                    }
+                }
+            }
+            DbScopeTarget::Restricted => {
+                return RpcAuthDecision::ForbiddenDbScope { db: None };
             }
         }
     }
+    RpcAuthDecision::Allow
 }
 
 /// Whether RBAC enforcement is enabled (`SKEINDB_RBAC` = `1`/`true`/`on`). Read per request to
@@ -32076,17 +32227,23 @@ async fn resolve_rpc_principal(
         if constant_time_eq(t.as_bytes(), bearer.as_bytes()) {
             return Some(RpcPrincipal {
                 privilege: RpcPrivilege::Admin,
+                db_scope: None,
                 label: "root-token".to_string(),
             });
         }
     }
-    let (role, token_id) = state
+    let ApiTokenAuth {
+        role,
+        token_id,
+        db_scope,
+    } = state
         .engine
         .read()
         .await
         .api_token_role_for_secret(bearer)?;
     Some(RpcPrincipal {
         privilege: privilege_for_role(&role),
+        db_scope,
         label: token_id,
     })
 }
@@ -34430,14 +34587,17 @@ mod tests {
     fn rpc_authorize_enforces_least_privilege() {
         let admin = RpcPrincipal {
             privilege: RpcPrivilege::Admin,
+            db_scope: None,
             label: "a".to_string(),
         };
         let writer = RpcPrincipal {
             privilege: RpcPrivilege::Write,
+            db_scope: None,
             label: "w".to_string(),
         };
         let reader = RpcPrincipal {
             privilege: RpcPrivilege::Read,
+            db_scope: None,
             label: "r".to_string(),
         };
 
@@ -34493,23 +34653,174 @@ mod tests {
     }
 
     #[test]
+    fn method_db_targets_classifies_scope() {
+        // Neutral: no database.
+        for m in [
+            "system.ping",
+            "tx.begin",
+            "tx.commit",
+            "transport.capabilities",
+        ] {
+            assert_eq!(
+                rpc_method_db_targets(m, None),
+                DbScopeTarget::Neutral,
+                "{m}"
+            );
+        }
+        // Single-db reads.
+        let list = json!({"db": "analytics"});
+        assert_eq!(
+            rpc_method_db_targets("schema.list_tables", Some(&list)),
+            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+        );
+        let get = json!({"table": {"db": "analytics", "table": "events"}, "pk": []});
+        assert_eq!(
+            rpc_method_db_targets("data.get", Some(&get)),
+            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+        );
+        // Write: target extracted from the write-target map.
+        let ins = json!({"into": {"db": "analytics", "table": "events"}, "rows": []});
+        assert_eq!(
+            rpc_method_db_targets("data.insert", Some(&ins)),
+            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+        );
+        // Multi-db query: both joined databases are collected.
+        let q = json!({"query": {"body": {"select": {"projection": [], "from": [
+            {"db": "analytics", "table": "a"},
+            {"db": "reporting", "table": "b"}
+        ]}}}});
+        match rpc_method_db_targets("query.select", Some(&q)) {
+            DbScopeTarget::Dbs(dbs) => {
+                assert!(dbs.contains(&"analytics".to_string()));
+                assert!(dbs.contains(&"reporting".to_string()));
+            }
+            other => panic!("expected Dbs, got {other:?}"),
+        }
+        // Missing target / unknown method fails closed to Restricted.
+        assert_eq!(
+            rpc_method_db_targets("data.get", Some(&json!({}))),
+            DbScopeTarget::Restricted
+        );
+        assert_eq!(
+            rpc_method_db_targets("stats.snapshot", None),
+            DbScopeTarget::Restricted
+        );
+        assert_eq!(
+            rpc_method_db_targets("cdc.poll", None),
+            DbScopeTarget::Restricted
+        );
+    }
+
+    #[test]
+    fn db_scoped_principal_is_confined_to_its_databases() {
+        let scoped = RpcPrincipal {
+            privilege: RpcPrivilege::Write,
+            db_scope: Some(vec!["analytics".to_string()]),
+            label: "scoped".to_string(),
+        };
+
+        // In-scope read + write are allowed.
+        let sel_in = json!({"query": {"body": {"select": {"projection": [], "from": [
+            {"db": "analytics", "table": "a"}
+        ]}}}});
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "query.select", Some(&sel_in)),
+            RpcAuthDecision::Allow
+        );
+        let ins_in = json!({"into": {"db": "analytics", "table": "events"}, "rows": []});
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "data.insert", Some(&ins_in)),
+            RpcAuthDecision::Allow
+        );
+
+        // A query touching an out-of-scope database is denied, naming that database.
+        let sel_out = json!({"query": {"body": {"select": {"projection": [], "from": [
+            {"db": "analytics", "table": "a"},
+            {"db": "production", "table": "b"}
+        ]}}}});
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "query.select", Some(&sel_out)),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("production".to_string())
+            }
+        );
+        // A write to an out-of-scope database is denied.
+        let ins_out = json!({"into": {"db": "production", "table": "events"}, "rows": []});
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "data.insert", Some(&ins_out)),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("production".to_string())
+            }
+        );
+        // A non-scopable (global / control-plane) method is denied outright.
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "stats.snapshot", None),
+            RpcAuthDecision::ForbiddenDbScope { db: None }
+        );
+        // Scope-neutral methods (transactions, ping) remain allowed.
+        assert_eq!(
+            rpc_authorize(Some(&scoped), "tx.begin", None),
+            RpcAuthDecision::Allow
+        );
+
+        // An unrestricted principal (db_scope = None) is unaffected by scope checks.
+        let unrestricted = RpcPrincipal {
+            privilege: RpcPrivilege::Write,
+            db_scope: None,
+            label: "root".to_string(),
+        };
+        assert_eq!(
+            rpc_authorize(Some(&unrestricted), "data.insert", Some(&ins_out)),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&unrestricted), "stats.snapshot", None),
+            RpcAuthDecision::Allow
+        );
+
+        // Role privilege is still enforced first: a read-only scoped token can't write even in
+        // its own database.
+        let scoped_ro = RpcPrincipal {
+            privilege: RpcPrivilege::Read,
+            db_scope: Some(vec!["analytics".to_string()]),
+            label: "scoped-ro".to_string(),
+        };
+        assert_eq!(
+            rpc_authorize(Some(&scoped_ro), "data.insert", Some(&ins_in)),
+            RpcAuthDecision::Forbidden {
+                required: RpcPrivilege::Write
+            }
+        );
+    }
+
+    #[test]
     fn api_token_secret_resolves_to_role() -> anyhow::Result<()> {
         let dir = temp_dir("rbac_token_resolve");
         let mut engine = Engine::open(&dir)?;
-        let ro = engine.create_api_token("readonly", "reporting", 0);
-        let rw = engine.create_api_token("readwrite", "ingest", 0);
+        let ro = engine.create_api_token_scoped("readonly", "reporting", 0, None);
+        let rw = engine.create_api_token_scoped("readwrite", "ingest", 0, None);
+        let scoped =
+            engine.create_api_token_scoped("readwrite", "app", 0, Some(vec!["analytics".into()]));
 
-        let (role, id) = engine
+        let auth = engine
             .api_token_role_for_secret(&ro.secret)
             .expect("readonly secret resolves");
-        assert_eq!(role, "readonly");
-        assert_eq!(id, ro.token_id);
-        assert_eq!(privilege_for_role(&role), RpcPrivilege::Read);
+        assert_eq!(auth.role, "readonly");
+        assert_eq!(auth.token_id, ro.token_id);
+        assert_eq!(auth.db_scope, None);
+        assert_eq!(privilege_for_role(&auth.role), RpcPrivilege::Read);
 
-        let (role2, _) = engine
+        let auth2 = engine
             .api_token_role_for_secret(&rw.secret)
             .expect("readwrite secret resolves");
-        assert_eq!(privilege_for_role(&role2), RpcPrivilege::Write);
+        assert_eq!(privilege_for_role(&auth2.role), RpcPrivilege::Write);
+        assert_eq!(auth2.db_scope, None);
+
+        // A scoped token carries its database scope through resolution.
+        let auth3 = engine
+            .api_token_role_for_secret(&scoped.secret)
+            .expect("scoped secret resolves");
+        assert_eq!(auth3.db_scope, Some(vec!["analytics".to_string()]));
 
         // A non-matching secret resolves to no principal.
         assert!(engine

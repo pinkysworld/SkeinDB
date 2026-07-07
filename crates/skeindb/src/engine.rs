@@ -1433,6 +1433,20 @@ pub struct ApiToken {
     pub label: String,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    /// Optional database scope for RBAC. `None` (the default, and the value for every token
+    /// created before this field existed) means the token is unrestricted across databases;
+    /// `Some(list)` restricts it to data-plane operations on exactly those databases.
+    #[serde(default)]
+    pub db_scope: Option<Vec<String>>,
+}
+
+/// The RBAC-relevant fields resolved from an API-token secret: its role, id (for logging), and
+/// optional database scope. Returned by [`Engine::api_token_role_for_secret`].
+#[derive(Debug, Clone)]
+pub struct ApiTokenAuth {
+    pub role: String,
+    pub token_id: String,
+    pub db_scope: Option<Vec<String>>,
 }
 
 /// A database user with role and per-database grants (T044).
@@ -4105,7 +4119,16 @@ impl Engine {
         Ok(tables)
     }
 
-    pub fn create_api_token(&mut self, role: &str, label: &str, ttl_ms: u64) -> ApiToken {
+    /// Create an API token, optionally restricted to a set of databases. `db_scope = None`
+    /// leaves the token unrestricted across databases; `Some(list)` limits it to data-plane
+    /// operations on those databases under RBAC enforcement.
+    pub fn create_api_token_scoped(
+        &mut self,
+        role: &str,
+        label: &str,
+        ttl_ms: u64,
+        db_scope: Option<Vec<String>>,
+    ) -> ApiToken {
         let id = format!("tok_{:016x}", self.api_token_next_id);
         self.api_token_next_id += 1;
         let secret = format!("sk_{:032x}", {
@@ -4132,6 +4155,7 @@ impl Engine {
             label: label.to_string(),
             created_at_ms: now,
             expires_at_ms: expires,
+            db_scope: db_scope.filter(|s| !s.is_empty()),
         };
         self.api_tokens.insert(id, token.clone());
         token
@@ -4152,16 +4176,20 @@ impl Engine {
     /// Every stored secret is compared in constant time and the loop never breaks early, so
     /// a caller cannot learn a valid secret — or even how many tokens exist — from the time
     /// the comparison takes.
-    pub fn api_token_role_for_secret(&self, secret: &str) -> Option<(String, String)> {
+    pub fn api_token_role_for_secret(&self, secret: &str) -> Option<ApiTokenAuth> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let mut found: Option<(String, String)> = None;
+        let mut found: Option<ApiTokenAuth> = None;
         for tok in self.api_tokens.values() {
             let live = tok.expires_at_ms == 0 || tok.expires_at_ms > now;
             if constant_time_eq(tok.secret.as_bytes(), secret.as_bytes()) && live {
-                found = Some((tok.role.clone(), tok.token_id.clone()));
+                found = Some(ApiTokenAuth {
+                    role: tok.role.clone(),
+                    token_id: tok.token_id.clone(),
+                    db_scope: tok.db_scope.clone(),
+                });
             }
         }
         found
@@ -32075,6 +32103,23 @@ fn expr_simple_value(expr: &Expr) -> bool {
 
 fn collect_tables(query: &Query, out: &mut Vec<(String, String)>) {
     collect_tables_query(query, &HashSet::new(), out);
+}
+
+/// The distinct databases a `SELECT` query reads, walking joins, subqueries, set-operations,
+/// and CTE bodies (CTE names are excluded — they are not real base tables). Used by RBAC to
+/// check a database-scoped credential against every database a read could touch. Reuses the
+/// same table-collection the CDC dependency tracker uses, so it stays consistent with what the
+/// executor actually reads.
+pub fn query_referenced_dbs(query: &Query) -> Vec<String> {
+    let mut tables = Vec::new();
+    collect_tables(query, &mut tables);
+    let mut dbs: Vec<String> = Vec::new();
+    for (db, _table) in tables {
+        if !dbs.contains(&db) {
+            dbs.push(db);
+        }
+    }
+    dbs
 }
 
 fn collect_tables_query(
