@@ -82,6 +82,7 @@ Notes:
 | `SKEINDB_STREAMING_MIN_BYTES` | `0` (disabled) | Query-time streaming: a segment-backed table whose on-disk file is at least this many bytes, has a primary key, and uses no embedding/oblivious features loads as a *streaming* table — its rows stay on disk and are read on demand (with a seek-based pk index for point lookups) instead of being materialized into memory. Writes materialize the table on demand. |
 | `SKEINDB_TOKEN` | unset | Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). **Unset = no HTTP RPC authentication.** Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration. |
 | `SKEINDB_RBAC` | `0` (disabled) | Opt-in per-role authorization on the HTTP RPC data path. When enabled, every RPC must present a valid credential and its method is checked against the caller's role (see [RBAC](#rbac-role-based-access-control-on-the-rpc-path) below). When disabled, the legacy single-shared-`SKEINDB_TOKEN` behavior is unchanged. |
+| `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` | `15000` | Cluster failure detection: a node is treated as *offline* once its last heartbeat (`cluster.node.heartbeat`) is older than this. Feeds the derived node health and the failover-candidate recommendation reported by `cluster.status` / `cluster.failover.status`. |
 
 ---
 
@@ -206,3 +207,10 @@ Clustering is managed via SkeinQL (`cluster.*`) and is designed to be configured
 
 See:
 - `docs/CLUSTERING.md`
+
+### Failure detection & failover readiness
+
+Each node's liveness is tracked by the age of its last heartbeat. A node refreshes its own heartbeat by calling `cluster.node.heartbeat` (`{"node_id": "..."}`) on the primary; a node whose last heartbeat is older than `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` (default 15s) is treated as **offline**.
+
+- **`cluster.failover.status`** (read-only) reports each node's derived `health` (`online`/`offline`, distinct from its administrative status), the last-heartbeat age, whether the primary is healthy, and — when the primary is unreachable — the `recommended_candidate`: the freshest online replica (ties broken by `node_id` so every observer agrees). `cluster.status` also carries `primary_healthy` and `recommended_candidate`.
+- The recommendation is **advisory**. Acting on it (promoting the candidate) is still done explicitly via `cluster.replica.promote`. Automated promotion is deliberately not performed yet: without a consensus/fencing layer, auto-promoting on a network partition could create two primaries (split-brain). Fenced automated failover is a planned follow-on.
