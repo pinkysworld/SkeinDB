@@ -107,7 +107,23 @@ Unknown or empty role strings fail safe to `read` (least privilege). Tokens crea
 
 **Method classification.** Read-only methods (e.g. `query.select`, `data.get`, `schema.list_tables`, `stats.*`) require `read`. Control-plane methods (`admin.user.*`, `security.token.*`, `cluster.*` mutations, `settings.set`, `settings.encryption.*`, `system.shutdown`, `maintenance.*.set_policy`, `maintenance.history.gc`, …) require `admin` — including the *listing* ones (`admin.user.list`, `security.token.list`), since they expose security configuration. Everything else — data mutations and schema DDL — requires `write`. `sql.exec` is classified by whether the statement is read-only. Unknown methods fail safe to `write` (a `readonly` principal is denied). A denied call returns `403 forbidden` and is logged at WARN.
 
-**Scope (current slice).** Enforcement is role-based and keyed on API tokens. Per-database grants (`admin.user.grant`) and a user-credential (username/secret) login are stored but not yet consulted on the RPC path; finer per-database/per-table scoping and a stricter DDL/admin split are follow-ons.
+**Database scope.** Beyond the role, an API token can be restricted to specific databases. Pass `db_scope` to `security.token.create`:
+
+```json
+{"skeinql":"1.0","id":1,"method":"security.token.create",
+ "params":{"role":"readwrite","label":"analytics-app","db_scope":["analytics"]}}
+```
+
+A **database-scoped** token may only perform data-plane operations on the databases in its scope. For each request the target database(s) are extracted and every one must be in scope, otherwise the call is denied with `403 forbidden`:
+
+- **Reads/writes on a single database** — `data.get/insert/update/delete`, `schema.list_tables/describe_table/create_table/drop_table/create_database/drop_database`, `vector.insert/search/index.status`, `view.create/drop/refresh`, `merge.apply`, and write-shaped `sql.exec` — checked against the referenced database.
+- **`query.select`** — every database its `FROM` list touches (across joins, subqueries, set-operations, and CTE bodies) must be in scope; a cross-database query to an out-of-scope database is denied, naming that database.
+- **Scope-neutral methods** — `system.ping/version/capabilities`, `transport.capabilities`, and `tx.begin/commit/rollback` — are always allowed for a scoped token.
+- **Everything else** — global aggregates (`stats.*`), control-plane, and the prepared/patch/subscribe query variants — is **denied** for a scoped token (fail closed). Use an unscoped credential for those.
+
+A token with no `db_scope` (the default, and every token created before this field existed) is unrestricted across databases. The role check always applies first: a `readonly` scoped token still cannot write, even within its own database.
+
+**Scope (current slice).** Role-based enforcement plus per-token database scope (above). The username/secret `DbUser` login and its per-database `admin.user.grant` list are stored but not yet consulted on the RPC path; a user-credential login, per-table scoping, and a stricter DDL/admin split are follow-ons.
 
 ---
 
