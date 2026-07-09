@@ -210,7 +210,14 @@ See:
 
 ### Failure detection & failover readiness
 
-Each node's liveness is tracked by the age of its last heartbeat. A node refreshes its own heartbeat by calling `cluster.node.heartbeat` (`{"node_id": "..."}`) on the primary; a node whose last heartbeat is older than `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` (default 15s) is treated as **offline**.
+Each node's liveness is tracked by the age of its last heartbeat. When clustering is enabled, every node runs a background **heartbeat sender** that calls `cluster.node.heartbeat` (`{"node_id": "<self>"}`) on all peers roughly every `SKEINDB_CLUSTER_NODE_TIMEOUT_MS / 3` (so a node misses several heartbeats before being aged out). A node whose last heartbeat is older than `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` (default 15s) is treated as **offline**.
 
-- **`cluster.failover.status`** (read-only) reports each node's derived `health` (`online`/`offline`, distinct from its administrative status), the last-heartbeat age, whether the primary is healthy, and — when the primary is unreachable — the `recommended_candidate`: the freshest online replica (ties broken by `node_id` so every observer agrees). `cluster.status` also carries `primary_healthy` and `recommended_candidate`.
-- The recommendation is **advisory**. Acting on it (promoting the candidate) is still done explicitly via `cluster.replica.promote`. Automated promotion is deliberately not performed yet: without a consensus/fencing layer, auto-promoting on a network partition could create two primaries (split-brain). Fenced automated failover is a planned follow-on.
+- **`cluster.failover.status`** (read-only) reports each node's derived `health` (`online`/`offline`, distinct from its administrative status), the last-heartbeat age, whether the primary is healthy, the current `leadership_epoch`, and — when the primary is unreachable — the `recommended_candidate`: the freshest online replica (ties broken by `node_id` so every observer agrees). `cluster.status` also carries `primary_healthy` and `recommended_candidate`.
+
+### Quorum fencing (split-brain prevention)
+
+`cluster.failover.status` also reports a `quorum` block: the majority `size` (`floor(members/2)+1`), how many members are currently `reachable`, whether this node `has_quorum`, and `primary_should_step_down` (true when the local primary has lost quorum).
+
+- **Quorum-gated promotion.** A whole-cluster `cluster.replica.promote` is **refused** (`no_quorum`) unless the promoting node observes a quorum of the cluster. On a network partition only the majority side can reach a quorum, so two disjoint partitions can never both elect a primary. During a genuine multi-node outage where you must recover from the minority, pass `force: true` to override (accepting the risk).
+- **Leadership epoch.** Every whole-cluster promotion increments a monotonic `leadership_epoch` — the fencing token that lets a superseded primary detect it is stale.
+- **Advisory step-down (today).** `primary_should_step_down` surfaces when a primary has lost quorum. Automatically demoting that primary and auto-promoting the majority-side candidate (the full self-driving loop) builds on these primitives and is the next slice; today failover is still triggered explicitly via `cluster.replica.promote`, but it is now split-brain-safe by default.

@@ -2901,6 +2901,11 @@ pub struct ClusterReplicaPromoteParams {
     pub shard_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Override the quorum safety check. A whole-cluster promotion is normally refused unless
+    /// the promoting node observes a quorum of the cluster (split-brain guard); `force: true`
+    /// lets an operator promote anyway during a genuine multi-node outage, accepting the risk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
