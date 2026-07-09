@@ -322,6 +322,11 @@ struct ClusterStateModel {
     join_tokens: Vec<ClusterJoinToken>,
     shards: Vec<ClusterShard>,
     replication: ClusterReplicationState,
+    /// Monotonic leadership epoch: the fencing token. Every whole-cluster promotion bumps it,
+    /// so a stale primary (lower epoch) can be detected and rejected. `serde(default)` keeps
+    /// state written before this field existed loadable (epoch 0). See `cluster_has_quorum`.
+    #[serde(default)]
+    leadership_epoch: u64,
 }
 
 impl ClusterStateModel {
@@ -345,6 +350,7 @@ impl ClusterStateModel {
             join_tokens: Vec::new(),
             shards: Vec::new(),
             replication: ClusterReplicationState::default(),
+            leadership_epoch: 0,
         }
     }
 
@@ -16955,6 +16961,13 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             run_compaction_worker_loop(state, shutdown_rx).await;
         }))
     };
+    let cluster_heartbeat_handle = {
+        let state = app_state.clone();
+        let shutdown_rx = app_state.shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            run_cluster_heartbeat_loop(state, shutdown_rx).await;
+        }))
+    };
 
     tracing::info!(
         bind = %opts.bind,
@@ -17010,6 +17023,9 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         handle.abort();
     }
     if let Some(handle) = compaction_handle {
+        handle.abort();
+    }
+    if let Some(handle) = cluster_heartbeat_handle {
         handle.abort();
     }
 
@@ -21973,6 +21989,44 @@ fn elect_failover_candidate(
     })
 }
 
+/// Majority quorum size for a cluster of `total` members: `floor(total/2) + 1`. A single node
+/// needs 1, three need 2, five need 3 — so two disjoint partitions can never both hold a quorum,
+/// which is what prevents split-brain.
+fn cluster_quorum_size(total: usize) -> usize {
+    total / 2 + 1
+}
+
+/// Number of cluster members `local_node_id` currently observes as online (by heartbeat age),
+/// always including itself.
+fn reachable_member_count(
+    nodes: &[ClusterNode],
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> usize {
+    nodes
+        .iter()
+        .filter(|n| {
+            evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
+        })
+        .count()
+}
+
+/// Whether `local_node_id` currently observes a majority (quorum) of the cluster. A node that
+/// lacks quorum must not act as (or be promoted to) primary — on a partition only the majority
+/// side can, so at most one primary accepts writes.
+fn cluster_has_quorum(
+    nodes: &[ClusterNode],
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> bool {
+    let total = nodes.len();
+    total > 0
+        && reachable_member_count(nodes, local_node_id, now_ms, timeout_ms)
+            >= cluster_quorum_size(total)
+}
+
 /// Read-only failover readiness: derived health of every node plus, when the primary is down,
 /// the recommended promotion target. Does not mutate cluster state or perform the failover.
 fn cluster_failover_status(state: &AppState) -> Value {
@@ -21998,6 +22052,10 @@ fn cluster_failover_status(state: &AppState) -> Value {
         now,
         timeout,
     );
+    let total = cluster.nodes.len();
+    let reachable = reachable_member_count(&cluster.nodes, &cluster.local_node_id, now, timeout);
+    let has_quorum = cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout);
+    let local_is_primary = cluster.local_node_id == cluster.primary_node_id;
     let node_health: Vec<Value> = cluster
         .nodes
         .iter()
@@ -22019,9 +22077,19 @@ fn cluster_failover_status(state: &AppState) -> Value {
         "primary_node_id": cluster.primary_node_id,
         "primary_healthy": primary_healthy,
         "node_timeout_ms": timeout,
+        "leadership_epoch": cluster.leadership_epoch,
         "failover_recommended": plan.is_some(),
         "recommended_candidate": plan.as_ref().map(|p| p.candidate_node_id.clone()),
         "reason": plan.as_ref().map(|p| p.reason.clone()),
+        "quorum": {
+            "size": cluster_quorum_size(total),
+            "members": total,
+            "reachable": reachable,
+            "has_quorum": has_quorum,
+            // A primary that has lost quorum must fence itself (stop serving writes) so a
+            // partitioned minority can't keep accepting writes against a promoted majority.
+            "primary_should_step_down": local_is_primary && !has_quorum,
+        },
         "nodes": node_health,
     })
 }
@@ -22056,6 +22124,9 @@ fn cluster_replica_promote(
     params: ClusterReplicaPromoteParams,
 ) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
+    let timeout = cluster_node_timeout_ms();
+    let force = params.force.unwrap_or(false);
+    let new_epoch;
     {
         let mut cluster = state
             .cluster
@@ -22077,7 +22148,18 @@ fn cluster_replica_promote(
                 shard.replicas.push(old_primary);
             }
             shard.updated_at_ms = now;
+            new_epoch = cluster.leadership_epoch;
         } else {
+            // Whole-cluster promotion is fenced: refuse unless the promoting node observes a
+            // quorum of the cluster, so a minority partition cannot elect a second primary.
+            // `force` overrides for a genuine operator-driven recovery.
+            if !force && !cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout) {
+                return Err(RpcError::new(
+                    "no_quorum",
+                    "refusing to promote without a quorum of reachable nodes (split-brain \
+                     risk); pass force:true to override during a confirmed outage",
+                ));
+            }
             let old_primary = cluster.primary_node_id.clone();
             cluster.primary_node_id = params.node_id.clone();
             for node in cluster.nodes.iter_mut() {
@@ -22088,13 +22170,18 @@ fn cluster_replica_promote(
                 }
                 node.last_seen_ms = now;
             }
+            // Bump the fencing token so the superseded primary can detect it is stale.
+            cluster.leadership_epoch = cluster.leadership_epoch.saturating_add(1);
+            new_epoch = cluster.leadership_epoch;
         }
     }
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
     Ok(serde_json::json!({
         "ok": true,
         "primary_node_id": params.node_id,
-        "shard_id": params.shard_id
+        "shard_id": params.shard_id,
+        "leadership_epoch": new_epoch,
+        "forced": force,
     }))
 }
 
@@ -34229,6 +34316,61 @@ async fn run_compaction_worker_once(state: &AppState) -> anyhow::Result<Option<S
     }
 }
 
+/// Interval between outbound cluster heartbeats: a third of the node timeout (min 1s), so a
+/// node misses several heartbeats before peers age it out to offline (avoids flapping).
+fn cluster_heartbeat_interval_ms() -> u64 {
+    (cluster_node_timeout_ms() / 3).max(1000)
+}
+
+/// Background loop: while clustering is enabled, periodically heartbeat every peer so the
+/// cluster keeps a live view of node health — the signal that drives quorum and failover
+/// detection. Stops on shutdown.
+async fn run_cluster_heartbeat_loop(state: AppState, mut shutdown_rx: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(Duration::from_millis(cluster_heartbeat_interval_ms()));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => break,
+            _ = ticker.tick() => {
+                run_cluster_heartbeat_once(&state).await;
+            }
+        }
+    }
+}
+
+/// Send one heartbeat round: POST `cluster.node.heartbeat{node_id: local}` to every other
+/// node so each peer refreshes the local node's liveness. Best-effort — an unreachable peer is
+/// simply not refreshed on our side and ages out to offline. No-op unless clustering is enabled.
+async fn run_cluster_heartbeat_once(state: &AppState) {
+    let (enabled, local_node_id, targets) = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            cluster.enabled,
+            cluster.local_node_id.clone(),
+            cluster
+                .nodes
+                .iter()
+                .filter(|n| n.node_id != cluster.local_node_id)
+                .map(|n| n.rpc_url.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+    if !enabled || targets.is_empty() {
+        return;
+    }
+    let params = serde_json::json!({ "node_id": local_node_id });
+    for rpc_url in targets {
+        if let Err(err) =
+            call_remote_rpc_result(&rpc_url, "cluster.node.heartbeat", params.clone()).await
+        {
+            tracing::debug!(peer = %rpc_url, error = ?err, "cluster heartbeat failed");
+        }
+    }
+}
+
 async fn run_compaction_worker_loop(state: AppState, mut shutdown_rx: watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(Duration::from_millis(COMPACTION_WORKER_INTERVAL_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -35220,6 +35362,108 @@ mod tests {
 
         // An unknown node cannot heartbeat.
         assert!(cluster_node_heartbeat(&state, "ghost").is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn quorum_size_and_reachability() {
+        assert_eq!(cluster_quorum_size(1), 1);
+        assert_eq!(cluster_quorum_size(2), 2);
+        assert_eq!(cluster_quorum_size(3), 2);
+        assert_eq!(cluster_quorum_size(4), 3);
+        assert_eq!(cluster_quorum_size(5), 3);
+
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // Observed by "a": a (local, online), b fresh, c stale.
+        let nodes = vec![
+            cnode("a", "primary", "online", 0),
+            cnode("b", "replica", "online", now - 1_000),
+            cnode("c", "replica", "online", now - 60_000),
+        ];
+        assert_eq!(reachable_member_count(&nodes, "a", now, timeout), 2);
+        assert!(cluster_has_quorum(&nodes, "a", now, timeout)); // 2 of 3
+
+        // If both peers are stale, "a" is a minority partition (sees only itself) → no quorum.
+        let minority = vec![
+            cnode("a", "primary", "online", 0),
+            cnode("b", "replica", "online", now - 60_000),
+            cnode("c", "replica", "online", now - 60_000),
+        ];
+        assert_eq!(reachable_member_count(&minority, "a", now, timeout), 1);
+        assert!(!cluster_has_quorum(&minority, "a", now, timeout));
+
+        // A single-node cluster always has quorum.
+        assert!(cluster_has_quorum(
+            &[cnode("a", "primary", "online", 0)],
+            "a",
+            now,
+            timeout
+        ));
+    }
+
+    #[test]
+    fn promote_is_quorum_gated_and_bumps_epoch() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_promote_quorum");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        // A 3-node cluster where the two peers are stale: this node is a minority partition.
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.local_node_id = "n1".to_string();
+            cluster.primary_node_id = "n1".to_string();
+            cluster.nodes = vec![
+                cnode("n1", "primary", "online", now_unix_ms_u64()),
+                cnode("n2", "replica", "online", 0),
+                cnode("n3", "replica", "online", 0),
+            ];
+            cluster.leadership_epoch = 4;
+        }
+        let promote = |node: &str, force: Option<bool>| ClusterReplicaPromoteParams {
+            node_id: node.to_string(),
+            shard_id: None,
+            reason: None,
+            force,
+        };
+
+        // Without quorum, an unforced whole-cluster promotion is refused (split-brain guard).
+        let err = cluster_replica_promote(&state, promote("n2", None)).unwrap_err();
+        assert_eq!(err.code, "no_quorum");
+
+        // Forcing overrides the guard, promotes, and bumps the fencing epoch.
+        let out = cluster_replica_promote(&state, promote("n2", Some(true))).expect("forced");
+        assert_eq!(out["leadership_epoch"], 5);
+        assert_eq!(out["forced"], true);
+        {
+            let cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cluster.primary_node_id, "n2");
+            assert_eq!(cluster.leadership_epoch, 5);
+        }
+
+        // Refresh every node → quorum present → an unforced promotion now succeeds + bumps again.
+        {
+            let fresh = now_unix_ms_u64();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for n in cluster.nodes.iter_mut() {
+                n.last_seen_ms = fresh;
+                n.status = "online".to_string();
+            }
+        }
+        let out = cluster_replica_promote(&state, promote("n3", None)).expect("with quorum");
+        assert_eq!(out["leadership_epoch"], 6);
+        assert_eq!(out["forced"], false);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
