@@ -67,7 +67,7 @@ use skeindb_skeinql::{
 use crate::engine::{
     cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, query_referenced_dbs,
     ApiTokenAuth, CdcEventFormat, CdcPollResult, CdcRuntimeStats, CdcSubscriptionOptions,
-    ChangeEvent, ColumnSchema, Engine, ObjectManifest, Subscriptions,
+    ChangeEvent, ColumnSchema, DbUser, Engine, ObjectManifest, Subscriptions,
 };
 use crate::pg_wire;
 use crate::quic;
@@ -20103,12 +20103,27 @@ pub(crate) async fn handle_rpc(
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
                     let user = eng.user_create(&p.username, &p.role);
+                    // The full user (including the login `secret`) is returned once here — the
+                    // secret is never exposed again (see admin.user.list redaction below).
                     Ok(serde_json::to_value(&user)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
                 "admin.user.list" => {
                     let eng = state.engine.read().await;
-                    let users = eng.user_list();
+                    // Redact login secrets — expose only whether one is set.
+                    let users: Vec<Value> = eng
+                        .user_list()
+                        .into_iter()
+                        .map(|u| {
+                            serde_json::json!({
+                                "username": u.username,
+                                "role": u.role,
+                                "created_at_ms": u.created_at_ms,
+                                "grants": u.grants,
+                                "has_secret": !u.secret.is_empty(),
+                            })
+                        })
+                        .collect();
                     Ok(serde_json::json!({ "users": users }))
                 }
                 "admin.user.drop" => {
@@ -32484,12 +32499,42 @@ fn privilege_for_role(role: &str) -> RpcPrivilege {
     }
 }
 
-/// A resolved RPC caller: the privilege its credential confers, an optional database scope
-/// (`None` = unrestricted), plus a short label for logging.
+/// Map a single `admin.user.grant` privilege string to the privilege it confers on a database.
+/// Unknown strings fail safe to `read`.
+fn privilege_for_grant(grant: &str) -> RpcPrivilege {
+    match grant.trim().to_ascii_lowercase().as_str() {
+        "all" | "admin" | "owner" | "grant" | "ddl" => RpcPrivilege::Admin,
+        "write" | "readwrite" | "read_write" | "insert" | "update" | "delete" | "dml" => {
+            RpcPrivilege::Write
+        }
+        _ => RpcPrivilege::Read,
+    }
+}
+
+/// Reduce a user's per-database grant lists to one effective privilege per database (the highest
+/// privilege any grant on that database confers).
+fn user_db_grants(user: &DbUser) -> HashMap<String, RpcPrivilege> {
+    user.grants
+        .iter()
+        .map(|(db, privs)| {
+            let effective = privs
+                .iter()
+                .map(|p| privilege_for_grant(p))
+                .max()
+                .unwrap_or(RpcPrivilege::Read);
+            (db.clone(), effective)
+        })
+        .collect()
+}
+
+/// A resolved RPC caller. `privilege` is the global/role ceiling. A principal is scoped by at
+/// most one of: `db_scope` (an API token restricted to a database allowlist) or `db_grants` (a
+/// non-admin DbUser restricted to per-database grants). `label` is for logging.
 #[derive(Debug, Clone)]
 struct RpcPrincipal {
     privilege: RpcPrivilege,
     db_scope: Option<Vec<String>>,
+    db_grants: Option<HashMap<String, RpcPrivilege>>,
     label: String,
 }
 
@@ -32614,7 +32659,23 @@ fn rpc_authorize(
     if !p.privilege.allows(required) {
         return RpcAuthDecision::Forbidden { required };
     }
-    // Database-scope check (only for scoped credentials; unrestricted ones skip it).
+    // Per-database grant check for a non-admin DbUser: every database a data method targets must
+    // be granted to the user with a privilege that covers `required` (the role ceiling above and
+    // this per-database grant together enforce the effective `min(role, grant)`). Non-database
+    // methods fall through and are governed by the role ceiling only.
+    if let Some(grants) = &p.db_grants {
+        if let DbScopeTarget::Dbs(dbs) = rpc_method_db_targets(method, params) {
+            for db in &dbs {
+                let granted = grants.get(db).map(|g| g.allows(required)).unwrap_or(false);
+                if !granted {
+                    return RpcAuthDecision::ForbiddenDbScope {
+                        db: Some(db.clone()),
+                    };
+                }
+            }
+        }
+    }
+    // Database-scope check for a scoped API token (only for scoped credentials).
     if let Some(scope) = &p.db_scope {
         match rpc_method_db_targets(method, params) {
             DbScopeTarget::Neutral => {}
@@ -32660,24 +32721,43 @@ async fn resolve_rpc_principal(
             return Some(RpcPrincipal {
                 privilege: RpcPrivilege::Admin,
                 db_scope: None,
+                db_grants: None,
                 label: "root-token".to_string(),
             });
         }
     }
-    let ApiTokenAuth {
+    let engine = state.engine.read().await;
+    // API token → role + optional database scope.
+    if let Some(ApiTokenAuth {
         role,
         token_id,
         db_scope,
-    } = state
-        .engine
-        .read()
-        .await
-        .api_token_role_for_secret(bearer)?;
-    Some(RpcPrincipal {
-        privilege: privilege_for_role(&role),
-        db_scope,
-        label: token_id,
-    })
+    }) = engine.api_token_role_for_secret(bearer)
+    {
+        return Some(RpcPrincipal {
+            privilege: privilege_for_role(&role),
+            db_scope,
+            db_grants: None,
+            label: token_id,
+        });
+    }
+    // DbUser login secret → role ceiling + per-database grants. An admin-role user is
+    // unrestricted (like a superuser); a non-admin user is confined to its granted databases.
+    if let Some(user) = engine.user_for_secret(bearer) {
+        let privilege = privilege_for_role(&user.role);
+        let db_grants = if privilege == RpcPrivilege::Admin {
+            None
+        } else {
+            Some(user_db_grants(&user))
+        };
+        return Some(RpcPrincipal {
+            privilege,
+            db_scope: None,
+            db_grants,
+            label: format!("user:{}", user.username),
+        });
+    }
+    None
 }
 
 fn is_read_only_method(method: &str) -> bool {
@@ -35166,16 +35246,19 @@ mod tests {
         let admin = RpcPrincipal {
             privilege: RpcPrivilege::Admin,
             db_scope: None,
+            db_grants: None,
             label: "a".to_string(),
         };
         let writer = RpcPrincipal {
             privilege: RpcPrivilege::Write,
             db_scope: None,
+            db_grants: None,
             label: "w".to_string(),
         };
         let reader = RpcPrincipal {
             privilege: RpcPrivilege::Read,
             db_scope: None,
+            db_grants: None,
             label: "r".to_string(),
         };
 
@@ -35294,6 +35377,7 @@ mod tests {
         let scoped = RpcPrincipal {
             privilege: RpcPrivilege::Write,
             db_scope: Some(vec!["analytics".to_string()]),
+            db_grants: None,
             label: "scoped".to_string(),
         };
 
@@ -35345,6 +35429,7 @@ mod tests {
         let unrestricted = RpcPrincipal {
             privilege: RpcPrivilege::Write,
             db_scope: None,
+            db_grants: None,
             label: "root".to_string(),
         };
         assert_eq!(
@@ -35361,6 +35446,7 @@ mod tests {
         let scoped_ro = RpcPrincipal {
             privilege: RpcPrivilege::Read,
             db_scope: Some(vec!["analytics".to_string()]),
+            db_grants: None,
             label: "scoped-ro".to_string(),
         };
         assert_eq!(
@@ -35369,6 +35455,115 @@ mod tests {
                 required: RpcPrivilege::Write
             }
         );
+    }
+
+    #[test]
+    fn grant_strings_map_to_privileges() {
+        assert_eq!(privilege_for_grant("read"), RpcPrivilege::Read);
+        assert_eq!(privilege_for_grant("select"), RpcPrivilege::Read);
+        assert_eq!(privilege_for_grant("write"), RpcPrivilege::Write);
+        assert_eq!(privilege_for_grant("delete"), RpcPrivilege::Write);
+        assert_eq!(privilege_for_grant("all"), RpcPrivilege::Admin);
+        assert_eq!(privilege_for_grant("ddl"), RpcPrivilege::Admin);
+        assert_eq!(privilege_for_grant("banana"), RpcPrivilege::Read); // fail safe
+
+        // user_db_grants collapses each database's grant list to its highest privilege.
+        let user = DbUser {
+            username: "alice".to_string(),
+            role: "readwrite".to_string(),
+            created_at_ms: 0,
+            grants: HashMap::from([(
+                "analytics".to_string(),
+                vec!["read".to_string(), "write".to_string()],
+            )]),
+            secret: "usr_x".to_string(),
+        };
+        assert_eq!(
+            user_db_grants(&user).get("analytics"),
+            Some(&RpcPrivilege::Write)
+        );
+    }
+
+    #[test]
+    fn db_user_principal_is_confined_to_granted_databases() {
+        // A readwrite user with write on `analytics`, read-only on `reporting`, nothing else.
+        let user = RpcPrincipal {
+            privilege: RpcPrivilege::Write, // readwrite role ceiling
+            db_scope: None,
+            db_grants: Some(HashMap::from([
+                ("analytics".to_string(), RpcPrivilege::Write),
+                ("reporting".to_string(), RpcPrivilege::Read),
+            ])),
+            label: "user:alice".to_string(),
+        };
+        let ins = |db: &str| json!({"into": {"db": db, "table": "t"}, "rows": []});
+        let sel = |db: &str| json!({"query":{"body":{"select":{"projection":[],"from":[{"db":db,"table":"t"}]}}}});
+
+        // analytics: read + write allowed.
+        assert_eq!(
+            rpc_authorize(Some(&user), "query.select", Some(&sel("analytics"))),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&user), "data.insert", Some(&ins("analytics"))),
+            RpcAuthDecision::Allow
+        );
+        // reporting: read allowed, write denied by the read-only grant.
+        assert_eq!(
+            rpc_authorize(Some(&user), "query.select", Some(&sel("reporting"))),
+            RpcAuthDecision::Allow
+        );
+        assert_eq!(
+            rpc_authorize(Some(&user), "data.insert", Some(&ins("reporting"))),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("reporting".to_string())
+            }
+        );
+        // production: no grant → denied.
+        assert_eq!(
+            rpc_authorize(Some(&user), "data.insert", Some(&ins("production"))),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("production".to_string())
+            }
+        );
+        // admin methods denied by the role ceiling (readwrite < admin).
+        assert_eq!(
+            rpc_authorize(Some(&user), "admin.user.create", None),
+            RpcAuthDecision::Forbidden {
+                required: RpcPrivilege::Admin
+            }
+        );
+        // scope-neutral methods (transactions) remain allowed.
+        assert_eq!(
+            rpc_authorize(Some(&user), "tx.begin", None),
+            RpcAuthDecision::Allow
+        );
+    }
+
+    #[test]
+    fn user_login_secret_resolves_with_grants() -> anyhow::Result<()> {
+        let dir = temp_dir("rbac_user_login");
+        let mut engine = Engine::open(&dir)?;
+        let created = engine.user_create("alice", "readwrite");
+        assert!(created.secret.starts_with("usr_"));
+        engine.user_grant("alice", "analytics", vec!["write".to_string()])?;
+
+        let resolved = engine
+            .user_for_secret(&created.secret)
+            .expect("secret resolves");
+        assert_eq!(resolved.username, "alice");
+        assert_eq!(resolved.role, "readwrite");
+        assert_eq!(
+            user_db_grants(&resolved).get("analytics"),
+            Some(&RpcPrivilege::Write)
+        );
+
+        // Wrong and empty secrets resolve to nothing.
+        assert!(engine.user_for_secret("usr_deadbeef").is_none());
+        assert!(engine.user_for_secret("").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]

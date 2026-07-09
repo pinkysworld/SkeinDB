@@ -1457,6 +1457,11 @@ pub struct DbUser {
     pub created_at_ms: u64,
     /// Per-database privilege list: db_name → [privilege, ...]
     pub grants: HashMap<String, Vec<String>>,
+    /// Login secret (bearer credential) for RBAC. Generated on create and shown once. Empty for
+    /// users created before this field existed (they cannot log in until re-created).
+    /// `serde(default)` keeps old persisted users loadable.
+    #[serde(default)]
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4201,14 +4206,45 @@ impl Engine {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let secret = format!("usr_{:032x}", {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            username.hash(&mut h);
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .hash(&mut h);
+            h.finish()
+        });
         let user = DbUser {
             username: username.to_string(),
             role: role.to_string(),
             created_at_ms: now,
             grants: HashMap::new(),
+            secret,
         };
         self.db_users.insert(username.to_string(), user.clone());
         user
+    }
+
+    /// Resolve a DbUser login secret (presented as a bearer credential) to that user, if a user
+    /// with a non-empty matching secret exists. Constant-time over all users (and never matches
+    /// an empty secret) so a caller can't learn a secret — or the user count — by timing.
+    pub fn user_for_secret(&self, secret: &str) -> Option<DbUser> {
+        if secret.is_empty() {
+            return None;
+        }
+        let mut found: Option<DbUser> = None;
+        for user in self.db_users.values() {
+            if !user.secret.is_empty()
+                && constant_time_eq(user.secret.as_bytes(), secret.as_bytes())
+            {
+                found = Some(user.clone());
+            }
+        }
+        found
     }
 
     pub fn user_list(&self) -> Vec<DbUser> {
