@@ -19306,6 +19306,15 @@ pub(crate) async fn handle_rpc(
                     let p: ClusterReplicaPromoteParams = parse_params(params.clone())?;
                     cluster_replica_promote(state, p)
                 }
+                "cluster.leader.announce" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        node_id: String,
+                        epoch: u64,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    cluster_leader_announce(state, &p.node_id, p.epoch)
+                }
                 "cluster.shard.create" => {
                     let p: ClusterShardCreateParams = parse_params(params.clone())?;
                     cluster_shard_create(state, p)
@@ -21363,6 +21372,20 @@ fn enforce_cluster_write_guard(
     }
     let target_primary = cluster.shard_primary_for(db.as_deref(), table.as_deref());
     if target_primary == cluster.local_node_id {
+        // We are the primary for this write. Under automated fenced failover, refuse to serve
+        // writes when we have lost quorum: a partitioned minority primary must not accept writes
+        // that would diverge from the majority-side primary that will be promoted.
+        if auto_failover_enabled() {
+            let now = now_unix_ms_u64();
+            let timeout = cluster_node_timeout_ms();
+            if !cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout) {
+                return Err(RpcError::new(
+                    "fenced",
+                    "primary has lost quorum and is fenced (writes refused); a majority-side \
+                     replica will be promoted",
+                ));
+            }
+        }
         return Ok(());
     }
     let primary_url = cluster
@@ -21599,6 +21622,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.node.leave",
         "cluster.node.heartbeat",
         "cluster.replica.promote",
+        "cluster.leader.announce",
         "cluster.shard.create",
         "cluster.shard.move",
         "cluster.shard.rebalance",
@@ -22027,6 +22051,86 @@ fn cluster_has_quorum(
             >= cluster_quorum_size(total)
 }
 
+/// Whether automated fenced failover is enabled (`SKEINDB_CLUSTER_AUTO_FAILOVER` = `1`/`true`/
+/// `on`). When off (the default) failover is manual: writes are never fenced and no node
+/// self-promotes. When on, a quorum-less primary refuses writes and the majority-side candidate
+/// promotes itself.
+fn auto_failover_enabled() -> bool {
+    std::env::var("SKEINDB_CLUSTER_AUTO_FAILOVER")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+/// What the local node should do this failover tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailoverAction {
+    /// Nothing to do.
+    None,
+    /// The local node is primary but has lost quorum: it must fence itself (stop serving writes)
+    /// and wait for the majority side to elect a new primary.
+    StepDown,
+    /// The local node is the elected candidate for a down primary and holds quorum: promote self.
+    Promote,
+}
+
+/// Decide the local node's failover action from its current view. Pure and deterministic so the
+/// automation is unit-testable: a primary without quorum steps down; a replica promotes itself
+/// only when the primary is unreachable, it holds quorum, and it is the elected candidate.
+fn decide_failover_action(
+    nodes: &[ClusterNode],
+    primary_id: &str,
+    local_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> FailoverAction {
+    let has_quorum = cluster_has_quorum(nodes, local_id, now_ms, timeout_ms);
+    if local_id == primary_id {
+        return if has_quorum {
+            FailoverAction::None
+        } else {
+            FailoverAction::StepDown
+        };
+    }
+    let primary_healthy = nodes
+        .iter()
+        .find(|n| n.node_id == primary_id)
+        .map(|p| evaluate_node_health(p, local_id, now_ms, timeout_ms) == NodeHealth::Online)
+        .unwrap_or(false);
+    if primary_healthy || !has_quorum {
+        return FailoverAction::None;
+    }
+    match elect_failover_candidate(nodes, primary_id, local_id, now_ms, timeout_ms) {
+        Some(plan) if plan.candidate_node_id == local_id => FailoverAction::Promote,
+        _ => FailoverAction::None,
+    }
+}
+
+/// Apply a whole-cluster promotion in memory: make `node_id` primary, demote the old primary,
+/// refresh the new primary's liveness (it just acted, so it is alive), and bump the leadership
+/// epoch. Returns the new epoch. The caller persists. Shared by the manual `cluster.replica.
+/// promote` path and the automated failover driver.
+fn apply_whole_cluster_promotion(
+    cluster: &mut ClusterStateModel,
+    node_id: &str,
+    now_ms: u64,
+) -> u64 {
+    let old_primary = cluster.primary_node_id.clone();
+    cluster.primary_node_id = node_id.to_string();
+    for node in cluster.nodes.iter_mut() {
+        if node.node_id == node_id {
+            node.role = "primary".to_string();
+            node.last_seen_ms = now_ms;
+        } else if node.node_id == old_primary {
+            node.role = "replica".to_string();
+        }
+    }
+    cluster.leadership_epoch = cluster.leadership_epoch.saturating_add(1);
+    cluster.leadership_epoch
+}
+
 /// Read-only failover readiness: derived health of every node plus, when the primary is down,
 /// the recommended promotion target. Does not mutate cluster state or perform the failover.
 fn cluster_failover_status(state: &AppState) -> Value {
@@ -22160,19 +22264,7 @@ fn cluster_replica_promote(
                      risk); pass force:true to override during a confirmed outage",
                 ));
             }
-            let old_primary = cluster.primary_node_id.clone();
-            cluster.primary_node_id = params.node_id.clone();
-            for node in cluster.nodes.iter_mut() {
-                if node.node_id == params.node_id {
-                    node.role = "primary".to_string();
-                } else if node.node_id == old_primary {
-                    node.role = "replica".to_string();
-                }
-                node.last_seen_ms = now;
-            }
-            // Bump the fencing token so the superseded primary can detect it is stale.
-            cluster.leadership_epoch = cluster.leadership_epoch.saturating_add(1);
-            new_epoch = cluster.leadership_epoch;
+            new_epoch = apply_whole_cluster_promotion(&mut cluster, &params.node_id, now);
         }
     }
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
@@ -22182,6 +22274,52 @@ fn cluster_replica_promote(
         "shard_id": params.shard_id,
         "leadership_epoch": new_epoch,
         "forced": force,
+    }))
+}
+
+/// Adopt an announced leadership: a peer that promoted itself tells us it is the new primary at
+/// `epoch`. Monotonic and idempotent — we adopt only if `epoch` is strictly newer than our own
+/// (the leadership epoch is the fencing token), so a stale or duplicate announce is ignored and
+/// two same-epoch announces can't flap. A superseded primary demotes itself here when it hears a
+/// newer leader (e.g. after a partition heals).
+fn cluster_leader_announce(state: &AppState, node_id: &str, epoch: u64) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let (adopted, current_epoch) = {
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !cluster.nodes.iter().any(|n| n.node_id == node_id) {
+            return Err(RpcError::new(
+                "not_found",
+                "announced primary not in cluster",
+            ));
+        }
+        if epoch > cluster.leadership_epoch {
+            let old_primary = cluster.primary_node_id.clone();
+            cluster.primary_node_id = node_id.to_string();
+            for node in cluster.nodes.iter_mut() {
+                if node.node_id == node_id {
+                    node.role = "primary".to_string();
+                    node.last_seen_ms = now;
+                } else if node.node_id == old_primary {
+                    node.role = "replica".to_string();
+                }
+            }
+            cluster.leadership_epoch = epoch;
+            (true, epoch)
+        } else {
+            (false, cluster.leadership_epoch)
+        }
+    };
+    if adopted {
+        persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "adopted": adopted,
+        "primary_node_id": node_id,
+        "leadership_epoch": current_epoch,
     }))
 }
 
@@ -32296,6 +32434,7 @@ fn is_admin_rpc_method(method: &str) -> bool {
             | "cluster.node.remove"
             | "cluster.node.heartbeat"
             | "cluster.replica.promote"
+            | "cluster.leader.announce"
             | "cluster.shard.create"
             | "cluster.shard.move"
             | "cluster.shard.rebalance"
@@ -32720,6 +32859,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cluster.node.leave",
         "cluster.node.heartbeat",
         "cluster.replica.promote",
+        "cluster.leader.announce",
         "cluster.shard.create",
         "cluster.shard.move",
         "cluster.shard.rebalance",
@@ -34333,7 +34473,94 @@ async fn run_cluster_heartbeat_loop(state: AppState, mut shutdown_rx: watch::Rec
             _ = shutdown_rx.changed() => break,
             _ = ticker.tick() => {
                 run_cluster_heartbeat_once(&state).await;
+                run_cluster_failover_tick(&state).await;
             }
+        }
+    }
+}
+
+/// One automated-failover evaluation. No-op unless `SKEINDB_CLUSTER_AUTO_FAILOVER` is enabled and
+/// clustering is on. Reads the local view, decides an action, and acts: a quorum-less primary is
+/// fenced (writes are already refused by the write guard; here we just log), and a majority-side
+/// elected candidate promotes itself and announces the new leadership (with its epoch) to peers.
+async fn run_cluster_failover_tick(state: &AppState) {
+    if !auto_failover_enabled() {
+        return;
+    }
+    let now = now_unix_ms_u64();
+    let timeout = cluster_node_timeout_ms();
+    let (enabled, local, primary, nodes) = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            cluster.enabled,
+            cluster.local_node_id.clone(),
+            cluster.primary_node_id.clone(),
+            cluster.nodes.clone(),
+        )
+    };
+    if !enabled {
+        return;
+    }
+    match decide_failover_action(&nodes, &primary, &local, now, timeout) {
+        FailoverAction::None => {}
+        FailoverAction::StepDown => {
+            tracing::warn!(
+                node = %local,
+                "primary has lost quorum — fenced (writes refused); awaiting majority-side promotion"
+            );
+        }
+        FailoverAction::Promote => {
+            let new_epoch = {
+                let mut cluster = state
+                    .cluster
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Re-confirm under the lock: the view may have changed since the snapshot, and we
+                // must never promote without quorum.
+                if !cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout)
+                    || cluster.primary_node_id == local
+                {
+                    return;
+                }
+                apply_whole_cluster_promotion(&mut cluster, &local, now)
+            };
+            if let Err(err) = persist_cluster_state(state) {
+                tracing::warn!(error = %err, "failed to persist auto-promotion");
+            }
+            tracing::warn!(
+                node = %local,
+                epoch = new_epoch,
+                "auto-promoted self to primary (previous primary unreachable, quorum held)"
+            );
+            announce_leadership_to_peers(state, &local, new_epoch).await;
+        }
+    }
+}
+
+/// Announce the local node's freshly won leadership (`epoch`) to every peer via
+/// `cluster.leader.announce`, so they adopt it (or a superseded primary steps down). Best-effort.
+async fn announce_leadership_to_peers(state: &AppState, local_node_id: &str, epoch: u64) {
+    let targets: Vec<String> = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cluster
+            .nodes
+            .iter()
+            .filter(|n| n.node_id != cluster.local_node_id)
+            .map(|n| n.rpc_url.clone())
+            .collect()
+    };
+    let params = serde_json::json!({ "node_id": local_node_id, "epoch": epoch });
+    for rpc_url in targets {
+        if let Err(err) =
+            call_remote_rpc_result(&rpc_url, "cluster.leader.announce", params.clone()).await
+        {
+            tracing::debug!(peer = %rpc_url, error = ?err, "leadership announce failed");
         }
     }
 }
@@ -35469,6 +35696,110 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn failover_action_is_decided_deterministically() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // Three nodes; "n2"/"n3" heartbeats vary per case.
+        let with = |n2_seen: u64, n3_seen: u64| {
+            vec![
+                cnode("n1", "primary", "online", now), // primary, fresh
+                cnode("n2", "replica", "online", n2_seen),
+                cnode("n3", "replica", "online", n3_seen),
+            ]
+        };
+
+        // Healthy primary observing quorum → nothing to do (from the primary's own view).
+        assert_eq!(
+            decide_failover_action(&with(now, now), "n1", "n1", now, timeout),
+            FailoverAction::None
+        );
+        // Primary that has lost quorum (both peers stale) → step down / fence.
+        assert_eq!(
+            decide_failover_action(&with(0, 0), "n1", "n1", now, timeout),
+            FailoverAction::StepDown
+        );
+        // Replica n2 sees the primary down but n2+n3 form a quorum, and n2 is the freshest → promote.
+        let primary_down = vec![
+            cnode("n1", "primary", "online", 0), // stale → offline
+            cnode("n2", "replica", "online", now - 1_000),
+            cnode("n3", "replica", "online", now - 5_000),
+        ];
+        assert_eq!(
+            decide_failover_action(&primary_down, "n1", "n2", now, timeout),
+            FailoverAction::Promote
+        );
+        // n3 sees the same, but the elected candidate is n2, so n3 waits.
+        assert_eq!(
+            decide_failover_action(&primary_down, "n1", "n3", now, timeout),
+            FailoverAction::None
+        );
+        // A replica in a minority partition (only itself reachable) must NOT promote.
+        let minority = vec![
+            cnode("n1", "primary", "online", 0),
+            cnode("n2", "replica", "online", now),
+            cnode("n3", "replica", "online", 0),
+        ];
+        assert_eq!(
+            decide_failover_action(&minority, "n1", "n2", now, timeout),
+            FailoverAction::None
+        );
+    }
+
+    #[test]
+    fn leader_announce_adopts_only_newer_epoch() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_leader_announce");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.local_node_id = "n1".to_string();
+            cluster.primary_node_id = "n1".to_string();
+            cluster.leadership_epoch = 5;
+            cluster.nodes = vec![
+                cnode("n1", "primary", "online", now_unix_ms_u64()),
+                cnode("n2", "replica", "online", now_unix_ms_u64()),
+            ];
+        }
+
+        // A stale (lower) or equal-epoch announce is ignored — no flapping.
+        let out = cluster_leader_announce(&state, "n2", 5).expect("announce");
+        assert_eq!(out["adopted"], false);
+        assert_eq!(out["leadership_epoch"], 5);
+        {
+            let cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cluster.primary_node_id, "n1"); // unchanged
+        }
+
+        // A strictly newer epoch is adopted: n1 steps down, n2 becomes primary.
+        let out = cluster_leader_announce(&state, "n2", 6).expect("announce");
+        assert_eq!(out["adopted"], true);
+        assert_eq!(out["leadership_epoch"], 6);
+        {
+            let cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cluster.primary_node_id, "n2");
+            assert_eq!(cluster.leadership_epoch, 6);
+            let n1 = cluster.nodes.iter().find(|n| n.node_id == "n1").unwrap();
+            assert_eq!(n1.role, "replica"); // superseded primary stepped down
+        }
+
+        // Announcing an unknown node is rejected.
+        assert!(cluster_leader_announce(&state, "ghost", 99).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
     use axum::{routing::post, Json};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
@@ -35553,9 +35884,10 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 149);
+        assert_eq!(methods.len(), 150);
         assert!(methods.contains(&"cluster.failover.status"));
         assert!(methods.contains(&"cluster.node.heartbeat"));
+        assert!(methods.contains(&"cluster.leader.announce"));
         assert!(methods.contains(&"migration.report_export"));
         assert!(methods.contains(&"stats.query_fingerprint_latency"));
         assert!(methods.contains(&"cdc.pause"));
