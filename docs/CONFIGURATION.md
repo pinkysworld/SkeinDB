@@ -83,6 +83,7 @@ Notes:
 | `SKEINDB_TOKEN` | unset | Bearer token for the HTTP RPC/admin API (and enables PostgreSQL SCRAM auth). **Unset = no HTTP RPC authentication.** Binding to a non-loopback address without it exposes full RPC/admin access to the network; startup logs a WARNING in that configuration. |
 | `SKEINDB_RBAC` | `0` (disabled) | Opt-in per-role authorization on the HTTP RPC data path. When enabled, every RPC must present a valid credential and its method is checked against the caller's role (see [RBAC](#rbac-role-based-access-control-on-the-rpc-path) below). When disabled, the legacy single-shared-`SKEINDB_TOKEN` behavior is unchanged. |
 | `SKEINDB_CLUSTER_NODE_TIMEOUT_MS` | `15000` | Cluster failure detection: a node is treated as *offline* once its last heartbeat (`cluster.node.heartbeat`) is older than this. Feeds the derived node health and the failover-candidate recommendation reported by `cluster.status` / `cluster.failover.status`. |
+| `SKEINDB_CLUSTER_AUTO_FAILOVER` | `0` (disabled) | Opt-in **automated fenced failover**. When enabled, a primary that has lost quorum refuses writes (fenced) and the majority-side elected candidate promotes itself and announces the new leadership. When disabled (default), failover is manual via `cluster.replica.promote` (which is still quorum-gated). Requires a **3+ node** cluster to keep write availability during a single failure (a 2-node cluster has no majority when one node is down). |
 
 ---
 
@@ -220,4 +221,14 @@ Each node's liveness is tracked by the age of its last heartbeat. When clusterin
 
 - **Quorum-gated promotion.** A whole-cluster `cluster.replica.promote` is **refused** (`no_quorum`) unless the promoting node observes a quorum of the cluster. On a network partition only the majority side can reach a quorum, so two disjoint partitions can never both elect a primary. During a genuine multi-node outage where you must recover from the minority, pass `force: true` to override (accepting the risk).
 - **Leadership epoch.** Every whole-cluster promotion increments a monotonic `leadership_epoch` — the fencing token that lets a superseded primary detect it is stale.
-- **Advisory step-down (today).** `primary_should_step_down` surfaces when a primary has lost quorum. Automatically demoting that primary and auto-promoting the majority-side candidate (the full self-driving loop) builds on these primitives and is the next slice; today failover is still triggered explicitly via `cluster.replica.promote`, but it is now split-brain-safe by default.
+### Automated fenced failover (opt-in)
+
+Set `SKEINDB_CLUSTER_AUTO_FAILOVER=1` to let the cluster fail over on its own. A background tick on every node evaluates its view and acts:
+
+- **Write fencing.** A primary that has lost quorum **refuses writes** (`fenced` error) — it cannot diverge from the primary the majority side will elect. (With auto-failover off, writes are never fenced.)
+- **Self-promotion.** A replica that observes the primary as offline, holds a quorum, and is the deterministically elected candidate (freshest heartbeat, ties by `node_id`) **promotes itself**: it bumps the `leadership_epoch` and announces the new leadership to peers via `cluster.leader.announce`.
+- **Epoch-guarded adoption.** Peers adopt an announced leader only if its epoch is **strictly newer** than their own (monotonic, idempotent — a stale or duplicate announce is ignored, and two same-epoch announces can't flap). A superseded primary demotes itself when it hears a newer leader (e.g. once a partition heals).
+
+Because only a node holding a quorum can promote, and two disjoint partitions can never both hold one, at most one primary ever accepts writes. Run **3+ nodes** so the cluster keeps a majority (and write availability) when a single node fails.
+
+> This is a pragmatic, best-effort failover built on deterministic election + quorum + a fencing epoch. It is not a full consensus protocol: it has no explicit vote-request round, so a transient split view could briefly produce two same-epoch promotions before heartbeats reconverge. A Raft/Paxos-style voting round is a further hardening step.
