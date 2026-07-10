@@ -32526,6 +32526,12 @@ fn is_admin_rpc_method(method: &str) -> bool {
             | "dp.budget.set"
             | "oblivious.policy.set"
             | "plan_cache.clear"
+            // Database provisioning. Creating/dropping a whole database is an administrative
+            // operation (it changes the set of databases, not data within one), so it requires
+            // `admin` — a `write` principal manages schema + data *inside* the databases it is
+            // granted, not the database roster. (Table-level DDL stays `write`.)
+            | "schema.create_database"
+            | "schema.drop_database"
     )
 }
 
@@ -35270,15 +35276,13 @@ mod tests {
         ] {
             assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Read, "{m}");
         }
-        // Mutations, DDL, and unknown methods fail safe to Write.
+        // Data mutations, table-level DDL, and unknown methods fail safe to Write.
         for m in [
             "data.insert",
             "data.update",
             "data.delete",
             "schema.create_table",
             "schema.drop_table",
-            "schema.create_database",
-            "schema.drop_database",
             "merge.apply",
             "vector.insert",
             "view.create",
@@ -35289,7 +35293,7 @@ mod tests {
         ] {
             assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Write, "{m}");
         }
-        // Control-plane methods require Admin.
+        // Control-plane methods — including database provisioning — require Admin.
         for m in [
             "admin.user.create",
             "admin.user.drop",
@@ -35306,6 +35310,8 @@ mod tests {
             "maintenance.history.gc",
             "dp.budget.set",
             "plan_cache.clear",
+            "schema.create_database",
+            "schema.drop_database",
         ] {
             assert_eq!(required_rpc_privilege(m, None), RpcPrivilege::Admin, "{m}");
         }

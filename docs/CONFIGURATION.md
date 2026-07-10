@@ -102,12 +102,12 @@ By default the HTTP RPC/admin API uses a single shared bearer token (`SKEINDB_TO
 | Role | Privilege | Can do |
 |---|---|---|
 | `admin` / `superuser` | admin | Everything, including user/token/cluster/encryption/settings control-plane |
-| `readwrite` | write | Reads **and** data mutations + schema DDL |
+| `readwrite` | write | Reads **and** data mutations + table-level DDL (not database create/drop) |
 | `readonly` | read | Read-only methods only |
 
 Unknown or empty role strings fail safe to `read` (least privilege). Tokens created without an explicit role default to `admin`, so tokens issued before enabling RBAC keep full access.
 
-**Method classification.** Read-only methods (e.g. `query.select`, `data.get`, `schema.list_tables`, `stats.*`) require `read`. Control-plane methods (`admin.user.*`, `security.token.*`, `cluster.*` mutations, `settings.set`, `settings.encryption.*`, `system.shutdown`, `maintenance.*.set_policy`, `maintenance.history.gc`, …) require `admin` — including the *listing* ones (`admin.user.list`, `security.token.list`), since they expose security configuration. Everything else — data mutations and schema DDL — requires `write`. `sql.exec` is classified by whether the statement is read-only. Unknown methods fail safe to `write` (a `readonly` principal is denied). A denied call returns `403 forbidden` and is logged at WARN.
+**Method classification.** Read-only methods (e.g. `query.select`, `data.get`, `schema.list_tables`, `stats.*`) require `read`. Control-plane methods (`admin.user.*`, `security.token.*`, `cluster.*` mutations, `settings.set`, `settings.encryption.*`, `system.shutdown`, `maintenance.*.set_policy`, `maintenance.history.gc`, **`schema.create_database` / `schema.drop_database`**, …) require `admin` — including the *listing* ones (`admin.user.list`, `security.token.list`), since they expose security configuration. **Database provisioning is admin** because it changes the *set* of databases; managing schema and data *within* a database (table-level DDL, `data.*`) requires `write`. `sql.exec` is classified by whether the statement is read-only. Unknown methods fail safe to `write` (a `readonly` principal is denied). A denied call returns `403 forbidden` and is logged at WARN.
 
 **Database scope.** Beyond the role, an API token can be restricted to specific databases. Pass `db_scope` to `security.token.create`:
 
@@ -118,7 +118,7 @@ Unknown or empty role strings fail safe to `read` (least privilege). Tokens crea
 
 A **database-scoped** token may only perform data-plane operations on the databases in its scope. For each request the target database(s) are extracted and every one must be in scope, otherwise the call is denied with `403 forbidden`:
 
-- **Reads/writes on a single database** — `data.get/insert/update/delete`, `schema.list_tables/describe_table/create_table/drop_table/create_database/drop_database`, `vector.insert/search/index.status`, `view.create/drop/refresh`, `merge.apply`, and write-shaped `sql.exec` — checked against the referenced database.
+- **Reads/writes on a single database** — `data.get/insert/update/delete`, `schema.list_tables/describe_table/create_table/drop_table`, `vector.insert/search/index.status`, `view.create/drop/refresh`, `merge.apply`, and write-shaped `sql.exec` — checked against the referenced database. (Creating/dropping a whole database requires `admin`, so it is not available to a scoped token at all.)
 - **`query.select`** — every database its `FROM` list touches (across joins, subqueries, set-operations, and CTE bodies) must be in scope; a cross-database query to an out-of-scope database is denied, naming that database.
 - **Scope-neutral methods** — `system.ping/version/capabilities`, `transport.capabilities`, and `tx.begin/commit/rollback` — are always allowed for a scoped token.
 - **Everything else** — global aggregates (`stats.*`), control-plane, and the prepared/patch/subscribe query variants — is **denied** for a scoped token (fail closed). Use an unscoped credential for those.
@@ -139,7 +139,7 @@ The user's **role is the ceiling** and its **grants are the per-database allowli
 - A **`readwrite`/`readonly`** user may only touch databases it has a grant for, and only up to the effective `min(role, grant)` privilege. Grant privilege strings map to `read` (`read`/`select`), `write` (`write`/`insert`/`update`/`delete`/`dml`), or `admin` (`all`/`ddl`/`grant`/`owner`); a database's effective privilege is the highest grant on it. A method targeting a database the user has no grant for is denied.
 - Non-database methods are governed by the role alone; `admin.user.list` never returns secrets (only a `has_secret` flag).
 
-**Scope (current slice).** Role + per-token database scope + per-user database grants (all above). Remaining refinements: **per-table** scoping (grants are per-database) and a stricter **DDL-vs-admin** split (schema DDL is currently `write`). Users created before the login secret existed have an empty secret and must be re-created to log in.
+**Scope (current slice).** Role + per-token database scope + per-user database grants + an admin gate on database provisioning (all above). Remaining refinement: **per-table** scoping (grants are per-database). Users created before the login secret existed have an empty secret and must be re-created to log in.
 
 ---
 
