@@ -125,7 +125,21 @@ A **database-scoped** token may only perform data-plane operations on the databa
 
 A token with no `db_scope` (the default, and every token created before this field existed) is unrestricted across databases. The role check always applies first: a `readonly` scoped token still cannot write, even within its own database.
 
-**Scope (current slice).** Role-based enforcement plus per-token database scope (above). The username/secret `DbUser` login and its per-database `admin.user.grant` list are stored but not yet consulted on the RPC path; a user-credential login, per-table scoping, and a stricter DDL/admin split are follow-ons.
+**User credentials & per-database grants.** Besides API tokens, a **database user** (`admin.user.create`) can log in and be authorized by its per-database grants. Creating a user returns a one-time login `secret` (prefix `usr_`), presented as `Authorization: Bearer <secret>` just like a token:
+
+```json
+{"skeinql":"1.0","id":1,"method":"admin.user.create","params":{"username":"alice","role":"readwrite"}}
+// → { "username": "alice", "role": "readwrite", "secret": "usr_…", "grants": {} }   (secret shown once)
+{"skeinql":"1.0","id":2,"method":"admin.user.grant","params":{"username":"alice","db":"analytics","privileges":["write"]}}
+```
+
+The user's **role is the ceiling** and its **grants are the per-database allowlist**:
+
+- An **`admin`-role** user is unrestricted across databases (like the superuser token).
+- A **`readwrite`/`readonly`** user may only touch databases it has a grant for, and only up to the effective `min(role, grant)` privilege. Grant privilege strings map to `read` (`read`/`select`), `write` (`write`/`insert`/`update`/`delete`/`dml`), or `admin` (`all`/`ddl`/`grant`/`owner`); a database's effective privilege is the highest grant on it. A method targeting a database the user has no grant for is denied.
+- Non-database methods are governed by the role alone; `admin.user.list` never returns secrets (only a `has_secret` flag).
+
+**Scope (current slice).** Role + per-token database scope + per-user database grants (all above). Remaining refinements: **per-table** scoping (grants are per-database) and a stricter **DDL-vs-admin** split (schema DDL is currently `write`). Users created before the login secret existed have an empty secret and must be re-created to log in.
 
 ---
 
