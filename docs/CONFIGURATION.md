@@ -136,10 +136,20 @@ A token with no `db_scope` (the default, and every token created before this fie
 The user's **role is the ceiling** and its **grants are the per-database allowlist**:
 
 - An **`admin`-role** user is unrestricted across databases (like the superuser token).
-- A **`readwrite`/`readonly`** user may only touch databases it has a grant for, and only up to the effective `min(role, grant)` privilege. Grant privilege strings map to `read` (`read`/`select`), `write` (`write`/`insert`/`update`/`delete`/`dml`), or `admin` (`all`/`ddl`/`grant`/`owner`); a database's effective privilege is the highest grant on it. A method targeting a database the user has no grant for is denied.
+- A **`readwrite`/`readonly`** user may only touch databases it has a grant for, and only up to the effective `min(role, grant)` privilege. Grant privilege strings map to `read` (`read`/`select`), `write` (`write`/`insert`/`update`/`delete`/`dml`), or `admin` (`all`/`ddl`/`grant`/`owner`); a target's effective privilege is the highest grant on it. A method targeting a database/table the user has no grant for is denied.
 - Non-database methods are governed by the role alone; `admin.user.list` never returns secrets (only a `has_secret` flag).
 
-**Scope (current slice).** Role + per-token database scope + per-user database grants + an admin gate on database provisioning (all above). Remaining refinement: **per-table** scoping (grants are per-database). Users created before the login secret existed have an empty secret and must be re-created to log in.
+**Per-table grants.** Grants are database-wide by default, but adding a `table` narrows a grant to one table (`db.table`), and a table-specific grant **takes precedence** over the whole-database grant for that table:
+
+```json
+// read the whole `analytics` database, but write only its `events` table
+{"skeinql":"1.0","id":3,"method":"admin.user.grant","params":{"username":"alice","db":"analytics","privileges":["read"]}}
+{"skeinql":"1.0","id":4,"method":"admin.user.grant","params":{"username":"alice","db":"analytics","table":"events","privileges":["write"]}}
+```
+
+For each `(database, table)` a method touches, authorization looks up the `db.table` grant first and falls back to the `db` grant. A whole-database operation (e.g. `schema.list_tables`) requires a database-level grant — a table-only grant does not confer it. (`admin.user.revoke` takes the same optional `table`. Token `db_scope` remains database-level.)
+
+**Scope (current slice).** Role + per-token database scope + per-user database **and table** grants + an admin gate on database provisioning. Users created before the login secret existed have an empty secret and must be re-created to log in.
 
 ---
 
