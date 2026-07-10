@@ -91,7 +91,34 @@ curl -s -XPOST http://127.0.0.1:8002/api/v1/rpc \
   -d '{"skeinql":"1.0","id":1,"method":"cluster.promote","params":{"node_id":"n2"}}'
 ```
 
-## 6. Production notes
+## 6. Automated fenced failover (optional)
+
+By default, promoting a replica after the primary fails is a manual step (and is quorum-gated — a promotion is refused unless the promoting node still sees a majority of the cluster, so a minority partition can't create a second primary). To let the cluster fail over on its own, start every node with:
+
+```bash
+SKEINDB_CLUSTER_AUTO_FAILOVER=1 skeindb serve --data ./n1 --http 8001 ...
+```
+
+With this enabled, each node runs a background tick that:
+
+1. **Heartbeats** its peers so the cluster keeps a live health view (a node unseen for `SKEINDB_CLUSTER_NODE_TIMEOUT_MS`, default 15s, is considered offline).
+2. **Fences** itself if it is the primary but has lost quorum — it refuses writes (clients get a `fenced` error) so it can't diverge from the new primary the majority side will elect.
+3. **Elects** a new primary on the majority side: the freshest online replica requests votes from its peers (`cluster.request_vote`) and promotes itself only if a **majority** grant it. Each node votes at most once per election term, so at most one candidate can win — no split-brain.
+
+Watch the failover decision live (read-only, safe to poll):
+
+```bash
+curl -s -XPOST http://127.0.0.1:8001/api/v1/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"skeinql":"1.0","id":1,"method":"cluster.failover.status","params":{}}'
+# → primary_healthy, recommended_candidate, leadership_epoch, and a quorum block per node
+```
+
+> **Run 3+ nodes.** Quorum is a majority, so a 2-node cluster loses write availability when either node is down (neither side is a majority). Three nodes tolerate one failure; five tolerate two.
+
+Per-shard automated failover (each shard failing over independently) is not yet automated — use `cluster.replica.promote` with a `shard_id` for that. See [Configuration → Automated fenced failover](configuration.html#automated-fenced-failover-opt-in).
+
+## 7. Production notes
 
 - Put each node on its own host with a fixed `--cluster-bind` that is reachable from the other nodes.
 - Rotate the join token regularly: `cluster.rotate_join_token`.

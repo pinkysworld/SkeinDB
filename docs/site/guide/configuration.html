@@ -57,6 +57,7 @@
 <li><a href="vector-rag.html">Vector RAG retrieval</a></li>
 <li><a href="cdc-with-sse.html">CDC with SSE</a></li>
 <li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
+<li><a href="rbac-and-access-control.html">RBAC and access control</a></li>
 <li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
 <li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
 </ul>
@@ -230,6 +231,16 @@ OPTIONS:
 <td><code>0</code> (disabled)</td>
 <td>Opt-in per-role authorization on the HTTP RPC data path. When enabled, every RPC must present a valid credential and its method is checked against the caller's role (see <a href="#rbac-role-based-access-control-on-the-rpc-path">RBAC</a> below). When disabled, the legacy single-shared-<code>SKEINDB_TOKEN</code> behavior is unchanged.</td>
 </tr>
+<tr>
+<td><code>SKEINDB_CLUSTER_NODE_TIMEOUT_MS</code></td>
+<td><code>15000</code></td>
+<td>Cluster failure detection: a node is treated as <em>offline</em> once its last heartbeat (<code>cluster.node.heartbeat</code>) is older than this. Feeds the derived node health and the failover-candidate recommendation reported by <code>cluster.status</code> / <code>cluster.failover.status</code>.</td>
+</tr>
+<tr>
+<td><code>SKEINDB_CLUSTER_AUTO_FAILOVER</code></td>
+<td><code>0</code> (disabled)</td>
+<td>Opt-in <strong>automated fenced failover</strong>. When enabled, a primary that has lost quorum refuses writes (fenced) and the majority-side elected candidate promotes itself and announces the new leadership. When disabled (default), failover is manual via <code>cluster.replica.promote</code> (which is still quorum-gated). Requires a <strong>3+ node</strong> cluster to keep write availability during a single failure (a 2-node cluster has no majority when one node is down).</td>
+</tr>
 </tbody>
 </table>
 <hr />
@@ -270,7 +281,32 @@ OPTIONS:
 </table>
 <p>Unknown or empty role strings fail safe to <code>read</code> (least privilege). Tokens created without an explicit role default to <code>admin</code>, so tokens issued before enabling RBAC keep full access.</p>
 <p><strong>Method classification.</strong> Read-only methods (e.g. <code>query.select</code>, <code>data.get</code>, <code>schema.list_tables</code>, <code>stats.*</code>) require <code>read</code>. Control-plane methods (<code>admin.user.*</code>, <code>security.token.*</code>, <code>cluster.*</code> mutations, <code>settings.set</code>, <code>settings.encryption.*</code>, <code>system.shutdown</code>, <code>maintenance.*.set_policy</code>, <code>maintenance.history.gc</code>, …) require <code>admin</code> — including the <em>listing</em> ones (<code>admin.user.list</code>, <code>security.token.list</code>), since they expose security configuration. Everything else — data mutations and schema DDL — requires <code>write</code>. <code>sql.exec</code> is classified by whether the statement is read-only. Unknown methods fail safe to <code>write</code> (a <code>readonly</code> principal is denied). A denied call returns <code>403 forbidden</code> and is logged at WARN.</p>
-<p><strong>Scope (current slice).</strong> Enforcement is role-based and keyed on API tokens. Per-database grants (<code>admin.user.grant</code>) and a user-credential (username/secret) login are stored but not yet consulted on the RPC path; finer per-database/per-table scoping and a stricter DDL/admin split are follow-ons.</p>
+<p><strong>Database scope.</strong> Beyond the role, an API token can be restricted to specific databases. Pass <code>db_scope</code> to <code>security.token.create</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;skeinql&quot;</span><span class="p">:</span><span class="s2">&quot;1.0&quot;</span><span class="p">,</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="s2">&quot;security.token.create&quot;</span><span class="p">,</span>
+<span class="w"> </span><span class="nt">&quot;params&quot;</span><span class="p">:{</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="s2">&quot;readwrite&quot;</span><span class="p">,</span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="s2">&quot;analytics-app&quot;</span><span class="p">,</span><span class="nt">&quot;db_scope&quot;</span><span class="p">:[</span><span class="s2">&quot;analytics&quot;</span><span class="p">]}}</span>
+</code></pre></div>
+
+<p>A <strong>database-scoped</strong> token may only perform data-plane operations on the databases in its scope. For each request the target database(s) are extracted and every one must be in scope, otherwise the call is denied with <code>403 forbidden</code>:</p>
+<ul>
+<li><strong>Reads/writes on a single database</strong> — <code>data.get/insert/update/delete</code>, <code>schema.list_tables/describe_table/create_table/drop_table/create_database/drop_database</code>, <code>vector.insert/search/index.status</code>, <code>view.create/drop/refresh</code>, <code>merge.apply</code>, and write-shaped <code>sql.exec</code> — checked against the referenced database.</li>
+<li><strong><code>query.select</code></strong> — every database its <code>FROM</code> list touches (across joins, subqueries, set-operations, and CTE bodies) must be in scope; a cross-database query to an out-of-scope database is denied, naming that database.</li>
+<li><strong>Scope-neutral methods</strong> — <code>system.ping/version/capabilities</code>, <code>transport.capabilities</code>, and <code>tx.begin/commit/rollback</code> — are always allowed for a scoped token.</li>
+<li><strong>Everything else</strong> — global aggregates (<code>stats.*</code>), control-plane, and the prepared/patch/subscribe query variants — is <strong>denied</strong> for a scoped token (fail closed). Use an unscoped credential for those.</li>
+</ul>
+<p>A token with no <code>db_scope</code> (the default, and every token created before this field existed) is unrestricted across databases. The role check always applies first: a <code>readonly</code> scoped token still cannot write, even within its own database.</p>
+<p><strong>User credentials &amp; per-database grants.</strong> Besides API tokens, a <strong>database user</strong> (<code>admin.user.create</code>) can log in and be authorized by its per-database grants. Creating a user returns a one-time login <code>secret</code> (prefix <code>usr_</code>), presented as <code>Authorization: Bearer &lt;secret&gt;</code> just like a token:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;skeinql&quot;</span><span class="p">:</span><span class="s2">&quot;1.0&quot;</span><span class="p">,</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="s2">&quot;admin.user.create&quot;</span><span class="p">,</span><span class="nt">&quot;params&quot;</span><span class="p">:{</span><span class="nt">&quot;username&quot;</span><span class="p">:</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="s2">&quot;readwrite&quot;</span><span class="p">}}</span>
+<span class="c1">// → { &quot;username&quot;: &quot;alice&quot;, &quot;role&quot;: &quot;readwrite&quot;, &quot;secret&quot;: &quot;usr_…&quot;, &quot;grants&quot;: {} }   (secret shown once)</span>
+<span class="p">{</span><span class="nt">&quot;skeinql&quot;</span><span class="p">:</span><span class="s2">&quot;1.0&quot;</span><span class="p">,</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">2</span><span class="p">,</span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="s2">&quot;admin.user.grant&quot;</span><span class="p">,</span><span class="nt">&quot;params&quot;</span><span class="p">:{</span><span class="nt">&quot;username&quot;</span><span class="p">:</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;analytics&quot;</span><span class="p">,</span><span class="nt">&quot;privileges&quot;</span><span class="p">:[</span><span class="s2">&quot;write&quot;</span><span class="p">]}}</span>
+</code></pre></div>
+
+<p>The user's <strong>role is the ceiling</strong> and its <strong>grants are the per-database allowlist</strong>:</p>
+<ul>
+<li>An <strong><code>admin</code>-role</strong> user is unrestricted across databases (like the superuser token).</li>
+<li>A <strong><code>readwrite</code>/<code>readonly</code></strong> user may only touch databases it has a grant for, and only up to the effective <code>min(role, grant)</code> privilege. Grant privilege strings map to <code>read</code> (<code>read</code>/<code>select</code>), <code>write</code> (<code>write</code>/<code>insert</code>/<code>update</code>/<code>delete</code>/<code>dml</code>), or <code>admin</code> (<code>all</code>/<code>ddl</code>/<code>grant</code>/<code>owner</code>); a database's effective privilege is the highest grant on it. A method targeting a database the user has no grant for is denied.</li>
+<li>Non-database methods are governed by the role alone; <code>admin.user.list</code> never returns secrets (only a <code>has_secret</code> flag).</li>
+</ul>
+<p><strong>Scope (current slice).</strong> Role + per-token database scope + per-user database grants (all above). Remaining refinements: <strong>per-table</strong> scoping (grants are per-database) and a stricter <strong>DDL-vs-admin</strong> split (schema DDL is currently <code>write</code>). Users created before the login secret existed have an empty secret and must be re-created to log in.</p>
 <hr />
 <h2 id="http-services">HTTP services<a class="headerlink" href="#http-services" title="Permanent link">¶</a></h2>
 <p>When enabled, the HTTP listener serves:
@@ -329,6 +365,26 @@ Current coverage:
 <p>Clustering is managed via SkeinQL (<code>cluster.*</code>) and is designed to be configured without external orchestration.</p>
 <p>See:
 - <code>docs/CLUSTERING.md</code></p>
+<h3 id="failure-detection-failover-readiness">Failure detection &amp; failover readiness<a class="headerlink" href="#failure-detection-failover-readiness" title="Permanent link">¶</a></h3>
+<p>Each node's liveness is tracked by the age of its last heartbeat. When clustering is enabled, every node runs a background <strong>heartbeat sender</strong> that calls <code>cluster.node.heartbeat</code> (<code>{"node_id": "&lt;self&gt;"}</code>) on all peers roughly every <code>SKEINDB_CLUSTER_NODE_TIMEOUT_MS / 3</code> (so a node misses several heartbeats before being aged out). A node whose last heartbeat is older than <code>SKEINDB_CLUSTER_NODE_TIMEOUT_MS</code> (default 15s) is treated as <strong>offline</strong>.</p>
+<ul>
+<li><strong><code>cluster.failover.status</code></strong> (read-only) reports each node's derived <code>health</code> (<code>online</code>/<code>offline</code>, distinct from its administrative status), the last-heartbeat age, whether the primary is healthy, the current <code>leadership_epoch</code>, and — when the primary is unreachable — the <code>recommended_candidate</code>: the freshest online replica (ties broken by <code>node_id</code> so every observer agrees). <code>cluster.status</code> also carries <code>primary_healthy</code> and <code>recommended_candidate</code>.</li>
+</ul>
+<h3 id="quorum-fencing-split-brain-prevention">Quorum fencing (split-brain prevention)<a class="headerlink" href="#quorum-fencing-split-brain-prevention" title="Permanent link">¶</a></h3>
+<p><code>cluster.failover.status</code> also reports a <code>quorum</code> block: the majority <code>size</code> (<code>floor(members/2)+1</code>), how many members are currently <code>reachable</code>, whether this node <code>has_quorum</code>, and <code>primary_should_step_down</code> (true when the local primary has lost quorum).</p>
+<ul>
+<li><strong>Quorum-gated promotion.</strong> A whole-cluster <code>cluster.replica.promote</code> is <strong>refused</strong> (<code>no_quorum</code>) unless the promoting node observes a quorum of the cluster. On a network partition only the majority side can reach a quorum, so two disjoint partitions can never both elect a primary. During a genuine multi-node outage where you must recover from the minority, pass <code>force: true</code> to override (accepting the risk).</li>
+<li><strong>Leadership epoch.</strong> Every whole-cluster promotion increments a monotonic <code>leadership_epoch</code> — the fencing token that lets a superseded primary detect it is stale.</li>
+</ul>
+<h3 id="automated-fenced-failover-opt-in">Automated fenced failover (opt-in)<a class="headerlink" href="#automated-fenced-failover-opt-in" title="Permanent link">¶</a></h3>
+<p>Set <code>SKEINDB_CLUSTER_AUTO_FAILOVER=1</code> to let the cluster fail over on its own. A background tick on every node evaluates its view and acts:</p>
+<ul>
+<li><strong>Write fencing.</strong> A primary that has lost quorum <strong>refuses writes</strong> (<code>fenced</code> error) — it cannot diverge from the primary the majority side will elect. (With auto-failover off, writes are never fenced.)</li>
+<li><strong>Election with a vote round.</strong> A replica that observes the primary as offline, holds a quorum, and is the deterministically elected candidate (freshest heartbeat, ties by <code>node_id</code>) starts an election for the next <strong>term</strong>: it requests votes from all peers (<code>cluster.request_vote</code>) and <strong>promotes itself only if a majority grant it</strong>. Each node grants <strong>at most one vote per term</strong> (and never for a term that does not exceed the leader it already recognizes), which — by majority intersection — guarantees <strong>at most one candidate can win a given term</strong>. The winner promotes at that term (setting <code>leadership_epoch</code>) and announces the new leadership via <code>cluster.leader.announce</code>. A losing/split election is simply retried on a later tick with a higher term.</li>
+<li><strong>Epoch-guarded adoption.</strong> Peers adopt an announced leader only if its epoch is <strong>strictly newer</strong> than their own (monotonic, idempotent — a stale or duplicate announce is ignored). A superseded primary demotes itself when it hears a newer leader (e.g. once a partition heals).</li>
+</ul>
+<p>Because a candidate needs both a quorum and a majority of votes for its term — and two disjoint partitions can never both hold a majority — <strong>at most one primary is ever elected per term and at most one accepts writes</strong>. Run <strong>3+ nodes</strong> so the cluster keeps a majority (and write availability) when a single node fails.</p>
+<p>The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election; it does not (yet) include log-matching/replication safety, so it pairs with SkeinDB's existing replication rather than replacing it.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CONFIGURATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -360,7 +416,12 @@ Current coverage:
 <li><a href="#postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)</a></li>
 <li><a href="#data-directory-layout-prototype">Data directory layout (prototype)</a></li>
 <li><a href="#running-behind-a-reverse-proxy">Running behind a reverse proxy</a></li>
-<li><a href="#clustering-settings">Clustering settings</a></li>
+<li><a href="#clustering-settings">Clustering settings</a><ul>
+<li><a href="#failure-detection-failover-readiness">Failure detection &amp; failover readiness</a></li>
+<li><a href="#quorum-fencing-split-brain-prevention">Quorum fencing (split-brain prevention)</a></li>
+<li><a href="#automated-fenced-failover-opt-in">Automated fenced failover (opt-in)</a></li>
+</ul>
+</li>
 </ul>
 </div>
 

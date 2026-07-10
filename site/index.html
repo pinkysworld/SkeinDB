@@ -676,8 +676,15 @@
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🌐</div>
-      <h3>Cluster Control-Plane</h3>
-      <p>9 typed cluster methods for topology lifecycle: join tokens, node admission, shard placement, replica promotion, and RPC fanout replication with recursion suppression.</p>
+      <h3>Cluster Control-Plane + Automated Failover</h3>
+      <p>Typed cluster methods for the full topology lifecycle: join tokens, node admission, shard placement, replica promotion, and RPC fanout replication. Opt-in <strong>automated fenced failover</strong> adds heartbeat-based failure detection, quorum fencing (a primary that loses its majority refuses writes), and a Raft-style leader-election vote round with a monotonic leadership epoch — so on a partition at most one primary is elected per term and ever accepts writes.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🔑</div>
+      <h3>Role-Based Access Control</h3>
+      <p>Opt-in RBAC on the RPC data path (<code>SKEINDB_RBAC</code>). Each request resolves to a principal — the superuser token, an API-token secret (with an optional per-database scope), or a database user's login secret governed by its role ceiling and per-database grants — and every method is checked against a <code>read &lt; write &lt; admin</code> privilege and the caller's database scope before dispatch. Denied calls return <code>403</code>; secrets are constant-time compared and redacted from listings. Off by default (legacy single-token behavior unchanged). See <a href="../docs/site/guide/configuration.html">configuration</a>.</p>
     </div>
 
     <!-- New advanced differentiator cards -->
