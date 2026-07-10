@@ -65,7 +65,7 @@ use skeindb_skeinql::{
 };
 
 use crate::engine::{
-    cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, query_referenced_dbs,
+    cdc_event_delivery_string, cdc_event_delivery_value, constant_time_eq, query_referenced_tables,
     ApiTokenAuth, CdcEventFormat, CdcPollResult, CdcRuntimeStats, CdcSubscriptionOptions,
     ChangeEvent, ColumnSchema, DbUser, Engine, ObjectManifest, Subscriptions,
 };
@@ -20160,6 +20160,10 @@ pub(crate) async fn handle_rpc(
                     struct P {
                         username: String,
                         db: String,
+                        /// Optional table: when present the grant applies to `db.table` only;
+                        /// otherwise to the whole database.
+                        #[serde(default)]
+                        table: Option<String>,
                         #[serde(default)]
                         privileges: Vec<String>,
                     }
@@ -20169,23 +20173,27 @@ pub(crate) async fn handle_rpc(
                     } else {
                         p.privileges
                     };
+                    let key = grant_key(&p.db, p.table.as_deref());
                     let mut eng = state.engine.write().await;
-                    eng.user_grant(&p.username, &p.db, privs)
+                    eng.user_grant(&p.username, &key, privs)
                         .map_err(|e| RpcError::new("not_found", e.to_string()))?;
-                    Ok(serde_json::json!({ "granted": true }))
+                    Ok(serde_json::json!({ "granted": true, "target": key }))
                 }
                 "admin.user.revoke" => {
                     #[derive(serde::Deserialize)]
                     struct P {
                         username: String,
                         db: String,
+                        #[serde(default)]
+                        table: Option<String>,
                     }
                     let p: P = parse_params(params.clone())?;
+                    let key = grant_key(&p.db, p.table.as_deref());
                     let mut eng = state.engine.write().await;
                     let revoked = eng
-                        .user_revoke(&p.username, &p.db)
+                        .user_revoke(&p.username, &key)
                         .map_err(|e| RpcError::new("not_found", e.to_string()))?;
-                    Ok(serde_json::json!({ "revoked": revoked }))
+                    Ok(serde_json::json!({ "revoked": revoked, "target": key }))
                 }
 
                 // --------------------
@@ -32625,33 +32633,53 @@ enum RpcAuthDecision {
     },
 }
 
-/// How a method relates to a database-scoped credential.
+/// A `(database, optional table)` a method targets. `None` table means the whole database (e.g.
+/// `schema.list_tables`); `Some(table)` names a specific table so per-table grants can apply.
+type DbTableTarget = (String, Option<String>);
+
+/// How a method relates to a scoped credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DbScopeTarget {
     /// No database target; safe for any authenticated principal (e.g. `system.ping`, `tx.*`).
     Neutral,
-    /// The method reads/writes exactly these databases; allowed iff all are in scope.
-    Dbs(Vec<String>),
-    /// Not permitted for a database-scoped credential: a global/cross-database or control-plane
-    /// method, or a data method whose target database could not be determined (fail closed).
+    /// The method reads/writes exactly these `(database, table?)` targets; allowed iff all are
+    /// in scope / granted.
+    Dbs(Vec<DbTableTarget>),
+    /// Not permitted for a scoped credential: a global/cross-database or control-plane method, or
+    /// a data method whose target database could not be determined (fail closed).
     Restricted,
 }
 
-/// Extract the single database at `path` within `params` as a one-element `Dbs`, or `Restricted`
-/// if it is missing / not a string (fail closed).
-fn single_db_target(params: Option<&Value>, path: &[&str]) -> DbScopeTarget {
-    let Some(mut cur) = params else {
-        return DbScopeTarget::Restricted;
-    };
+/// Extract the non-empty string at `path` within `params`, if present.
+fn path_str(params: Option<&Value>, path: &[&str]) -> Option<String> {
+    let mut cur = params?;
     for part in path {
-        match cur.get(*part) {
-            Some(next) => cur = next,
-            None => return DbScopeTarget::Restricted,
-        }
+        cur = cur.get(*part)?;
     }
     match cur.as_str() {
-        Some(db) if !db.is_empty() => DbScopeTarget::Dbs(vec![db.to_string()]),
-        _ => DbScopeTarget::Restricted,
+        Some(s) if !s.is_empty() => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+/// A single whole-database target at `db_path` (no specific table), or `Restricted` if absent.
+fn single_db_target(params: Option<&Value>, db_path: &[&str]) -> DbScopeTarget {
+    match path_str(params, db_path) {
+        Some(db) => DbScopeTarget::Dbs(vec![(db, None)]),
+        None => DbScopeTarget::Restricted,
+    }
+}
+
+/// A single `(database, table)` target from `db_path` / `table_path`. The database is required;
+/// a missing table degrades to a whole-database target.
+fn single_db_table_target(
+    params: Option<&Value>,
+    db_path: &[&str],
+    table_path: &[&str],
+) -> DbScopeTarget {
+    match path_str(params, db_path) {
+        Some(db) => DbScopeTarget::Dbs(vec![(db, path_str(params, table_path))]),
+        None => DbScopeTarget::Restricted,
     }
 }
 
@@ -32668,24 +32696,33 @@ fn rpc_method_db_targets(method: &str, params: Option<&Value>) -> DbScopeTarget 
         | "tx.commit"
         | "tx.rollback" => DbScopeTarget::Neutral,
 
-        // Multi-database read: walk the query AST for every base-table database it touches.
+        // Multi-table read: walk the query AST for every `(database, table)` it touches.
         "query.select" => match params
             .and_then(|p| p.get("query"))
             .and_then(|q| serde_json::from_value::<Query>(q.clone()).ok())
         {
-            Some(query) => DbScopeTarget::Dbs(query_referenced_dbs(&query)),
+            Some(query) => DbScopeTarget::Dbs(
+                query_referenced_tables(&query)
+                    .into_iter()
+                    .map(|(db, table)| (db, Some(table)))
+                    .collect(),
+            ),
             None => DbScopeTarget::Restricted,
         },
 
-        // Single-database reads.
-        "schema.list_tables" | "schema.describe_table" => single_db_target(params, &["db"]),
-        "data.get" => single_db_target(params, &["table", "db"]),
-        "vector.search" | "vector.index.status" => single_db_target(params, &["table", "db"]),
+        // Single-database / single-table reads.
+        "schema.list_tables" => single_db_target(params, &["db"]),
+        "schema.describe_table" => single_db_table_target(params, &["db"], &["table"]),
+        "data.get" => single_db_table_target(params, &["table", "db"], &["table", "table"]),
+        "vector.search" | "vector.index.status" => {
+            single_db_table_target(params, &["table", "db"], &["table", "table"])
+        }
 
-        // Writes (and write-shaped `sql.exec`): reuse the cluster-guard write-target extractor.
-        _ if is_scopable_write_method(method) => match write_target_from_params(method, params).0 {
-            Some(db) => DbScopeTarget::Dbs(vec![db]),
-            None => DbScopeTarget::Restricted,
+        // Writes (and write-shaped `sql.exec`): reuse the cluster-guard write-target extractor,
+        // which yields both the database and (when applicable) the table.
+        _ if is_scopable_write_method(method) => match write_target_from_params(method, params) {
+            (Some(db), table) => DbScopeTarget::Dbs(vec![(db, table)]),
+            (None, _) => DbScopeTarget::Restricted,
         },
 
         // Everything else (global aggregates, control-plane, prepared/patch/subscribe, …) is not
@@ -32728,28 +32765,33 @@ fn rpc_authorize(
     if !p.privilege.allows(required) {
         return RpcAuthDecision::Forbidden { required };
     }
-    // Per-database grant check for a non-admin DbUser: every database a data method targets must
-    // be granted to the user with a privilege that covers `required` (the role ceiling above and
-    // this per-database grant together enforce the effective `min(role, grant)`). Non-database
-    // methods fall through and are governed by the role ceiling only.
+    // Per-grant check for a non-admin DbUser: every `(database, table?)` a data method targets
+    // must be granted with a privilege that covers `required`. A table-specific grant
+    // (`db.table`) takes precedence over the whole-database grant (`db`); the role ceiling above
+    // and the effective grant together enforce `min(role, grant)`. Non-database methods fall
+    // through and are governed by the role ceiling only.
     if let Some(grants) = &p.db_grants {
-        if let DbScopeTarget::Dbs(dbs) = rpc_method_db_targets(method, params) {
-            for db in &dbs {
-                let granted = grants.get(db).map(|g| g.allows(required)).unwrap_or(false);
-                if !granted {
+        if let DbScopeTarget::Dbs(targets) = rpc_method_db_targets(method, params) {
+            for (db, table) in &targets {
+                let effective = table
+                    .as_ref()
+                    .and_then(|t| grants.get(&format!("{db}.{t}")))
+                    .or_else(|| grants.get(db));
+                if !effective.map(|g| g.allows(required)).unwrap_or(false) {
                     return RpcAuthDecision::ForbiddenDbScope {
-                        db: Some(db.clone()),
+                        db: Some(grant_target_label(db, table)),
                     };
                 }
             }
         }
     }
-    // Database-scope check for a scoped API token (only for scoped credentials).
+    // Database-scope check for a scoped API token (token scope is per-database; the table is not
+    // consulted, so a token scoped to a database may touch any table in it).
     if let Some(scope) = &p.db_scope {
         match rpc_method_db_targets(method, params) {
             DbScopeTarget::Neutral => {}
-            DbScopeTarget::Dbs(dbs) => {
-                for db in &dbs {
+            DbScopeTarget::Dbs(targets) => {
+                for (db, _table) in &targets {
                     if !scope.iter().any(|s| s == db) {
                         return RpcAuthDecision::ForbiddenDbScope {
                             db: Some(db.clone()),
@@ -32763,6 +32805,23 @@ fn rpc_authorize(
         }
     }
     RpcAuthDecision::Allow
+}
+
+/// Render a `(database, table?)` target as `db` or `db.table` for a denial message.
+fn grant_target_label(db: &str, table: &Option<String>) -> String {
+    match table {
+        Some(t) => format!("{db}.{t}"),
+        None => db.to_string(),
+    }
+}
+
+/// The storage/lookup key for a grant: `db` for a whole-database grant, `db.table` for a
+/// table-specific one. Authorization builds the same key from a method's target to match.
+fn grant_key(db: &str, table: Option<&str>) -> String {
+    match table {
+        Some(t) if !t.is_empty() => format!("{db}.{t}"),
+        _ => db.to_string(),
+    }
 }
 
 /// Whether RBAC enforcement is enabled (`SKEINDB_RBAC` = `1`/`true`/`on`). Read per request to
@@ -35453,32 +35512,33 @@ mod tests {
                 "{m}"
             );
         }
-        // Single-db reads.
+        // Whole-database read (no specific table).
         let list = json!({"db": "analytics"});
         assert_eq!(
             rpc_method_db_targets("schema.list_tables", Some(&list)),
-            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+            DbScopeTarget::Dbs(vec![("analytics".to_string(), None)])
         );
+        // Single-table read: the table is carried through.
         let get = json!({"table": {"db": "analytics", "table": "events"}, "pk": []});
         assert_eq!(
             rpc_method_db_targets("data.get", Some(&get)),
-            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+            DbScopeTarget::Dbs(vec![("analytics".to_string(), Some("events".to_string()))])
         );
-        // Write: target extracted from the write-target map.
+        // Write: (database, table) extracted from the write-target map.
         let ins = json!({"into": {"db": "analytics", "table": "events"}, "rows": []});
         assert_eq!(
             rpc_method_db_targets("data.insert", Some(&ins)),
-            DbScopeTarget::Dbs(vec!["analytics".to_string()])
+            DbScopeTarget::Dbs(vec![("analytics".to_string(), Some("events".to_string()))])
         );
-        // Multi-db query: both joined databases are collected.
+        // Multi-table query: both joined tables are collected.
         let q = json!({"query": {"body": {"select": {"projection": [], "from": [
             {"db": "analytics", "table": "a"},
             {"db": "reporting", "table": "b"}
         ]}}}});
         match rpc_method_db_targets("query.select", Some(&q)) {
-            DbScopeTarget::Dbs(dbs) => {
-                assert!(dbs.contains(&"analytics".to_string()));
-                assert!(dbs.contains(&"reporting".to_string()));
+            DbScopeTarget::Dbs(targets) => {
+                assert!(targets.contains(&("analytics".to_string(), Some("a".to_string()))));
+                assert!(targets.contains(&("reporting".to_string(), Some("b".to_string()))));
             }
             other => panic!("expected Dbs, got {other:?}"),
         }
@@ -35641,14 +35701,14 @@ mod tests {
         assert_eq!(
             rpc_authorize(Some(&user), "data.insert", Some(&ins("reporting"))),
             RpcAuthDecision::ForbiddenDbScope {
-                db: Some("reporting".to_string())
+                db: Some("reporting.t".to_string())
             }
         );
         // production: no grant → denied.
         assert_eq!(
             rpc_authorize(Some(&user), "data.insert", Some(&ins("production"))),
             RpcAuthDecision::ForbiddenDbScope {
-                db: Some("production".to_string())
+                db: Some("production.t".to_string())
             }
         );
         // admin methods denied by the role ceiling (readwrite < admin).
@@ -35663,6 +35723,97 @@ mod tests {
             rpc_authorize(Some(&user), "tx.begin", None),
             RpcAuthDecision::Allow
         );
+    }
+
+    #[test]
+    fn per_table_grant_overrides_and_confines() {
+        // Whole-database read on `analytics`, but write only on the `analytics.events` table.
+        let user = RpcPrincipal {
+            privilege: RpcPrivilege::Write,
+            db_scope: None,
+            db_grants: Some(HashMap::from([
+                ("analytics".to_string(), RpcPrivilege::Read),
+                ("analytics.events".to_string(), RpcPrivilege::Write),
+            ])),
+            label: "user:bob".to_string(),
+        };
+        let ins = |db: &str, table: &str| json!({"into": {"db": db, "table": table}, "rows": []});
+        let sel = |db: &str, table: &str| json!({"query":{"body":{"select":{"projection":[],"from":[{"db":db,"table":table}]}}}});
+
+        // Write to analytics.events: allowed by the table-level grant (overrides the db grant).
+        assert_eq!(
+            rpc_authorize(
+                Some(&user),
+                "data.insert",
+                Some(&ins("analytics", "events"))
+            ),
+            RpcAuthDecision::Allow
+        );
+        // Write to another analytics table: denied — inherits the read-only database grant.
+        assert_eq!(
+            rpc_authorize(Some(&user), "data.insert", Some(&ins("analytics", "users"))),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("analytics.users".to_string())
+            }
+        );
+        // Read of any analytics table is allowed via the database grant.
+        assert_eq!(
+            rpc_authorize(
+                Some(&user),
+                "query.select",
+                Some(&sel("analytics", "users"))
+            ),
+            RpcAuthDecision::Allow
+        );
+
+        // A user with ONLY a table grant (no database-wide grant).
+        let table_only = RpcPrincipal {
+            privilege: RpcPrivilege::Write,
+            db_scope: None,
+            db_grants: Some(HashMap::from([(
+                "analytics.events".to_string(),
+                RpcPrivilege::Write,
+            )])),
+            label: "user:carol".to_string(),
+        };
+        // The granted table works.
+        assert_eq!(
+            rpc_authorize(
+                Some(&table_only),
+                "data.insert",
+                Some(&ins("analytics", "events"))
+            ),
+            RpcAuthDecision::Allow
+        );
+        // Another table in the same database is denied (no database-wide grant to inherit).
+        assert_eq!(
+            rpc_authorize(
+                Some(&table_only),
+                "query.select",
+                Some(&sel("analytics", "other"))
+            ),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("analytics.other".to_string())
+            }
+        );
+        // A whole-database operation (no specific table) is denied for a table-only grant.
+        assert_eq!(
+            rpc_authorize(
+                Some(&table_only),
+                "schema.list_tables",
+                Some(&json!({"db": "analytics"}))
+            ),
+            RpcAuthDecision::ForbiddenDbScope {
+                db: Some("analytics".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn grant_key_builds_db_or_db_table() {
+        assert_eq!(grant_key("analytics", None), "analytics");
+        assert_eq!(grant_key("analytics", Some("events")), "analytics.events");
+        assert_eq!(grant_key("analytics", Some("")), "analytics"); // empty table = whole db
     }
 
     #[test]

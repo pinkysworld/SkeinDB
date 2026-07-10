@@ -32137,21 +32137,21 @@ fn collect_tables(query: &Query, out: &mut Vec<(String, String)>) {
     collect_tables_query(query, &HashSet::new(), out);
 }
 
-/// The distinct databases a `SELECT` query reads, walking joins, subqueries, set-operations,
-/// and CTE bodies (CTE names are excluded — they are not real base tables). Used by RBAC to
-/// check a database-scoped credential against every database a read could touch. Reuses the
-/// same table-collection the CDC dependency tracker uses, so it stays consistent with what the
-/// executor actually reads.
-pub fn query_referenced_dbs(query: &Query) -> Vec<String> {
+/// The distinct `(database, table)` base tables a `SELECT` query reads, walking joins,
+/// subqueries, set-operations, and CTE bodies (CTE names are excluded — they are not real base
+/// tables). Used by RBAC to check a scoped credential / per-table grants against every table a
+/// read could touch. Reuses the same table-collection the CDC dependency tracker uses, so it
+/// stays consistent with what the executor actually reads.
+pub fn query_referenced_tables(query: &Query) -> Vec<(String, String)> {
     let mut tables = Vec::new();
     collect_tables(query, &mut tables);
-    let mut dbs: Vec<String> = Vec::new();
-    for (db, _table) in tables {
-        if !dbs.contains(&db) {
-            dbs.push(db);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for pair in tables {
+        if !out.contains(&pair) {
+            out.push(pair);
         }
     }
-    dbs
+    out
 }
 
 fn collect_tables_query(
