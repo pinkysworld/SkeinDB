@@ -22914,10 +22914,9 @@ fn mysql_parse_tz_offset(tz: &str) -> Option<i64> {
     }
     let (sign, rest) = if let Some(rest) = trimmed.strip_prefix('+') {
         (1i64, rest)
-    } else if let Some(rest) = trimmed.strip_prefix('-') {
-        (-1i64, rest)
     } else {
-        return None;
+        let rest = trimmed.strip_prefix('-')?;
+        (-1i64, rest)
     };
     let parts: Vec<&str> = rest.split(':').collect();
     if parts.len() != 2 {
@@ -23898,10 +23897,7 @@ fn resolve_dp_aggregates(
     let mut out = Vec::new();
     for spec in specs.iter() {
         let op = spec.op.to_lowercase();
-        let column = spec
-            .column
-            .clone()
-            .and_then(|c| if c == "*" { None } else { Some(c) });
+        let column = spec.column.clone().filter(|c| c != "*");
         let op = match op.as_str() {
             "count" => DpAggOp::Count,
             "sum" => DpAggOp::Sum,

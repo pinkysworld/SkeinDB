@@ -82,7 +82,7 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
         "cargo install cargo-deb --locked",
         "macos-latest",
         "build_macos_signed_artifact.sh",
-        "softprops/action-gh-release@v2",
+        "softprops/action-gh-release@v3",
         "macos-*.tar.gz",
         "macos-*-codesign.txt",
         "render_homebrew_formula.py",

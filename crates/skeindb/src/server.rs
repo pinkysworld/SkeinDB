@@ -2387,10 +2387,9 @@ fn mysql_parse_show_named_value_filter(tail: &str) -> Option<Option<String>> {
         let rest_lower = rest.to_ascii_lowercase();
         if rest_lower.starts_with("like ") {
             rest[4..].trim()
-        } else if let Some(stripped) = rest.strip_prefix('=') {
-            stripped.trim()
         } else {
-            return None;
+            let stripped = rest.strip_prefix('=')?;
+            stripped.trim()
         }
     } else {
         return None;
@@ -2481,10 +2480,9 @@ fn mysql_parse_show_character_set_query(sql: &str) -> Option<Option<String>> {
         let rest_lower = rest.to_ascii_lowercase();
         let raw = if rest_lower.starts_with("like ") {
             rest[4..].trim()
-        } else if let Some(stripped) = rest.strip_prefix('=') {
-            stripped.trim()
         } else {
-            return None;
+            let stripped = rest.strip_prefix('=')?;
+            stripped.trim()
         };
         let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
         return (!pattern.is_empty()).then_some(Some(pattern));
@@ -2531,10 +2529,9 @@ fn mysql_parse_show_collation_query(sql: &str) -> Option<MySqlShowCollationFilte
         let rest_lower = rest.to_ascii_lowercase();
         let raw = if rest_lower.starts_with("like ") {
             rest[4..].trim()
-        } else if let Some(stripped) = rest.strip_prefix('=') {
-            stripped.trim()
         } else {
-            return None;
+            let stripped = rest.strip_prefix('=')?;
+            stripped.trim()
         };
         let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
         if pattern.is_empty() {
@@ -6115,10 +6112,9 @@ fn mysql_parse_in_subquery_where_clause(where_clause: &str) -> Option<(String, b
     let clause = trim_wrapping_parentheses(where_clause.trim());
     let (idx, negated, token_len) = if let Some(idx) = find_keyword_top_level(clause, "not in") {
         (idx, true, "not in".len())
-    } else if let Some(idx) = find_keyword_top_level(clause, "in") {
-        (idx, false, "in".len())
     } else {
-        return None;
+        let idx = find_keyword_top_level(clause, "in")?;
+        (idx, false, "in".len())
     };
     let lhs = clause[..idx].trim();
     if lhs.is_empty() {
@@ -10988,7 +10984,7 @@ fn mysql_err_packet(code: u16, sql_state: &str, message: &str) -> Vec<u8> {
     payload.push(0xff);
     payload.extend_from_slice(&code.to_le_bytes());
     payload.push(b'#');
-    let mut state = [b'H', b'Y', b'0', b'0', b'0'];
+    let mut state = *b"HY000";
     for (idx, byte) in sql_state.as_bytes().iter().take(5).enumerate() {
         state[idx] = *byte;
     }
@@ -11820,10 +11816,9 @@ fn pg_parse_set_command(rest: &str) -> Option<(String, String)> {
         (rest[..pos].trim(), rest[pos + 1..].trim())
     } else {
         let rest_lower = rest.to_ascii_lowercase();
-        if let Some(pos) = rest_lower.find(" to ") {
+        {
+            let pos = rest_lower.find(" to ")?;
             (rest[..pos].trim(), rest[pos + 4..].trim())
-        } else {
-            return None;
         }
     };
 
@@ -45292,13 +45287,7 @@ mod tests {
             panic!("expected OR expression");
         };
         assert_eq!(op, "or");
-        let Expr::Op {
-            op: right_op,
-            a: _,
-            b: _,
-            ..
-        } = *right
-        else {
+        let Expr::Op { op: right_op, .. } = *right else {
             panic!("expected right side to be AND expression");
         };
         assert_eq!(right_op, "and");
@@ -45309,10 +45298,7 @@ mod tests {
         .expect("parse parenthesized where expr")
         .expect("where expression");
         let Expr::Op {
-            op,
-            a: Some(left),
-            b: _,
-            ..
+            op, a: Some(left), ..
         } = expr
         else {
             panic!("expected AND expression");
