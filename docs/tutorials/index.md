@@ -29,6 +29,7 @@ This site is organised into six sections:
   <a class="home-card" href="vector-rag.html"><div class="home-icon">🧠</div><h3>Vector RAG retrieval</h3><p>Run a credential-free sample app that seeds embeddings, calls <code>vector.search</code>, and builds grounded context.</p></a>
   <a class="home-card" href="cdc-with-sse.html"><div class="home-icon">📡</div><h3>CDC with SSE</h3><p>Create a table subscription, stream changes over SSE, ack offsets, and reconnect safely.</p></a>
   <a class="home-card" href="encryption-and-key-rotation.html"><div class="home-icon">🔐</div><h3>Encryption and key rotation</h3><p>Register keys, switch modes, inspect status, and rotate the active database key.</p></a>
+  <a class="home-card" href="rbac-and-access-control.html"><div class="home-icon">🔑</div><h3>RBAC and access control</h3><p>Turn on RBAC, mint read-only and database-scoped tokens, and create per-database users with grants.</p></a>
   <a class="home-card" href="replay-bundles-and-integrity.html"><div class="home-icon">🧾</div><h3>Replay bundles and integrity</h3><p>Export a deterministic replay bundle, import it into a workspace, and verify checksums.</p></a>
 </div>
 
@@ -45,7 +46,7 @@ This site is organised into six sections:
 ## Suggested paths
 
 1. **Application developer**: [Quickstart](quickstart.html) → [Your first query (SkeinQL)](first-query.html) → [Vector RAG retrieval](vector-rag.html) → [MySQL in 5 minutes](mysql-in-5-min.html) or [PostgreSQL in 5 minutes](postgresql-in-5-min.html) → [CDC with SSE](cdc-with-sse.html).
-2. **Operator / admin**: [Admin console tour](admin-tour.html) → [Monitoring and metrics](monitoring-and-metrics.html) → [Setting up a 3-node cluster](setting-up-cluster.html) → [Encryption and key rotation](encryption-and-key-rotation.html) → [Replay bundles and integrity](replay-bundles-and-integrity.html).
+2. **Operator / admin**: [Admin console tour](admin-tour.html) → [Monitoring and metrics](monitoring-and-metrics.html) → [RBAC and access control](rbac-and-access-control.html) → [Setting up a 3-node cluster](setting-up-cluster.html) → [Encryption and key rotation](encryption-and-key-rotation.html) → [Replay bundles and integrity](replay-bundles-and-integrity.html).
 
 ## Reference
 

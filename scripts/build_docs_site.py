@@ -57,6 +57,7 @@ NAV: list[Section] = [
       DocPage("vector-rag",             "tutorials/vector-rag.md",           "Vector RAG retrieval",         "Tutorials"),
       DocPage("cdc-with-sse",           "tutorials/cdc-with-sse.md",         "CDC with SSE",                 "Tutorials"),
       DocPage("encryption-and-key-rotation", "tutorials/encryption-and-key-rotation.md", "Encryption and key rotation", "Tutorials"),
+      DocPage("rbac-and-access-control", "tutorials/rbac-and-access-control.md", "RBAC and access control", "Tutorials"),
       DocPage("replay-bundles-and-integrity", "tutorials/replay-bundles-and-integrity.md", "Replay bundles and integrity", "Tutorials"),
         DocPage("setting-up-cluster",     "tutorials/setting-up-cluster.md",   "Setting up a 3-node cluster",  "Tutorials"),
     ]),
