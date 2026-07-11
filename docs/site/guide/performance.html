@@ -233,6 +233,16 @@ Finding the visible version can degrade to following pointers repeatedly.</p>
 <li>PF04: Batch execution framework (implemented for eligible single-table full scans)</li>
 <li>PF05: Visible Version Index cache</li>
 </ul>
+<h2 id="4b-write-concurrency-and-the-global-engine-lock">4b) Write concurrency and the global engine lock<a class="headerlink" href="#4b-write-concurrency-and-the-global-engine-lock" title="Permanent link">¶</a></h2>
+<p>The engine is a single <code>Arc&lt;RwLock&lt;Engine&gt;&gt;</code>; every mutation acquires the write lock. Two <code>#[ignore]</code>d benchmarks measure the write path (macOS/APFS, run with <code>cargo test -p skeindb --bins &lt;name&gt; -- --ignored --nocapture</code>):</p>
+<ul>
+<li><strong><code>bench_concurrent_write_throughput</code></strong> — N writers into <em>one</em> table.</li>
+<li><code>batch=1</code> (fsync every commit): ~150–170 inserts/sec regardless of writer count — writes are <strong>fsync-bound</strong> (each commit pays one <code>F_FULLFSYNC</code>), and adding writers does not help.</li>
+<li><code>batch=64</code> (<code>SKEINDB_WAL_SYNC_BATCH</code>, fsync amortized): single writer ~1700/sec; 8 writers ~750/sec — with the fsync amortized, concurrency now <em>hurts</em> because writers contend on the one global lock.</li>
+<li><strong><code>bench_multidb_write_throughput</code></strong> — N writers, each into its <em>own</em> database (<code>batch=64</code>). This is the workload per-database lock-sharding would help. Throughput <strong>falls</strong> as databases increase: 1 db ~1560/sec, 4 dbs ~600/sec, 8 dbs ~460/sec. Writes to unrelated databases still serialize on the single global lock (8 independent databases are slower in aggregate than one).</li>
+</ul>
+<p><strong>Finding.</strong> For <strong>single-table</strong> write bursts the bottleneck is the WAL fsync, not the lock; the durability knobs (<code>SKEINDB_WAL_SYNC_BATCH</code>) address that and the append-only CDC/forensic logs removed the other per-mutation fsyncs (~7×, see the changelog). For <strong>many-database concurrent</strong> writes, the single global engine lock is the real ceiling — sharding it per database would let unrelated databases proceed in parallel.</p>
+<p><strong>Why it is not yet done.</strong> Per-database lock-sharding is a large, dedicated effort, not an incremental change: essentially all engine state (<code>tables</code>, catalog, <code>ValueStore</code>, the WAL, forensic chain, CDC) is global today, and cross-database operations would need multi-lock coordination. It also pairs with per-database WALs — otherwise the shared WAL fsync remains a second serialization point. The benchmarks above are the yardstick for that project when it is scheduled.</p>
 <h2 id="5-autoparameterization-plan-reuse-sql-clients">5) Autoparameterization + plan reuse (SQL clients)<a class="headerlink" href="#5-autoparameterization-plan-reuse-sql-clients" title="Permanent link">¶</a></h2>
 <p>Many MySQL-compatible clients send repetitive ad-hoc SQL differing only by literals.
 If SkeinDB normalizes queries into a stable fingerprint and extracts parameters (docs/AUTOPARAMETERIZATION.md),
@@ -306,6 +316,7 @@ python<span class="w"> </span>eval/benchmark_report.py<span class="w"> </span>--
 </ul>
 </li>
 <li><a href="#4-backlog">4) Backlog</a></li>
+<li><a href="#4b-write-concurrency-and-the-global-engine-lock">4b) Write concurrency and the global engine lock</a></li>
 <li><a href="#5-autoparameterization-plan-reuse-sql-clients">5) Autoparameterization + plan reuse (SQL clients)</a></li>
 <li><a href="#6-stall-aware-compaction-scheduling">6) Stall-aware compaction scheduling</a></li>
 <li><a href="#reproducing-the-transport-benchmark">Reproducing the transport benchmark</a></li>
