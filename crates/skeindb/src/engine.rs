@@ -32924,6 +32924,81 @@ mod tests {
         println!("===========================================================\n");
     }
 
+    /// Multi-database concurrent-write throughput: unlike `bench_concurrent_write_throughput`
+    /// (all writers hit one table), each writer here targets its OWN database. This is the
+    /// workload per-database lock-sharding would help. With `batch=64` the WAL fsync is amortized,
+    /// so the single global `Arc<RwLock<Engine>>` is the remaining serialization point. If
+    /// throughput stays flat as the database count rises, the global lock serializes
+    /// cross-database writes and sharding it per database would let them proceed in parallel.
+    #[test]
+    #[ignore]
+    fn bench_multidb_write_throughput() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ops_per_writer = 500usize;
+        println!(
+            "\n=== multi-database concurrent write throughput (per-DB lock-sharding signal) ==="
+        );
+        for &dbs in &[1usize, 4usize, 8usize] {
+            let dir = temp_dir(&format!("bench_multidb_d{dbs}"));
+            let mut engine = Engine::open(&dir).unwrap();
+            engine.wal_sync_batch = 64;
+            for w in 0..dbs {
+                engine
+                    .create_table(
+                        &format!("db{w}"),
+                        "items",
+                        vec![ColumnSchema {
+                            name: "id".to_string(),
+                            r#type: type_desc("u64"),
+                            nullable: false,
+                            auto_increment: false,
+                        }],
+                        vec!["id".to_string()],
+                        false,
+                        None,
+                    )
+                    .unwrap();
+            }
+            let engine = std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+            let start = std::time::Instant::now();
+            rt.block_on(async {
+                let mut handles = Vec::new();
+                for w in 0..dbs {
+                    let eng = engine.clone();
+                    handles.push(tokio::spawn(async move {
+                        let table_ref = BaseTableRef {
+                            db: format!("db{w}"),
+                            table: "items".to_string(),
+                            r#as: None,
+                        };
+                        for i in 0..ops_per_writer {
+                            let mut e = eng.write().await;
+                            e.data_insert(
+                                &table_ref,
+                                vec![row(&[("id", Lit::U64 { v: i as u64 })])],
+                                None,
+                            )
+                            .unwrap();
+                        }
+                    }));
+                }
+                for h in handles {
+                    h.await.unwrap();
+                }
+            });
+            let elapsed = start.elapsed();
+            let total = dbs * ops_per_writer;
+            let tput = total as f64 / elapsed.as_secs_f64();
+            println!(
+                "batch=64 databases={dbs}: {total} inserts in {elapsed:>10.2?} = {tput:>9.0} inserts/sec"
+            );
+        }
+        println!("===========================================================\n");
+    }
+
     #[test]
     fn corrupt_segment_file_loads_empty_and_refuses_overwrite() -> anyhow::Result<()> {
         let dir = temp_dir("corrupt_segment_guard");
