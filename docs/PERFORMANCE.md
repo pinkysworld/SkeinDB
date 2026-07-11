@@ -127,6 +127,19 @@ This is safe if the cache is validated (begin/end ts check) before use.
 - PF04: Batch execution framework (implemented for eligible single-table full scans)
 - PF05: Visible Version Index cache
 
+## 4b) Write concurrency and the global engine lock
+
+The engine is a single `Arc<RwLock<Engine>>`; every mutation acquires the write lock. Two `#[ignore]`d benchmarks measure the write path (macOS/APFS, run with `cargo test -p skeindb --bins <name> -- --ignored --nocapture`):
+
+- **`bench_concurrent_write_throughput`** — N writers into *one* table.
+  - `batch=1` (fsync every commit): ~150–170 inserts/sec regardless of writer count — writes are **fsync-bound** (each commit pays one `F_FULLFSYNC`), and adding writers does not help.
+  - `batch=64` (`SKEINDB_WAL_SYNC_BATCH`, fsync amortized): single writer ~1700/sec; 8 writers ~750/sec — with the fsync amortized, concurrency now *hurts* because writers contend on the one global lock.
+- **`bench_multidb_write_throughput`** — N writers, each into its *own* database (`batch=64`). This is the workload per-database lock-sharding would help. Throughput **falls** as databases increase: 1 db ~1560/sec, 4 dbs ~600/sec, 8 dbs ~460/sec. Writes to unrelated databases still serialize on the single global lock (8 independent databases are slower in aggregate than one).
+
+**Finding.** For **single-table** write bursts the bottleneck is the WAL fsync, not the lock; the durability knobs (`SKEINDB_WAL_SYNC_BATCH`) address that and the append-only CDC/forensic logs removed the other per-mutation fsyncs (~7×, see the changelog). For **many-database concurrent** writes, the single global engine lock is the real ceiling — sharding it per database would let unrelated databases proceed in parallel.
+
+**Why it is not yet done.** Per-database lock-sharding is a large, dedicated effort, not an incremental change: essentially all engine state (`tables`, catalog, `ValueStore`, the WAL, forensic chain, CDC) is global today, and cross-database operations would need multi-lock coordination. It also pairs with per-database WALs — otherwise the shared WAL fsync remains a second serialization point. The benchmarks above are the yardstick for that project when it is scheduled.
+
 ## 5) Autoparameterization + plan reuse (SQL clients)
 
 Many MySQL-compatible clients send repetitive ad-hoc SQL differing only by literals.
