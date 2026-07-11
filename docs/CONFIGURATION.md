@@ -256,4 +256,6 @@ Set `SKEINDB_CLUSTER_AUTO_FAILOVER=1` to let the cluster fail over on its own. A
 
 Because a candidate needs both a quorum and a majority of votes for its term — and two disjoint partitions can never both hold a majority — **at most one primary is ever elected per term and at most one accepts writes**. Run **3+ nodes** so the cluster keeps a majority (and write availability) when a single node fails.
 
+**Per shard.** When databases/tables are sharded, the same machinery runs **independently per shard**: each shard has its own primary, leadership epoch, quorum (a majority of *that shard's* node set), and vote round (`cluster.request_vote` / `cluster.leader.announce` carry a `shard_id`). The failover tick evaluates every shard as well as the whole cluster, so a shard whose primary is down is failed over on its own — write-fenced when it loses its shard quorum, then re-elected among its replicas. `cluster.shard.failover.status` reports each shard's readiness.
+
 The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election; it does not (yet) include log-matching/replication safety, so it pairs with SkeinDB's existing replication rather than replacing it.
