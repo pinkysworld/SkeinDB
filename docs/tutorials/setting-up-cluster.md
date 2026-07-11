@@ -116,7 +116,7 @@ curl -s -XPOST http://127.0.0.1:8001/api/v1/rpc \
 
 > **Run 3+ nodes.** Quorum is a majority, so a 2-node cluster loses write availability when either node is down (neither side is a majority). Three nodes tolerate one failure; five tolerate two.
 
-Per-shard automated failover (each shard failing over independently) is not yet automated — use `cluster.replica.promote` with a `shard_id` for that. See [Configuration → Automated fenced failover](configuration.html#automated-fenced-failover-opt-in).
+Sharded clusters fail over **per shard** — each shard is its own replication group. Watch every shard's readiness with `cluster.shard.failover.status`, and promote a shard's replica with `cluster.replica.promote` + a `shard_id` (now quorum-gated against the shard's own node set, and the shard primary is write-fenced when it loses that quorum). Fully self-driving per-shard election is being rolled out on top of these primitives. See [Configuration → Automated fenced failover](configuration.html#automated-fenced-failover-opt-in).
 
 ## 7. Production notes
 
