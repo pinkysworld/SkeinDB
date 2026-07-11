@@ -289,6 +289,10 @@ struct ClusterShard {
     replicas: Vec<String>,
     slots: u32,
     updated_at_ms: u64,
+    /// Per-shard leadership epoch: the fencing token for this shard's primary, independent of
+    /// the whole-cluster epoch (each shard fails over on its own). Bumped on shard promotion.
+    #[serde(default)]
+    leadership_epoch: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19275,6 +19279,7 @@ pub(crate) async fn handle_rpc(
                     cluster_nodes(state, p)
                 }
                 "cluster.failover.status" => Ok(cluster_failover_status(state)),
+                "cluster.shard.failover.status" => Ok(cluster_shard_failover_status(state)),
                 "cluster.node.heartbeat" => {
                     #[derive(serde::Deserialize)]
                     struct P {
@@ -21653,6 +21658,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.status",
         "cluster.nodes",
         "cluster.failover.status",
+        "cluster.shard.failover.status",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
@@ -22237,6 +22243,135 @@ fn cluster_failover_status(state: &AppState) -> Value {
     })
 }
 
+// ── Per-shard failover: each shard is its own replication group with an independent primary,
+// quorum (a majority of that shard's node set), leadership epoch, and failover decision. The
+// pure helpers below mirror the whole-cluster ones but scope everything to one shard's nodes.
+
+/// The node set of a shard: its primary plus its replicas, deduplicated.
+fn shard_node_ids(shard: &ClusterShard) -> Vec<String> {
+    let mut ids = shard.replicas.clone();
+    if !ids.iter().any(|n| n == &shard.primary_node_id) {
+        ids.push(shard.primary_node_id.clone());
+    }
+    ids
+}
+
+/// Whether `local_node_id` observes a quorum (majority) of a shard's node set. On a partition
+/// only the majority side of the shard can, so a shard can never elect two primaries.
+fn shard_has_quorum(
+    shard: &ClusterShard,
+    nodes: &[ClusterNode],
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> bool {
+    let ids = shard_node_ids(shard);
+    let total = ids.len();
+    if total == 0 {
+        return false;
+    }
+    let reachable = nodes
+        .iter()
+        .filter(|n| {
+            ids.iter().any(|id| id == &n.node_id)
+                && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
+        })
+        .count();
+    reachable >= cluster_quorum_size(total)
+}
+
+/// The recommended failover for a shard whose primary is unreachable: the freshest online
+/// replica of that shard, ties broken by `node_id`. `None` if the shard primary is healthy or no
+/// eligible replica exists.
+fn shard_failover_candidate(
+    shard: &ClusterShard,
+    nodes: &[ClusterNode],
+    local_node_id: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> Option<String> {
+    let primary_healthy = nodes
+        .iter()
+        .find(|n| n.node_id == shard.primary_node_id)
+        .map(|p| evaluate_node_health(p, local_node_id, now_ms, timeout_ms) == NodeHealth::Online)
+        .unwrap_or(false);
+    if primary_healthy {
+        return None;
+    }
+    let mut candidates: Vec<&ClusterNode> = nodes
+        .iter()
+        .filter(|n| {
+            shard.replicas.iter().any(|r| r == &n.node_id)
+                && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.last_seen_ms
+            .cmp(&a.last_seen_ms)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    candidates.first().map(|c| c.node_id.clone())
+}
+
+/// Read-only per-shard failover readiness: for every shard, its primary's health, quorum, epoch,
+/// and (when the primary is down) the recommended promotion target among the shard's replicas.
+fn cluster_shard_failover_status(state: &AppState) -> Value {
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let now = now_unix_ms_u64();
+    let timeout = cluster_node_timeout_ms();
+    let shards: Vec<Value> = cluster
+        .shards
+        .iter()
+        .map(|shard| {
+            let primary_healthy = cluster
+                .nodes
+                .iter()
+                .find(|n| n.node_id == shard.primary_node_id)
+                .map(|p| {
+                    evaluate_node_health(p, &cluster.local_node_id, now, timeout)
+                        == NodeHealth::Online
+                })
+                .unwrap_or(false);
+            let members = shard_node_ids(shard).len();
+            let has_quorum =
+                shard_has_quorum(shard, &cluster.nodes, &cluster.local_node_id, now, timeout);
+            let candidate = shard_failover_candidate(
+                shard,
+                &cluster.nodes,
+                &cluster.local_node_id,
+                now,
+                timeout,
+            );
+            serde_json::json!({
+                "shard_id": shard.shard_id,
+                "db": shard.db,
+                "table": shard.table,
+                "primary_node_id": shard.primary_node_id,
+                "primary_healthy": primary_healthy,
+                "leadership_epoch": shard.leadership_epoch,
+                "replicas": shard.replicas,
+                "quorum": {
+                    "size": cluster_quorum_size(members),
+                    "members": members,
+                    "has_quorum": has_quorum,
+                },
+                "failover_recommended": candidate.is_some(),
+                "recommended_candidate": candidate,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "observer_node_id": cluster.local_node_id,
+        "node_timeout_ms": timeout,
+        "shard_count": cluster.shards.len(),
+        "shards": shards,
+    })
+}
+
 /// Record a heartbeat from `node_id`, refreshing its liveness (`last_seen_ms` + `status =
 /// online`). This is the signal `cluster.failover.status` uses to detect a dead primary.
 fn cluster_node_heartbeat(state: &AppState, node_id: &str) -> Result<Value, RpcError> {
@@ -22448,6 +22583,7 @@ fn cluster_shard_create(
             replicas,
             slots: params.slots.unwrap_or(128).max(1),
             updated_at_ms: now,
+            leadership_epoch: 0,
         };
         cluster.shards.push(shard.clone());
         shard
@@ -32974,6 +33110,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "cluster.route_query"
             | "cluster.replication_stats"
             | "cluster.failover.status"
+            | "cluster.shard.failover.status"
     )
 }
 
@@ -33056,6 +33193,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cluster.status",
         "cluster.nodes",
         "cluster.failover.status",
+        "cluster.shard.failover.status",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
@@ -35893,6 +36031,66 @@ mod tests {
         }
     }
 
+    fn cshard(id: &str, primary: &str, replicas: &[&str]) -> ClusterShard {
+        ClusterShard {
+            shard_id: id.to_string(),
+            db: "app".to_string(),
+            table: Some("t".to_string()),
+            primary_node_id: primary.to_string(),
+            replicas: replicas.iter().map(|s| s.to_string()).collect(),
+            slots: 128,
+            updated_at_ms: 0,
+            leadership_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn shard_quorum_and_failover_candidate_scope_to_the_shard() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // Shard node set = {p, r1, r2}; quorum = 2. `obs` is an external observer.
+        let shard = cshard("s1", "p", &["r1", "r2"]);
+
+        // All shard members fresh, primary healthy → quorum holds, no failover. A node OUTSIDE
+        // the shard is ignored for the shard's quorum.
+        let healthy = vec![
+            cnode("p", "primary", "online", now - 1_000),
+            cnode("r1", "replica", "online", now - 1_000),
+            cnode("r2", "replica", "online", now - 2_000),
+            cnode("other", "replica", "online", 0),
+        ];
+        assert!(shard_has_quorum(&shard, &healthy, "obs", now, timeout));
+        assert_eq!(
+            shard_failover_candidate(&shard, &healthy, "obs", now, timeout),
+            None
+        );
+
+        // Primary down, both replicas online → quorum (2 of 3); freshest replica elected.
+        let down = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 5_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert!(shard_has_quorum(&shard, &down, "obs", now, timeout));
+        assert_eq!(
+            shard_failover_candidate(&shard, &down, "obs", now, timeout),
+            Some("r2".to_string())
+        );
+
+        // Primary down and only one replica online → the shard has NO quorum (1 of 3), so an
+        // automated promotion must not act (even though a candidate is still recommended).
+        let minority = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 60_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert!(!shard_has_quorum(&shard, &minority, "obs", now, timeout));
+        assert_eq!(
+            shard_failover_candidate(&shard, &minority, "obs", now, timeout),
+            Some("r2".to_string())
+        );
+    }
+
     #[test]
     fn node_health_reflects_heartbeat_age() {
         let now = 100_000u64;
@@ -36422,8 +36620,9 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 151);
+        assert_eq!(methods.len(), 152);
         assert!(methods.contains(&"cluster.failover.status"));
+        assert!(methods.contains(&"cluster.shard.failover.status"));
         assert!(methods.contains(&"cluster.node.heartbeat"));
         assert!(methods.contains(&"cluster.leader.announce"));
         assert!(methods.contains(&"cluster.request_vote"));
