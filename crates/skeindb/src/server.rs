@@ -426,17 +426,21 @@ impl ClusterStateModel {
             .collect()
     }
 
-    fn shard_primary_for(&self, db: Option<&str>, table: Option<&str>) -> String {
-        if let (Some(db), Some(table)) = (db, table) {
-            if let Some(shard) = self
+    /// The shard that owns `(db, table)`, if one is defined for exactly that table.
+    fn shard_for(&self, db: Option<&str>, table: Option<&str>) -> Option<&ClusterShard> {
+        match (db, table) {
+            (Some(db), Some(table)) => self
                 .shards
                 .iter()
-                .find(|s| s.db == db && s.table.as_deref() == Some(table))
-            {
-                return shard.primary_node_id.clone();
-            }
+                .find(|s| s.db == db && s.table.as_deref() == Some(table)),
+            _ => None,
         }
-        self.primary_node_id.clone()
+    }
+
+    fn shard_primary_for(&self, db: Option<&str>, table: Option<&str>) -> String {
+        self.shard_for(db, table)
+            .map(|s| s.primary_node_id.clone())
+            .unwrap_or_else(|| self.primary_node_id.clone())
     }
 }
 
@@ -21416,11 +21420,19 @@ fn enforce_cluster_write_guard(
     if target_primary == cluster.local_node_id {
         // We are the primary for this write. Under automated fenced failover, refuse to serve
         // writes when we have lost quorum: a partitioned minority primary must not accept writes
-        // that would diverge from the majority-side primary that will be promoted.
+        // that would diverge from the majority-side primary that will be promoted. When the write
+        // maps to a shard, the relevant quorum is that shard's node set; otherwise it is the
+        // whole cluster.
         if auto_failover_enabled() {
             let now = now_unix_ms_u64();
             let timeout = cluster_node_timeout_ms();
-            if !cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout) {
+            let has_quorum = match cluster.shard_for(db.as_deref(), table.as_deref()) {
+                Some(shard) => {
+                    shard_has_quorum(shard, &cluster.nodes, &cluster.local_node_id, now, timeout)
+                }
+                None => cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout),
+            };
+            if !has_quorum {
                 return Err(RpcError::new(
                     "fenced",
                     "primary has lost quorum and is fenced (writes refused); a majority-side \
@@ -22414,11 +22426,29 @@ fn cluster_replica_promote(
             return Err(RpcError::new("not_found", "node not found"));
         }
         if let Some(shard_id) = params.shard_id.as_ref() {
+            // Shard promotion is fenced by the *shard's* quorum (a majority of its own node set),
+            // so a partitioned minority of the shard cannot elect a second shard primary. `force`
+            // overrides for operator recovery.
+            let has_quorum = {
+                let shard = cluster
+                    .shards
+                    .iter()
+                    .find(|s| s.shard_id == *shard_id)
+                    .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+                shard_has_quorum(shard, &cluster.nodes, &cluster.local_node_id, now, timeout)
+            };
+            if !force && !has_quorum {
+                return Err(RpcError::new(
+                    "no_quorum",
+                    "refusing to promote shard without a quorum of its replica set (split-brain \
+                     risk); pass force:true to override during a confirmed outage",
+                ));
+            }
             let shard = cluster
                 .shards
                 .iter_mut()
                 .find(|s| s.shard_id == *shard_id)
-                .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+                .expect("shard existed in the quorum check above");
             let old_primary = shard.primary_node_id.clone();
             shard.primary_node_id = params.node_id.clone();
             shard.replicas.retain(|n| n != &params.node_id);
@@ -22426,7 +22456,9 @@ fn cluster_replica_promote(
                 shard.replicas.push(old_primary);
             }
             shard.updated_at_ms = now;
-            new_epoch = cluster.leadership_epoch;
+            // Bump the per-shard fencing token so the superseded shard primary detects it is stale.
+            shard.leadership_epoch = shard.leadership_epoch.saturating_add(1);
+            new_epoch = shard.leadership_epoch;
         } else {
             // Whole-cluster promotion is fenced: refuse unless the promoting node observes a
             // quorum of the cluster, so a minority partition cannot elect a second primary.
@@ -36089,6 +36121,74 @@ mod tests {
             shard_failover_candidate(&shard, &minority, "obs", now, timeout),
             Some("r2".to_string())
         );
+    }
+
+    #[test]
+    fn shard_promote_is_quorum_gated_and_bumps_shard_epoch() -> anyhow::Result<()> {
+        let dir = temp_dir("shard_promote_quorum");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.local_node_id = "n1".to_string();
+            // Shard s1's node set {p, r1, r2} are all stale (this observer sees no shard quorum).
+            cluster.nodes = vec![
+                cnode("n1", "replica", "online", now_unix_ms_u64()),
+                cnode("p", "primary", "online", 0),
+                cnode("r1", "replica", "online", 0),
+                cnode("r2", "replica", "online", 0),
+            ];
+            let mut shard = cshard("s1", "p", &["r1", "r2"]);
+            shard.leadership_epoch = 2;
+            cluster.shards = vec![shard];
+        }
+        let promote = |node: &str, force: Option<bool>| ClusterReplicaPromoteParams {
+            node_id: node.to_string(),
+            shard_id: Some("s1".to_string()),
+            reason: None,
+            force,
+        };
+
+        // Without a shard quorum, an unforced shard promotion is refused.
+        let err = cluster_replica_promote(&state, promote("r1", None)).unwrap_err();
+        assert_eq!(err.code, "no_quorum");
+
+        // Forcing promotes r1, demotes the old shard primary to a replica, and bumps the SHARD
+        // epoch (2 → 3); the whole-cluster epoch is untouched.
+        let out = cluster_replica_promote(&state, promote("r1", Some(true))).expect("forced");
+        assert_eq!(out["leadership_epoch"], 3);
+        {
+            let cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cluster.leadership_epoch, 0); // whole-cluster epoch unchanged
+            let shard = cluster.shards.iter().find(|s| s.shard_id == "s1").unwrap();
+            assert_eq!(shard.primary_node_id, "r1");
+            assert_eq!(shard.leadership_epoch, 3);
+            assert!(shard.replicas.contains(&"p".to_string()));
+        }
+
+        // Refresh the shard's nodes → quorum present → an unforced shard promotion now works.
+        {
+            let fresh = now_unix_ms_u64();
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for n in cluster.nodes.iter_mut() {
+                n.last_seen_ms = fresh;
+            }
+        }
+        let out = cluster_replica_promote(&state, promote("r2", None)).expect("with quorum");
+        assert_eq!(out["leadership_epoch"], 4);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]
