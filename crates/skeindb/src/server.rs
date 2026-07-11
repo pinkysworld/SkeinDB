@@ -339,6 +339,11 @@ struct ClusterStateModel {
     /// The candidate this node granted its `voted_epoch` vote to (for idempotent re-requests).
     #[serde(default)]
     voted_for: String,
+    /// Per-shard election votes this node has granted: `shard_id → (term, candidate)`. Each shard
+    /// runs an independent election, so votes are tracked per shard (analogous to the
+    /// whole-cluster `voted_epoch`/`voted_for`).
+    #[serde(default)]
+    shard_votes: HashMap<String, (u64, String)>,
 }
 
 impl ClusterStateModel {
@@ -365,6 +370,7 @@ impl ClusterStateModel {
             leadership_epoch: 0,
             voted_epoch: 0,
             voted_for: String::new(),
+            shard_votes: HashMap::new(),
         }
     }
 
@@ -19325,18 +19331,22 @@ pub(crate) async fn handle_rpc(
                     struct P {
                         node_id: String,
                         epoch: u64,
+                        #[serde(default)]
+                        shard_id: Option<String>,
                     }
                     let p: P = parse_params(params.clone())?;
-                    cluster_leader_announce(state, &p.node_id, p.epoch)
+                    cluster_leader_announce(state, &p.node_id, p.epoch, p.shard_id.as_deref())
                 }
                 "cluster.request_vote" => {
                     #[derive(serde::Deserialize)]
                     struct P {
                         candidate: String,
                         term: u64,
+                        #[serde(default)]
+                        shard_id: Option<String>,
                     }
                     let p: P = parse_params(params.clone())?;
-                    cluster_request_vote(state, &p.candidate, p.term)
+                    cluster_request_vote(state, &p.candidate, p.term, p.shard_id.as_deref())
                 }
                 "cluster.shard.create" => {
                     let p: ClusterShardCreateParams = parse_params(params.clone())?;
@@ -22489,7 +22499,26 @@ fn cluster_replica_promote(
 /// (the leadership epoch is the fencing token), so a stale or duplicate announce is ignored and
 /// two same-epoch announces can't flap. A superseded primary demotes itself here when it hears a
 /// newer leader (e.g. after a partition heals).
-fn cluster_leader_announce(state: &AppState, node_id: &str, epoch: u64) -> Result<Value, RpcError> {
+/// Apply a per-shard promotion in memory: make `node_id` the shard's primary, demote the old
+/// shard primary into the replica set, and set the shard's leadership epoch. Shared by manual
+/// shard promotion, the shard election driver, and per-shard leadership adoption.
+fn apply_shard_promotion(shard: &mut ClusterShard, node_id: &str, epoch: u64, now_ms: u64) {
+    let old_primary = shard.primary_node_id.clone();
+    shard.primary_node_id = node_id.to_string();
+    shard.replicas.retain(|n| n != node_id);
+    if old_primary != node_id && !shard.replicas.contains(&old_primary) {
+        shard.replicas.push(old_primary);
+    }
+    shard.leadership_epoch = epoch;
+    shard.updated_at_ms = now_ms;
+}
+
+fn cluster_leader_announce(
+    state: &AppState,
+    node_id: &str,
+    epoch: u64,
+    shard_id: Option<&str>,
+) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     let (adopted, current_epoch) = {
         let mut cluster = state
@@ -22502,21 +22531,40 @@ fn cluster_leader_announce(state: &AppState, node_id: &str, epoch: u64) -> Resul
                 "announced primary not in cluster",
             ));
         }
-        if epoch > cluster.leadership_epoch {
-            let old_primary = cluster.primary_node_id.clone();
-            cluster.primary_node_id = node_id.to_string();
-            for node in cluster.nodes.iter_mut() {
-                if node.node_id == node_id {
-                    node.role = "primary".to_string();
-                    node.last_seen_ms = now;
-                } else if node.node_id == old_primary {
-                    node.role = "replica".to_string();
+        match shard_id {
+            // Per-shard leadership adoption (epoch-guarded, monotonic, idempotent).
+            Some(shard_id) => {
+                let shard = cluster
+                    .shards
+                    .iter_mut()
+                    .find(|s| s.shard_id == shard_id)
+                    .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+                if epoch > shard.leadership_epoch {
+                    apply_shard_promotion(shard, node_id, epoch, now);
+                    (true, epoch)
+                } else {
+                    (false, shard.leadership_epoch)
                 }
             }
-            cluster.leadership_epoch = epoch;
-            (true, epoch)
-        } else {
-            (false, cluster.leadership_epoch)
+            // Whole-cluster leadership adoption.
+            None => {
+                if epoch > cluster.leadership_epoch {
+                    let old_primary = cluster.primary_node_id.clone();
+                    cluster.primary_node_id = node_id.to_string();
+                    for node in cluster.nodes.iter_mut() {
+                        if node.node_id == node_id {
+                            node.role = "primary".to_string();
+                            node.last_seen_ms = now;
+                        } else if node.node_id == old_primary {
+                            node.role = "replica".to_string();
+                        }
+                    }
+                    cluster.leadership_epoch = epoch;
+                    (true, epoch)
+                } else {
+                    (false, cluster.leadership_epoch)
+                }
+            }
         }
     };
     if adopted {
@@ -22526,6 +22574,7 @@ fn cluster_leader_announce(state: &AppState, node_id: &str, epoch: u64) -> Resul
         "ok": true,
         "adopted": adopted,
         "primary_node_id": node_id,
+        "shard_id": shard_id,
         "leadership_epoch": current_epoch,
     }))
 }
@@ -22536,7 +22585,12 @@ fn cluster_leader_announce(state: &AppState, node_id: &str, epoch: u64) -> Resul
 /// quorum this guarantees at most one candidate can win a given term (the safety property that
 /// closes the same-epoch double-promotion window). Idempotent: re-requesting the granted term
 /// still returns granted.
-fn cluster_request_vote(state: &AppState, candidate: &str, term: u64) -> Result<Value, RpcError> {
+fn cluster_request_vote(
+    state: &AppState,
+    candidate: &str,
+    term: u64,
+    shard_id: Option<&str>,
+) -> Result<Value, RpcError> {
     let (granted, current_epoch) = {
         let mut cluster = state
             .cluster
@@ -22545,19 +22599,46 @@ fn cluster_request_vote(state: &AppState, candidate: &str, term: u64) -> Result<
         if !cluster.nodes.iter().any(|n| n.node_id == candidate) {
             return Err(RpcError::new("not_found", "candidate not in cluster"));
         }
-        let grant = if term > cluster.voted_epoch && term > cluster.leadership_epoch {
-            // A fresh term, newer than any leader we recognize → grant this node's vote.
-            true
-        } else {
-            // Idempotent re-request from the same candidate in the same term; anything else
-            // (an older term, or a second candidate in a term we already voted in) is refused.
-            term == cluster.voted_epoch && cluster.voted_for == candidate
-        };
-        if grant {
-            cluster.voted_epoch = term;
-            cluster.voted_for = candidate.to_string();
+        match shard_id {
+            // Per-shard election: vote at most once per (shard, term), and only for a term newer
+            // than the shard's current leader — independent of the whole-cluster election.
+            Some(shard_id) => {
+                let shard_epoch = cluster
+                    .shards
+                    .iter()
+                    .find(|s| s.shard_id == shard_id)
+                    .map(|s| s.leadership_epoch)
+                    .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+                let prior = cluster.shard_votes.get(shard_id).cloned();
+                let grant = match &prior {
+                    Some((voted_term, _)) if term <= *voted_term => {
+                        matches!(&prior, Some((t, cand)) if *t == term && cand == candidate)
+                    }
+                    _ => term > shard_epoch,
+                };
+                if grant {
+                    cluster
+                        .shard_votes
+                        .insert(shard_id.to_string(), (term, candidate.to_string()));
+                }
+                (grant, shard_epoch)
+            }
+            // Whole-cluster election.
+            None => {
+                let grant = if term > cluster.voted_epoch && term > cluster.leadership_epoch {
+                    true
+                } else {
+                    // Idempotent re-request from the same candidate in the same term; anything
+                    // else (an older term, or a second candidate in a voted term) is refused.
+                    term == cluster.voted_epoch && cluster.voted_for == candidate
+                };
+                if grant {
+                    cluster.voted_epoch = term;
+                    cluster.voted_for = candidate.to_string();
+                }
+                (grant, cluster.leadership_epoch)
+            }
         }
-        (grant, cluster.leadership_epoch)
     };
     // Persist the vote so a crash mid-election can't let this node vote twice in one term.
     if granted {
@@ -22566,6 +22647,7 @@ fn cluster_request_vote(state: &AppState, candidate: &str, term: u64) -> Result<
     Ok(serde_json::json!({
         "granted": granted,
         "term": term,
+        "shard_id": shard_id,
         "leadership_epoch": current_epoch,
     }))
 }
@@ -34863,16 +34945,27 @@ async fn run_cluster_failover_tick(state: &AppState) {
     }
     let now = now_unix_ms_u64();
     let timeout = cluster_node_timeout_ms();
-    let (enabled, local, primary, nodes) = {
+    let (enabled, local, primary, nodes, promote_shards) = {
         let cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Shards whose primary is down and for which the local node is the elected candidate with
+        // this shard's quorum — collected under the lock, acted on below without holding it.
+        let promote_shards: Vec<String> = cluster
+            .shards
+            .iter()
+            .filter(|s| {
+                local_should_promote_shard(s, &cluster.nodes, &cluster.local_node_id, now, timeout)
+            })
+            .map(|s| s.shard_id.clone())
+            .collect();
         (
             cluster.enabled,
             cluster.local_node_id.clone(),
             cluster.primary_node_id.clone(),
             cluster.nodes.clone(),
+            promote_shards,
         )
     };
     if !enabled {
@@ -34889,6 +34982,11 @@ async fn run_cluster_failover_tick(state: &AppState) {
         FailoverAction::Promote => {
             run_cluster_election(state, &local, now, timeout).await;
         }
+    }
+    // Each shard fails over independently: run a per-shard election for every shard we should
+    // take over.
+    for shard_id in promote_shards {
+        run_shard_election(state, &shard_id, &local, now, timeout).await;
     }
 }
 
@@ -34990,6 +35088,155 @@ async fn announce_leadership_to_peers(state: &AppState, local_node_id: &str, epo
             call_remote_rpc_result(&rpc_url, "cluster.leader.announce", params.clone()).await
         {
             tracing::debug!(peer = %rpc_url, error = ?err, "leadership announce failed");
+        }
+    }
+}
+
+/// Whether the local node should start a failover election for `shard`: it is a replica of the
+/// shard, the shard primary is unreachable (so `shard_failover_candidate` is `Some`), the local
+/// node holds the shard's quorum, and it is the shard's elected candidate. Pure and testable.
+fn local_should_promote_shard(
+    shard: &ClusterShard,
+    nodes: &[ClusterNode],
+    local: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) -> bool {
+    shard.replicas.iter().any(|r| r == local)
+        && shard_has_quorum(shard, nodes, local, now_ms, timeout_ms)
+        && shard_failover_candidate(shard, nodes, local, now_ms, timeout_ms).as_deref()
+            == Some(local)
+}
+
+/// Run one leader election for a single shard: request per-shard votes for the next shard term
+/// and, if a majority of the shard's node set grant it, promote self for that shard and announce
+/// it. Mirrors `run_cluster_election` but scoped to the shard.
+async fn run_shard_election(
+    state: &AppState,
+    shard_id: &str,
+    local: &str,
+    now_ms: u64,
+    timeout_ms: u64,
+) {
+    let Some((term, quorum, peer_urls)) = ({
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(shard) = cluster.shards.iter().find(|s| s.shard_id == shard_id) else {
+            return;
+        };
+        if shard.primary_node_id == local
+            || !shard_has_quorum(shard, &cluster.nodes, local, now_ms, timeout_ms)
+        {
+            return;
+        }
+        let node_set = shard_node_ids(shard);
+        let quorum = cluster_quorum_size(node_set.len());
+        let voted_term = cluster
+            .shard_votes
+            .get(shard_id)
+            .map(|(t, _)| *t)
+            .unwrap_or(0);
+        let term = shard.leadership_epoch.max(voted_term) + 1;
+        let peer_urls: Vec<String> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.node_id != local && node_set.iter().any(|id| id == &n.node_id))
+            .map(|n| n.rpc_url.clone())
+            .collect();
+        // Vote for self in this shard's term.
+        cluster
+            .shard_votes
+            .insert(shard_id.to_string(), (term, local.to_string()));
+        Some((term, quorum, peer_urls))
+    }) else {
+        return;
+    };
+    let _ = persist_cluster_state(state);
+
+    let mut votes = 1usize;
+    let params = serde_json::json!({ "candidate": local, "term": term, "shard_id": shard_id });
+    for rpc_url in peer_urls {
+        if let Ok(resp) =
+            call_remote_rpc_result(&rpc_url, "cluster.request_vote", params.clone()).await
+        {
+            if resp.get("granted").and_then(Value::as_bool) == Some(true) {
+                votes += 1;
+            }
+        }
+    }
+    if votes < quorum {
+        tracing::debug!(shard = %shard_id, node = %local, term, votes, quorum, "shard election short of quorum");
+        return;
+    }
+
+    // Won: promote self for this shard, re-checking under the lock that no newer shard leadership
+    // emerged and the shard quorum still holds.
+    let promoted = {
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ok = cluster
+            .shards
+            .iter()
+            .find(|s| s.shard_id == shard_id)
+            .map(|s| {
+                s.leadership_epoch < term
+                    && shard_has_quorum(s, &cluster.nodes, local, now_ms, timeout_ms)
+            })
+            .unwrap_or(false);
+        if ok {
+            if let Some(shard) = cluster.shards.iter_mut().find(|s| s.shard_id == shard_id) {
+                apply_shard_promotion(shard, local, term, now_ms);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if promoted {
+        let _ = persist_cluster_state(state);
+        tracing::warn!(shard = %shard_id, node = %local, epoch = term, votes, "won shard election and auto-promoted self");
+        announce_shard_leadership_to_peers(state, shard_id, local, term).await;
+    }
+}
+
+/// Announce a freshly won per-shard leadership to the shard's peers via `cluster.leader.announce`
+/// (with the `shard_id`), so they adopt it or a superseded shard primary steps down. Best-effort.
+async fn announce_shard_leadership_to_peers(
+    state: &AppState,
+    shard_id: &str,
+    local: &str,
+    epoch: u64,
+) {
+    let targets: Vec<String> = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match cluster.shards.iter().find(|s| s.shard_id == shard_id) {
+            Some(shard) => {
+                let node_set = shard_node_ids(shard);
+                cluster
+                    .nodes
+                    .iter()
+                    .filter(|n| n.node_id != local && node_set.iter().any(|id| id == &n.node_id))
+                    .map(|n| n.rpc_url.clone())
+                    .collect()
+            }
+            None => Vec::new(),
+        }
+    };
+    let params = serde_json::json!({ "node_id": local, "epoch": epoch, "shard_id": shard_id });
+    for rpc_url in targets {
+        if let Err(err) =
+            call_remote_rpc_result(&rpc_url, "cluster.leader.announce", params.clone()).await
+        {
+            tracing::debug!(peer = %rpc_url, shard = %shard_id, error = ?err, "shard leadership announce failed");
         }
     }
 }
@@ -36192,6 +36439,101 @@ mod tests {
     }
 
     #[test]
+    fn shard_request_vote_is_independent_per_shard() -> anyhow::Result<()> {
+        let dir = temp_dir("shard_request_vote");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.nodes = vec![
+                cnode("a", "replica", "online", now_unix_ms_u64()),
+                cnode("b", "replica", "online", now_unix_ms_u64()),
+                cnode("p1", "primary", "online", 0),
+                cnode("p2", "primary", "online", 0),
+            ];
+            let mut s1 = cshard("s1", "p1", &["a", "b"]);
+            s1.leadership_epoch = 1;
+            let mut s2 = cshard("s2", "p2", &["a", "b"]);
+            s2.leadership_epoch = 1;
+            cluster.shards = vec![s1, s2];
+        }
+        let g = |v: &Value| v["granted"].as_bool().unwrap();
+
+        // Shard s1: candidate `a` wins term 2; a second candidate `b` at term 2 is refused;
+        // `a` re-requesting the same term is idempotently granted.
+        assert!(g(
+            &cluster_request_vote(&state, "a", 2, Some("s1")).expect("v")
+        ));
+        assert!(!g(
+            &cluster_request_vote(&state, "b", 2, Some("s1")).expect("v")
+        ));
+        assert!(g(
+            &cluster_request_vote(&state, "a", 2, Some("s1")).expect("v")
+        ));
+        // Shard s2 is a SEPARATE election: `b` can win term 2 on s2 even though `a` won it on s1.
+        assert!(g(
+            &cluster_request_vote(&state, "b", 2, Some("s2")).expect("v")
+        ));
+        // A term not newer than the shard's leader epoch (or an already-voted term) is refused.
+        assert!(!g(
+            &cluster_request_vote(&state, "a", 1, Some("s1")).expect("v")
+        ));
+        // Unknown shard errors; a whole-cluster vote is independent of shard votes.
+        assert!(cluster_request_vote(&state, "a", 3, Some("ghost")).is_err());
+        assert!(g(&cluster_request_vote(&state, "a", 5, None).expect("v")));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn local_should_promote_shard_only_when_candidate_with_quorum() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        let shard = cshard("s1", "p", &["r1", "r2"]);
+
+        // Primary down, both replicas online, r2 freshest → only r2 should promote.
+        let down = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 5_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert!(local_should_promote_shard(
+            &shard, &down, "r2", now, timeout
+        ));
+        assert!(!local_should_promote_shard(
+            &shard, &down, "r1", now, timeout
+        )); // not the candidate
+        assert!(!local_should_promote_shard(
+            &shard, &down, "outsider", now, timeout
+        )); // not a replica
+
+        // Primary healthy → nobody promotes.
+        let healthy = vec![
+            cnode("p", "primary", "online", now - 1_000),
+            cnode("r1", "replica", "online", now - 1_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert!(!local_should_promote_shard(
+            &shard, &healthy, "r2", now, timeout
+        ));
+
+        // Primary down but only one replica online (1 of 3) → no shard quorum → must not promote.
+        let minority = vec![
+            cnode("p", "primary", "online", now - 60_000),
+            cnode("r1", "replica", "online", now - 60_000),
+            cnode("r2", "replica", "online", now - 1_000),
+        ];
+        assert!(!local_should_promote_shard(
+            &shard, &minority, "r2", now, timeout
+        ));
+    }
+
+    #[test]
     fn node_health_reflects_heartbeat_age() {
         let now = 100_000u64;
         let timeout = 15_000u64;
@@ -36531,7 +36873,7 @@ mod tests {
         }
 
         // A stale (lower) or equal-epoch announce is ignored — no flapping.
-        let out = cluster_leader_announce(&state, "n2", 5).expect("announce");
+        let out = cluster_leader_announce(&state, "n2", 5, None).expect("announce");
         assert_eq!(out["adopted"], false);
         assert_eq!(out["leadership_epoch"], 5);
         {
@@ -36543,7 +36885,7 @@ mod tests {
         }
 
         // A strictly newer epoch is adopted: n1 steps down, n2 becomes primary.
-        let out = cluster_leader_announce(&state, "n2", 6).expect("announce");
+        let out = cluster_leader_announce(&state, "n2", 6, None).expect("announce");
         assert_eq!(out["adopted"], true);
         assert_eq!(out["leadership_epoch"], 6);
         {
@@ -36558,7 +36900,7 @@ mod tests {
         }
 
         // Announcing an unknown node is rejected.
-        assert!(cluster_leader_announce(&state, "ghost", 99).is_err());
+        assert!(cluster_leader_announce(&state, "ghost", 99, None).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -36589,19 +36931,19 @@ mod tests {
 
         // Fresh term (4 > leader epoch 3): candidate "a" is granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4).expect("vote")
+            &cluster_request_vote(&state, "a", 4, None).expect("vote")
         ));
         // Idempotent re-request from the same candidate/term is still granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4).expect("vote")
+            &cluster_request_vote(&state, "a", 4, None).expect("vote")
         ));
         // A SECOND candidate "b" in the same term is refused (one vote per term = safety).
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 4).expect("vote")
+            &cluster_request_vote(&state, "b", 4, None).expect("vote")
         ));
         // A lower/equal term than one already voted is refused.
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 3).expect("vote")
+            &cluster_request_vote(&state, "b", 3, None).expect("vote")
         ));
         // A term that does not exceed the recognized leader epoch is refused even if unvoted.
         //   (bump leader epoch to 5; a term of 5 must not unseat it)
@@ -36613,15 +36955,15 @@ mod tests {
             cluster.leadership_epoch = 5;
         }
         assert!(!granted(
-            &cluster_request_vote(&state, "a", 5).expect("vote")
+            &cluster_request_vote(&state, "a", 5, None).expect("vote")
         ));
         // But a term newer than both the vote and the leader is granted again.
         assert!(granted(
-            &cluster_request_vote(&state, "b", 6).expect("vote")
+            &cluster_request_vote(&state, "b", 6, None).expect("vote")
         ));
 
         // An unknown candidate is rejected outright, and no vote changes leadership.
-        assert!(cluster_request_vote(&state, "ghost", 7).is_err());
+        assert!(cluster_request_vote(&state, "ghost", 7, None).is_err());
         {
             let cluster = state
                 .cluster
