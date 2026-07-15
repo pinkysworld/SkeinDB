@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.27 - 2026-07-15
+
+Failover data-safety: automated failover now elects the **most up-to-date replica** and applies a Raft log-matching check to the vote round, so a promotion can no longer lose acknowledged writes. Behavior-preserving for single-node and manual-failover deployments.
+
+- **Clustering — data-safe failover (log matching).** Previously an election picked the *freshest-heartbeat* online replica, but a live replica can be **behind on replication** — promoting it would lose committed writes. Each node's replication progress (`ClusterReplicationState.applied_ops`, the count of applied replicated writes) is now propagated on every heartbeat (`cluster.node.heartbeat` carries the sender's `applied_ops`, recorded monotonically) and stored per node. Two things change: (1) the election **prefers the most up-to-date replica** — `elect_failover_candidate` and the per-shard `shard_failover_candidate` sort by `applied_ops` descending, then by heartbeat freshness, then `node_id`; and (2) the vote round applies **Raft's up-to-date rule** — `cluster.request_vote` carries the candidate's `applied_ops` and a voter **refuses any candidate less caught up than itself**, for both whole-cluster and per-shard votes. Because a committed write is replicated to a majority and a winner needs a majority of votes, the elected primary is guaranteed to hold every committed write — **automatic failover cannot lose acknowledged data**. (`applied_ops` is a replication-progress count that is sound while replicas share one log prefix, as single-primary replication guarantees; full divergent-log reconciliation via `(term, index)` matching remains a documented consensus follow-on.)
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets, including integration tests). Docs (`docs/CONFIGURATION.md`), the cluster tutorial, and the regenerated website updated.
+
 ## v0.3.26 - 2026-07-11
 
 Finishes the RBAC granularity and the high-availability story: RBAC is now enforced down to the table level, database provisioning requires admin, and clustering fails over **per shard** as well as whole-cluster. All additions are opt-in or behavior-preserving by default.
