@@ -22262,6 +22262,10 @@ fn cluster_failover_status(state: &AppState) -> Value {
                 "health": evaluate_node_health(n, &cluster.local_node_id, now, timeout).as_str(),
                 "last_seen_ms": n.last_seen_ms,
                 "last_seen_age_ms": now.saturating_sub(n.last_seen_ms),
+                // Replication progress last reported by this node (via heartbeat). This is the
+                // signal the data-safe election uses to pick the most up-to-date replica, so
+                // exposing it makes the failover decision auditable by operators.
+                "applied_ops": n.applied_ops,
             })
         })
         .collect();
