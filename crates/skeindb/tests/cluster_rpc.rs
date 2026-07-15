@@ -304,6 +304,224 @@ async fn cluster_replication_ships_schema_and_rows() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extract the `applied_ops` a `cluster.failover.status` response reports for one node.
+fn failover_status_applied_ops(status: &RpcResponse, node_id: &str) -> Option<u64> {
+    status
+        .result
+        .as_ref()?
+        .get("nodes")?
+        .as_array()?
+        .iter()
+        .find(|n| n.get("node_id").and_then(|v| v.as_str()) == Some(node_id))?
+        .get("applied_ops")?
+        .as_u64()
+}
+
+/// End-to-end: a heartbeat carries the sender's replication progress (`applied_ops`) over the
+/// wire, it is recorded monotonically, and `cluster.failover.status` surfaces it per node — the
+/// signal the data-safe election uses to pick the most up-to-date replica.
+#[tokio::test]
+async fn failover_status_exposes_replication_progress() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let node = HttpHarness::start("failover_applied_ops")?;
+    let client = RpcHttpClient::new(node.base_url());
+
+    // Every node keeps its own entry in its roster, so it is a known heartbeat/vote target.
+    let status = client.rpc("cluster.failover.status", json!({})).await?;
+    assert!(status.ok);
+    let local_id = status
+        .result
+        .as_ref()
+        .and_then(|v| v.get("observer_node_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing observer_node_id"))?
+        .to_string();
+
+    // A heartbeat reports replication progress; it is recorded on the node entry.
+    let hb = client
+        .rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": local_id, "applied_ops": 42}),
+        )
+        .await?;
+    assert!(hb.ok);
+
+    let status = client.rpc("cluster.failover.status", json!({})).await?;
+    assert_eq!(
+        failover_status_applied_ops(&status, &local_id),
+        Some(42),
+        "failover.status should surface the heartbeated applied_ops"
+    );
+
+    // Monotonic: a lower report never rolls the recorded progress backwards.
+    let hb = client
+        .rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": local_id, "applied_ops": 7}),
+        )
+        .await?;
+    assert!(hb.ok);
+    let status = client.rpc("cluster.failover.status", json!({})).await?;
+    assert_eq!(
+        failover_status_applied_ops(&status, &local_id),
+        Some(42),
+        "applied_ops must not regress on a lower heartbeat"
+    );
+    Ok(())
+}
+
+/// End-to-end over the real HTTP RPC path: the vote round enforces Raft's log-matching / up-to-date
+/// rule. A voter that has applied replicated writes refuses any candidate less caught up than
+/// itself, and grants a candidate at least as caught up (in a fresh term). This exercises the
+/// `applied_ops` wire serialization and the vote gate that the pure-function tests bypass.
+#[tokio::test]
+async fn failover_vote_over_wire_enforces_log_matching() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start("logmatch_primary")?;
+    let replica = HttpHarness::start("logmatch_replica")?;
+    let primary_client = RpcHttpClient::new(primary.base_url());
+    let replica_client = RpcHttpClient::new(replica.base_url());
+
+    // Form the cluster.
+    let token = primary_client
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("missing join token"))?;
+    assert!(
+        primary_client
+            .rpc(
+                "cluster.node.join",
+                json!({
+                    "token": token,
+                    "node_id": "logmatch-replica",
+                    "rpc_url": replica.base_url(),
+                    "role": "replica"
+                }),
+            )
+            .await?
+            .ok
+    );
+
+    // Replicate a write so the replica's local replication progress advances past zero.
+    assert!(
+        primary_client
+            .rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        primary_client
+            .rpc(
+                "schema.create_table",
+                json!({
+                    "db": "app",
+                    "table": "users",
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                        {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                    ],
+                    "primary_key": ["id"]
+                }),
+            )
+            .await?
+            .ok
+    );
+    assert!(
+        primary_client
+            .rpc(
+                "data.insert",
+                json!({
+                    "into": {"db": "app", "table": "users"},
+                    "rows": [{"id": {"t": "u64", "v": 7}, "name": {"t": "str", "v": "Nora"}}]
+                }),
+            )
+            .await?
+            .ok
+    );
+
+    // Wait until the row lands on the replica; that guarantees its `applied_ops` is now > 0.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut replicated = false;
+    while Instant::now() < deadline {
+        let resp = replica_client
+            .rpc(
+                "data.get",
+                json!({
+                    "table": {"db": "app", "table": "users"},
+                    "pk": [{"t": "u64", "v": 7}]
+                }),
+            )
+            .await?;
+        if resp.ok
+            && resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("row"))
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.get("v"))
+                .and_then(|v| v.as_str())
+                == Some("Nora")
+        {
+            replicated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(replicated, "replica did not receive replicated row");
+
+    // The replica's own node id is a known candidate in its roster.
+    let local_id = replica_client
+        .rpc("cluster.failover.status", json!({}))
+        .await?
+        .result
+        .and_then(|v| {
+            v.get("observer_node_id")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("missing observer_node_id"))?;
+
+    // A candidate BEHIND the voter's replication progress is refused (a refused vote does not
+    // record a term, so it can't taint the grant that follows).
+    let refused = replica_client
+        .rpc(
+            "cluster.request_vote",
+            json!({"candidate": local_id, "term": 5000, "applied_ops": 0}),
+        )
+        .await?;
+    assert!(refused.ok);
+    assert_eq!(
+        refused
+            .result
+            .as_ref()
+            .and_then(|v| v.get("granted"))
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "a candidate behind on replication must be refused"
+    );
+
+    // A candidate at least as caught up wins the vote in a fresh term.
+    let granted = replica_client
+        .rpc(
+            "cluster.request_vote",
+            json!({"candidate": local_id, "term": 5000, "applied_ops": 1_000_000}),
+        )
+        .await?;
+    assert!(granted.ok);
+    assert_eq!(
+        granted
+            .result
+            .as_ref()
+            .and_then(|v| v.get("granted"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "a caught-up candidate must win the vote in a fresh term"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
