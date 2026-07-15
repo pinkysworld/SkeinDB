@@ -200,23 +200,23 @@ the replication stream can be optimized:</p>
 - <strong>manual</strong>, quorum-gated promotion (<code>cluster.replica.promote</code> — refused unless the promoter observes a majority; <code>force</code> overrides for operator recovery), and
 - opt-in <strong>automated fenced failover</strong> (<code>SKEINDB_CLUSTER_AUTO_FAILOVER</code>): heartbeat-based failure detection, quorum write-fencing (a primary that loses its majority stops serving writes), a monotonic leadership epoch, and a Raft-style leader-election vote round — <strong>whole-cluster and per-shard</strong>, each an independent replication group with its own quorum/epoch/election.
 - <strong>Data-safe election (Raft log matching).</strong> The election prefers the <strong>most up-to-date</strong> replica by replication progress (<code>applied_ops</code>, propagated on every heartbeat), and a voter <strong>refuses any candidate less caught up than itself</strong>. Because a committed write reaches a majority and a winner needs a majority of votes, the elected primary holds every committed write — failover cannot lose acknowledged data. (Bounds and caveat: see 2.5.)</p>
-<h3 id="25-replication-implementation-status-the-consensus-roadmap">2.5 Replication implementation status &amp; the consensus roadmap<a class="headerlink" href="#25-replication-implementation-status-the-consensus-roadmap" title="Permanent link">¶</a></h3>
-<p><strong>Sections 2.1–2.2 describe the <em>target</em> design; the replication actually implemented today is best-effort primary→replica fan-out.</strong> Being precise about the gap matters, because it bounds what the failover guarantee means.</p>
+<h3 id="25-replication-self-healing-today-the-consensus-roadmap-ahead">2.5 Replication: self-healing today, the consensus roadmap ahead<a class="headerlink" href="#25-replication-self-healing-today-the-consensus-roadmap-ahead" title="Permanent link">¶</a></h3>
+<p>Baseline replication is best-effort primary→replica fan-out: on a write the primary applies locally and re-issues the same RPC to each replica (<code>x-skeindb-replication: 1</code>), carrying a causality token for read-your-writes ordering; the replica re-executes it. On its own, fan-out has no ordering and no recovery — a replica that misses a write during a transient failure would diverge with nothing to backfill it. <strong>Self-healing replication (below) closes that gap.</strong></p>
+<p><strong>Self-healing replication (shipped).</strong> Every replicated write now carries a primary-assigned log position <code>(term, seq)</code> (<code>x-skeindb-replication-seq</code>), and the primary keeps a bounded in-memory <strong>op-log ring buffer</strong> (<code>REPLICATION_LOG_BUFFER_CAP</code>, default 4096) of recent ops. On the receiving side a replica tracks its <strong>contiguous applied position</strong> (<code>last_applied_term</code>/<code>last_applied_seq</code>) and, for each incoming op, either:</p>
 <ul>
-<li>On a write, the primary applies locally and then re-issues the same RPC to each replica (<code>x-skeindb-replication: 1</code>), carrying a causality token for read-your-writes ordering. The replica re-executes the RPC and increments <code>applied_ops</code>.</li>
-<li>There is <strong>no ordered log, no per-entry index, no de-duplication/idempotency, no acknowledgement-based commit index, and no catch-up.</strong> A replica that misses a write during a transient failure (counted in <code>failed_ops</code>) <strong>diverges permanently</strong> — nothing backfills it.</li>
+<li><strong>applies</strong> it if it is the next in order (or the first of a newer leadership term),</li>
+<li>treats it as a <strong>duplicate</strong> (idempotent no-op) if already applied — so re-delivery is always safe, or</li>
+<li>recognises a <strong>gap</strong> (a missing op below it) and skips it, leaving its position unchanged.</li>
 </ul>
-<p>Consequences:
-- The shipped <strong>failover data-safety</strong> guarantee (2.4) is sound under the current single-primary model: <code>applied_ops</code> is a monotonic count of applied replicated writes, and with one primary per term those counts share a common prefix, so "most <code>applied_ops</code> wins + a voter refuses a less-caught-up candidate" really does preserve every committed write. Its caveat — that a count is not a true <code>(term, index)</code> log position — only bites once logs can genuinely diverge, which requires the work below.
-- A diverged replica is correctly <strong>refused</strong> by log-matching (which protects data), but that replica is then dead weight until manually rebuilt. <strong>Self-healing replication is the real production gap</strong>, not the theoretical <code>(term, index)</code> soundness.</p>
-<p><strong>Roadmap to a true replicated log / self-healing replication.</strong> Strictly dependency-ordered. Note that the early bricks carry <em>no standalone user-visible value</em> — the payoff (a replica that fell behind automatically recovers) only lands at slice 3, which is why this is scoped as one deliberate project rather than shipped piecemeal:</p>
-<ol>
-<li><strong>Idempotent apply (op identity).</strong> Stamp each replicated write with a <code>(term, seq)</code> assigned by the primary; the replica records its high-water position and treats a re-delivered op as a success no-op. Prerequisite for any re-send. <em>(Additive; behaviour-preserving today because no duplicates occur, so its value is latent.)</em></li>
-<li><strong>Ordered, gap-aware apply.</strong> The replica tracks a contiguous applied index and detects a gap (a dropped op) instead of silently advancing past it — turning <code>applied_ops</code> into a trustworthy contiguous position. <em>(Not independently shippable: without slice 3 a replica stalls on the first gap.)</em></li>
-<li><strong>Leader-driven catch-up.</strong> The primary keeps a bounded buffer of recent ops (falling back to a snapshot/WAL segment) and re-ships missing ops, in order, to any replica reporting a lower position via heartbeat. <strong>This is the outcome: replicas self-heal after transient failures.</strong></li>
-<li><strong>Commit index (majority-ack).</strong> A write is "committed" once a majority acks its <code>(term, seq)</code>; only committed ops are electable, and the election compares true <code>(term, index)</code> positions. Closes the divergent-log caveat and upgrades leader election toward full log-replication consensus.</li>
+<p>A replica's background loop then <strong>pulls</strong> whatever it is missing from the primary via <code>cluster.replication.fetch{after_term, after_seq}</code> and applies it in order — so a replica that fell behind (or joined late) <strong>automatically catches up</strong>. If a replica has fallen further behind than the buffer still retains, the primary returns <code>resync_required</code> and that replica must be re-synced from a snapshot. Each node's position is visible in <code>cluster.replication.status</code> and <code>cluster.failover.status</code>.</p>
+<p>This corresponds to slices 1–3 of the roadmap below (op identity → gap-aware ordered apply → leader-driven catch-up). The failover <strong>data-safety</strong> guarantee (2.4) sits on top: <code>applied_ops</code> is monotonic, and with one primary per term positions share a common prefix, so "most-caught-up wins + a voter refuses a less-caught-up candidate" preserves every committed write.</p>
+<p><strong>Remaining: true <code>(term, index)</code> consensus.</strong></p>
+<ol start="4">
+<li><strong>Commit index (majority-ack).</strong> A write becomes "committed" once a majority has acked its <code>(term, seq)</code>; only committed ops are electable, the election compares true <code>(term, index)</code> positions, and a leadership change reconciles divergent log tails rather than adopting best-effort. Closes the count-vs-<code>(term, index)</code> caveat and completes the move from best-effort self-healing to full log-replication consensus. Sequenced as a dedicated project (see also the per-database lock-sharding finding in docs/PERFORMANCE.md §4b).</li>
 </ol>
-<p>Slices 1–2 are additive and low-risk but latent; slice 3 is where the value is and is a substantial change to the write path (the highest-risk surface); slice 4 completes the consensus story. Like the per-database lock-sharding finding in docs/PERFORMANCE.md §4b, this is sequenced here as a dedicated project rather than begun as a partial rewrite.</p>
+<blockquote>
+<p><strong>Scope note.</strong> Slices 1–3 make steady-state replication self-healing (the common production case: a replica lags on a blip and recovers). Reconciling logs across a <em>leadership change</em> is best-effort until slice 4 — a replica adopts a new leader at the op that first reaches it, and if the buffer cannot cover the gap it falls back to a snapshot re-sync.</p>
+</blockquote>
 <hr />
 <h2 id="3-level-2-sharding">3) Level 2: Sharding<a class="headerlink" href="#3-level-2-sharding" title="Permanent link">¶</a></h2>
 <p>Sharding is opt-in and explicit.</p>
@@ -293,7 +293,7 @@ Cross-shard transactions are a future extension.</p>
 <h2 id="7-backlog">7) Backlog<a class="headerlink" href="#7-backlog" title="Permanent link">¶</a></h2>
 <ul>
 <li>[x] CL01: node_id + cluster_id plumbing</li>
-<li>[~] CL02: replication — <strong>best-effort primary→replica RPC fan-out shipped</strong> (causality token for read-your-writes); ordered LSN/log stream is the roadmap in §2.5, not yet built</li>
+<li>[~] CL02: replication — best-effort primary→replica RPC fan-out <strong>plus self-healing catch-up</strong> (op-log <code>(term, seq)</code>, idempotent/gap-aware apply, <code>cluster.replication.fetch</code> pull); full commit-index consensus is the remaining §2.5 item</li>
 <li>[ ] CL03: CAS object fetch protocol (ValueID pull)</li>
 <li>[x] CL04: replica read-only serving + lag metrics (RPC + stats snapshot exposure)</li>
 <li>[x] CL05: join token + node join/leave</li>
@@ -301,7 +301,7 @@ Cross-shard transactions are a future extension.</p>
 <li>[x] CL07: sharding metadata + router prototype (write ownership + shard primary checks)</li>
 <li>[x] CL08: shard move and rebalance (v1)</li>
 <li>[x] CL09: automated fenced failover — quorum fencing, leadership epoch, Raft-style vote round (whole-cluster + per-shard), <strong>data-safe election</strong> (log-matching by <code>applied_ops</code>)</li>
-<li>[ ] CL10: self-healing replication (§2.5 slices 1–4): idempotent apply → gap-aware ordered apply → leader-driven catch-up → commit-index / true <code>(term, index)</code> consensus</li>
+<li>[~] CL10: self-healing replication (§2.5) — <strong>shipped</strong>: idempotent apply, gap-aware ordered apply, leader-driven catch-up (slices 1–3). Remaining: commit-index / true <code>(term, index)</code> consensus (slice 4)</li>
 </ul>
       <hr>
       <p class="edit-link">
@@ -330,7 +330,7 @@ Cross-shard transactions are a future extension.</p>
 <li><a href="#22-cas-assisted-replication-novel-improvement">2.2 CAS-assisted replication (novel improvement)</a></li>
 <li><a href="#23-read-scaling">2.3 Read scaling</a></li>
 <li><a href="#24-failover">2.4 Failover</a></li>
-<li><a href="#25-replication-implementation-status-the-consensus-roadmap">2.5 Replication implementation status &amp; the consensus roadmap</a></li>
+<li><a href="#25-replication-self-healing-today-the-consensus-roadmap-ahead">2.5 Replication: self-healing today, the consensus roadmap ahead</a></li>
 </ul>
 </li>
 <li><a href="#3-level-2-sharding">3) Level 2: Sharding</a><ul>

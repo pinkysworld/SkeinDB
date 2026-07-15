@@ -522,6 +522,237 @@ async fn failover_vote_over_wire_enforces_log_matching() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The primary's op-log buffer serves a lagging replica's catch-up pull: `cluster.replication.fetch`
+/// returns the ops after a given position, in order, and nothing once caught up.
+#[tokio::test]
+async fn replication_fetch_serves_buffered_ops() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start("replfetch_primary")?;
+    let client = RpcHttpClient::new(primary.base_url());
+
+    // Turn replication on with a dummy (unreachable) replica: its fan-out fails fast, but every
+    // write is still appended to the primary's op-log buffer — the catch-up source.
+    let token = client
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("missing join token"))?;
+    assert!(
+        client
+            .rpc(
+                "cluster.node.join",
+                json!({"token": token, "node_id": "dummy", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+            )
+            .await?
+            .ok
+    );
+
+    assert!(
+        client
+            .rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        client
+            .rpc(
+                "schema.create_table",
+                json!({
+                    "db": "app", "table": "users",
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                        {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                    ],
+                    "primary_key": ["id"]
+                }),
+            )
+            .await?
+            .ok
+    );
+    assert!(
+        client
+            .rpc(
+                "data.insert",
+                json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": 7}, "name": {"t": "str", "v": "Nora"}}]}),
+            )
+            .await?
+            .ok
+    );
+
+    // From the start: all three writes, in assigned order, no re-sync needed.
+    let resp = client
+        .rpc(
+            "cluster.replication.fetch",
+            json!({"after_term": 0, "after_seq": 0}),
+        )
+        .await?;
+    let r = resp.result.expect("fetch result");
+    assert_eq!(r["resync_required"].as_bool(), Some(false));
+    let ops = r["ops"].as_array().cloned().unwrap_or_default();
+    assert_eq!(ops.len(), 3, "expected 3 buffered ops, got {}", ops.len());
+    assert_eq!(ops[0]["method"].as_str(), Some("schema.create_database"));
+    assert_eq!(ops[0]["seq"].as_u64(), Some(1));
+    assert_eq!(ops[2]["method"].as_str(), Some("data.insert"));
+    assert_eq!(ops[2]["seq"].as_u64(), Some(3));
+
+    // After seq 2 → only the last op; after seq 3 → nothing (caught up).
+    let ops = client
+        .rpc(
+            "cluster.replication.fetch",
+            json!({"after_term": 0, "after_seq": 2}),
+        )
+        .await?
+        .result
+        .expect("fetch")["ops"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0]["seq"].as_u64(), Some(3));
+
+    let ops = client
+        .rpc(
+            "cluster.replication.fetch",
+            json!({"after_term": 0, "after_seq": 3}),
+        )
+        .await?
+        .result
+        .expect("fetch")["ops"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(ops.is_empty(), "a caught-up replica should get no ops");
+    Ok(())
+}
+
+/// End-to-end self-healing replication: a replica that missed writes entirely (they were made
+/// before it was pointed at the primary) automatically catches up via its background pull loop.
+#[tokio::test]
+async fn replica_self_heals_missed_writes_via_catchup() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start("selfheal_primary")?;
+    // Short node timeout → ~1s heartbeat/catch-up cadence so the test converges quickly.
+    let replica = HttpHarness::start_with_env(
+        "selfheal_replica",
+        &[("SKEINDB_CLUSTER_NODE_TIMEOUT_MS", "3000")],
+    )?;
+    let pc = RpcHttpClient::new(primary.base_url());
+    let rc = RpcHttpClient::new(replica.base_url());
+
+    let primary_id = pc
+        .rpc("cluster.failover.status", json!({}))
+        .await?
+        .result
+        .and_then(|v| {
+            v.get("observer_node_id")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("missing primary node id"))?;
+
+    // Turn on replication and write BEFORE the replica is known to the primary — so these ops are
+    // buffered but never fanned out to it; it starts fully behind (position zero).
+    let ptok = pc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("primary token"))?;
+    assert!(
+        pc.rpc(
+            "cluster.node.join",
+            json!({"token": ptok, "node_id": "dummy", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        pc.rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        pc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app", "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        pc.rpc(
+            "data.insert",
+            json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": 7}, "name": {"t": "str", "v": "Nora"}}]}),
+        )
+        .await?
+        .ok
+    );
+
+    // Point the replica at the primary the way a real `--cluster-join` node would: register the
+    // primary in its roster and adopt it as leader. Its background catch-up loop does the rest.
+    let rtok = rc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("replica token"))?;
+    assert!(
+        rc.rpc(
+            "cluster.node.join",
+            json!({"token": rtok, "node_id": primary_id, "rpc_url": primary.base_url(), "role": "primary"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        rc.rpc(
+            "cluster.leader.announce",
+            json!({"node_id": primary_id, "epoch": 1}),
+        )
+        .await?
+        .ok
+    );
+
+    // The replica's background catch-up loop should pull the missed ops and reconstruct the data.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut healed = false;
+    while Instant::now() < deadline {
+        let resp = rc
+            .rpc(
+                "data.get",
+                json!({"table": {"db": "app", "table": "users"}, "pk": [{"t": "u64", "v": 7}]}),
+            )
+            .await?;
+        if resp.ok
+            && resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("row"))
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.get("v"))
+                .and_then(|v| v.as_str())
+                == Some("Nora")
+        {
+            healed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        healed,
+        "replica did not self-heal the missed writes via catch-up"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;

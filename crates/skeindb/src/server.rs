@@ -82,6 +82,15 @@ use tower_http::cors::{Any, CorsLayer};
 
 const REPLICATION_HEADER: &str = "x-skeindb-replication";
 const REPLICATION_CAUSALITY_HEADER: &str = "x-skeindb-replication-causality";
+/// Carries the primary-assigned log position of a replicated write, formatted `"{term}:{seq}"`.
+/// Lets a replica de-duplicate re-delivered ops, apply them in order, and detect gaps so it can
+/// pull the missing ops from the primary (self-healing replication). Absent on legacy senders.
+const REPLICATION_SEQ_HEADER: &str = "x-skeindb-replication-seq";
+/// Bound on the primary's in-memory replication op-log ring buffer (the catch-up source). A
+/// replica that has fallen further behind than this must be re-synced from a snapshot.
+const REPLICATION_LOG_BUFFER_CAP: usize = 4096;
+/// Max ops a replica pulls per catch-up round (`cluster.replication.fetch`).
+const REPLICATION_CATCHUP_BATCH: usize = 256;
 const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
 const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
 const CDC_SSE_BATCH_LIMIT: u64 = 64;
@@ -237,6 +246,11 @@ pub(crate) struct AppState {
     settings: Arc<Mutex<serde_json::Map<String, Value>>>,
     cluster: Arc<Mutex<ClusterStateModel>>,
     replication_causality: Arc<Mutex<Option<CausalityToken>>>,
+    /// Primary's in-memory replication op-log ring buffer (bounded by `REPLICATION_LOG_BUFFER_CAP`).
+    /// The source a lagging replica pulls from via `cluster.replication.fetch` to self-heal. Not
+    /// persisted: on a primary restart it starts empty, and a replica too far behind falls back to
+    /// a snapshot re-sync (reported as `resync_required`).
+    replication_log: Arc<Mutex<std::collections::VecDeque<ReplicationLogEntry>>>,
     counters: Arc<Mutex<Counters>>,
     txns: Arc<Mutex<HashMap<String, TxSession>>>,
 
@@ -309,6 +323,18 @@ struct ClusterReplicationState {
     failed_ops: u64,
     last_error: Option<String>,
     last_updated_ms: u64,
+    /// Primary side: the highest log sequence assigned to a replicated write in the current
+    /// leadership term. Each replicated write gets `(leadership_epoch, ++op_seq)`. Monotonic.
+    #[serde(default)]
+    op_seq: u64,
+    /// Replica side: the term of the last replicated op this node has applied *contiguously*
+    /// (no gap below it). Paired with `last_applied_seq` it is the node's durable log position.
+    #[serde(default)]
+    last_applied_term: u64,
+    /// Replica side: the sequence of the last contiguously-applied replicated op within
+    /// `last_applied_term`. A replica pulls ops after this position from the primary to catch up.
+    #[serde(default)]
+    last_applied_seq: u64,
 }
 
 impl Default for ClusterReplicationState {
@@ -319,8 +345,21 @@ impl Default for ClusterReplicationState {
             failed_ops: 0,
             last_error: None,
             last_updated_ms: now_unix_ms_u64(),
+            op_seq: 0,
+            last_applied_term: 0,
+            last_applied_seq: 0,
         }
     }
+}
+
+/// One entry in the primary's in-memory replication op-log ring buffer: the method + params of a
+/// replicated write at log position `(term, seq)`. A lagging replica pulls these to catch up.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ReplicationLogEntry {
+    term: u64,
+    seq: u64,
+    method: String,
+    params: Value,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -16912,6 +16951,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             local_rpc_url,
         ))),
         replication_causality: Arc::new(Mutex::new(None)),
+        replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         counters: Arc::new(Mutex::new(Counters::default())),
         txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
@@ -19145,6 +19185,28 @@ pub(crate) async fn handle_rpc(
                 .and_then(|v| v.to_str().ok())
         })
         .and_then(decode_replication_causality_header);
+    // Log position of an incoming replicated write (self-healing replication). Present only on a
+    // sequenced replication request; absent for a legacy sender or a normal client request.
+    let replication_seq = if is_replication_request {
+        headers
+            .and_then(|map| {
+                map.get(REPLICATION_SEQ_HEADER)
+                    .and_then(|v| v.to_str().ok())
+            })
+            .and_then(parse_replication_seq)
+    } else {
+        None
+    };
+    // De-duplicate / order the replicated op against our contiguous applied position. A duplicate
+    // (already applied, or a stale-term op) or a gap (missing ops below it) is acknowledged without
+    // re-executing; the catch-up loop pulls anything genuinely missing from the primary in order.
+    let replication_apply_skip = replication_seq
+        .map(|(op_term, op_seq)| {
+            let (last_term, last_seq) = replication_applied_position(state);
+            decide_replication_apply(last_term, last_seq, op_term, op_seq)
+                != ReplicationApplyDecision::Apply
+        })
+        .unwrap_or(false);
     if policy.read_only && !is_read_only_method(&method) && !sql_read_only {
         if req.id.is_none() {
             observe_rpc_call(
@@ -19244,7 +19306,11 @@ pub(crate) async fn handle_rpc(
         };
     }
 
-    let result: Result<Value, RpcError> =
+    let result: Result<Value, RpcError> = if replication_apply_skip {
+        // Idempotent no-op: this replicated op is a duplicate or sits above a gap. Acknowledge it
+        // (so the primary counts it shipped) without re-executing or advancing our applied position.
+        Ok(serde_json::json!({ "ok": true, "deduplicated": true }))
+    } else {
         (async {
             match method.as_str() {
                 "system.ping" => Ok(serde_json::json!({
@@ -19298,6 +19364,24 @@ pub(crate) async fn handle_rpc(
                 }
                 "cluster.failover.status" => Ok(cluster_failover_status(state)),
                 "cluster.shard.failover.status" => Ok(cluster_shard_failover_status(state)),
+                "cluster.replication.fetch" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        #[serde(default)]
+                        after_term: u64,
+                        #[serde(default)]
+                        after_seq: u64,
+                        #[serde(default)]
+                        limit: Option<usize>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    Ok(cluster_replication_fetch(
+                        state,
+                        p.after_term,
+                        p.after_seq,
+                        p.limit.unwrap_or(REPLICATION_CATCHUP_BATCH),
+                    ))
+                }
                 "cluster.node.heartbeat" => {
                     #[derive(serde::Deserialize)]
                     struct P {
@@ -21268,7 +21352,8 @@ pub(crate) async fn handle_rpc(
                 )),
             }
         })
-        .await;
+        .await
+    };
 
     if result.is_ok()
         && should_replicate_method(&method, params.as_ref())
@@ -21281,8 +21366,10 @@ pub(crate) async fn handle_rpc(
         }
     }
 
-    if result.is_ok() && is_replication_request {
-        note_applied_replication(state, replication_causality);
+    if result.is_ok() && is_replication_request && !replication_apply_skip {
+        // A genuinely-applied replicated op: advance our contiguous applied position to it so
+        // re-deliveries de-duplicate and catch-up resumes from here.
+        note_applied_replication(state, replication_causality, replication_seq);
     }
 
     let status = if req.id.is_none() {
@@ -21493,25 +21580,56 @@ async fn replicate_write_to_cluster(
 ) -> anyhow::Result<()> {
     let now = now_unix_ms_u64();
     let (db, table) = write_target_from_params(method, Some(&params));
-    let (targets, enabled) = {
+    let (targets, enabled, op_term, op_seq) = {
         let mut cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let enabled = cluster.enabled;
         cluster.replication.last_updated_ms = now;
+        // Assign this write its log position `(term, seq)` in the current leadership term. Done
+        // under the cluster lock so every replicated write gets a distinct, monotonic sequence.
+        let (op_term, op_seq) = if enabled {
+            cluster.replication.op_seq = cluster.replication.op_seq.saturating_add(1);
+            (cluster.leadership_epoch, cluster.replication.op_seq)
+        } else {
+            (0, 0)
+        };
         (
             cluster.nodes_for_replication(db.as_deref(), table.as_deref()),
             enabled,
+            op_term,
+            op_seq,
         )
     };
-    if !enabled || targets.is_empty() {
+    if !enabled {
+        return Ok(());
+    }
+    // Append to the primary's op-log ring buffer (the catch-up source) even when there are no
+    // current targets, so a replica that joins or reconnects later can pull this op and self-heal.
+    {
+        let mut log = state
+            .replication_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.push_back(ReplicationLogEntry {
+            term: op_term,
+            seq: op_seq,
+            method: method.to_string(),
+            params: params.clone(),
+        });
+        while log.len() > REPLICATION_LOG_BUFFER_CAP {
+            log.pop_front();
+        }
+    }
+    if targets.is_empty() {
         return Ok(());
     }
 
     let causality_header = replication_causality_for_write(state, method, &params)
         .await
         .and_then(|token| encode_replication_causality_header(&token));
+    let seq_header = format!("{}:{}", op_term, op_seq);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -21532,6 +21650,7 @@ async fn replicate_write_to_cluster(
             .post(&url)
             .header(header::CONTENT_TYPE.as_str(), "application/json")
             .header(REPLICATION_HEADER, "1")
+            .header(REPLICATION_SEQ_HEADER, &seq_header)
             .json(&payload);
         if let Some(causality) = causality_header.as_ref() {
             req = req.header(REPLICATION_CAUSALITY_HEADER, causality);
@@ -21642,13 +21761,75 @@ fn merge_cluster_causality(a: &CausalityToken, b: &CausalityToken) -> CausalityT
     }
 }
 
-fn note_applied_replication(state: &AppState, causality: Option<CausalityToken>) {
+/// How a replica should handle a replicated op, given its contiguous applied position. Pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicationApplyDecision {
+    /// The op is the next in order (or the first seen of a newer leadership term); apply + advance.
+    Apply,
+    /// Already applied (a re-delivery or a stale-term op); ack without re-applying (idempotent).
+    Duplicate,
+    /// A gap sits below this op; skip it and let catch-up pull the missing ops from the primary.
+    Gap,
+}
+
+/// Decide how a replica handles a replicated op at `(op_term, op_seq)` given its last contiguous
+/// applied position `(last_term, last_seq)`. Steady state (one stable primary) is exact: ops apply
+/// in order, re-deliveries are duplicates, and a hole becomes a `Gap` the catch-up loop fills. A
+/// newer term is adopted at the op that carries it (best-effort across a leadership change; full
+/// log reconciliation is the commit-index slice — see docs/CLUSTERING.md §2.5).
+fn decide_replication_apply(
+    last_term: u64,
+    last_seq: u64,
+    op_term: u64,
+    op_seq: u64,
+) -> ReplicationApplyDecision {
+    use std::cmp::Ordering;
+    match op_term.cmp(&last_term) {
+        Ordering::Greater => ReplicationApplyDecision::Apply,
+        Ordering::Less => ReplicationApplyDecision::Duplicate,
+        Ordering::Equal => match op_seq.cmp(&last_seq.saturating_add(1)) {
+            Ordering::Equal => ReplicationApplyDecision::Apply,
+            Ordering::Less => ReplicationApplyDecision::Duplicate,
+            Ordering::Greater => ReplicationApplyDecision::Gap,
+        },
+    }
+}
+
+/// Parse the `"{term}:{seq}"` replication-seq header into `(term, seq)`.
+fn parse_replication_seq(value: &str) -> Option<(u64, u64)> {
+    let (term, seq) = value.split_once(':')?;
+    Some((term.trim().parse().ok()?, seq.trim().parse().ok()?))
+}
+
+/// The replica's current contiguous applied log position `(term, seq)`.
+fn replication_applied_position(state: &AppState) -> (u64, u64) {
+    let cluster = state
+        .cluster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (
+        cluster.replication.last_applied_term,
+        cluster.replication.last_applied_seq,
+    )
+}
+
+fn note_applied_replication(
+    state: &AppState,
+    causality: Option<CausalityToken>,
+    applied_position: Option<(u64, u64)>,
+) {
     {
         let mut cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cluster.replication.applied_ops = cluster.replication.applied_ops.saturating_add(1);
+        // Advance the contiguous applied log position so a re-delivery of this op is de-duplicated
+        // and catch-up pulls only ops after it.
+        if let Some((term, seq)) = applied_position {
+            cluster.replication.last_applied_term = term;
+            cluster.replication.last_applied_seq = seq;
+        }
         cluster.replication.last_updated_ms = now_unix_ms_u64();
     }
 
@@ -21688,6 +21869,54 @@ fn cluster_replication_status_json(state: &AppState) -> Value {
     value
 }
 
+/// Serve a lagging replica's catch-up pull: return buffered ops whose log position is strictly
+/// after `(after_term, after_seq)`, in order, up to `limit`. If the replica is further behind than
+/// the buffer still retains (a same-term hole the buffer can't fill), `resync_required` is set and
+/// no ops are returned — that replica must be re-synced from a snapshot. See docs/CLUSTERING.md §2.5.
+fn cluster_replication_fetch(
+    state: &AppState,
+    after_term: u64,
+    after_seq: u64,
+    limit: usize,
+) -> Value {
+    let limit = limit.clamp(1, REPLICATION_CATCHUP_BATCH);
+    let log = state
+        .replication_log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let after = (after_term, after_seq);
+    // The buffer is appended in ascending `(term, seq)` order, so filtering preserves order.
+    let pending: Vec<&ReplicationLogEntry> =
+        log.iter().filter(|e| (e.term, e.seq) > after).collect();
+    let resync_required = pending
+        .first()
+        .map(|first| first.term == after_term && first.seq > after_seq.saturating_add(1))
+        .unwrap_or(false);
+    let head = log.back().map(|e| (e.term, e.seq)).unwrap_or((0, 0));
+    let ops: Vec<Value> = if resync_required {
+        Vec::new()
+    } else {
+        pending
+            .into_iter()
+            .take(limit)
+            .map(|e| {
+                serde_json::json!({
+                    "term": e.term,
+                    "seq": e.seq,
+                    "method": e.method,
+                    "params": e.params,
+                })
+            })
+            .collect()
+    };
+    serde_json::json!({
+        "ops": ops,
+        "resync_required": resync_required,
+        "head_term": head.0,
+        "head_seq": head.1,
+    })
+}
+
 fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
     let cluster = state
         .cluster
@@ -21699,6 +21928,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.nodes",
         "cluster.failover.status",
         "cluster.shard.failover.status",
+        "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
@@ -33352,6 +33582,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cluster.nodes",
         "cluster.failover.status",
         "cluster.shard.failover.status",
+        "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
@@ -34974,7 +35205,112 @@ async fn run_cluster_heartbeat_loop(state: AppState, mut shutdown_rx: watch::Rec
             _ = ticker.tick() => {
                 run_cluster_heartbeat_once(&state).await;
                 run_cluster_failover_tick(&state).await;
+                run_replication_catchup_once(&state).await;
             }
+        }
+    }
+}
+
+/// One replica-side catch-up round (self-healing replication): pull the ops after our contiguous
+/// applied position from the primary and apply them, in order, via loopback so the normal receive
+/// path de-duplicates and advances uniformly. No-op unless clustering is enabled and we are a
+/// replica. Best-effort — an unreachable primary, an empty response (already caught up), or a
+/// `resync_required` signal simply ends the round; the next tick resumes.
+async fn run_replication_catchup_once(state: &AppState) {
+    let (enabled, is_replica, primary_url, after_term, after_seq) = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let is_replica = cluster.local_node_id != cluster.primary_node_id;
+        let primary_url = cluster
+            .nodes
+            .iter()
+            .find(|n| n.node_id == cluster.primary_node_id)
+            .map(|n| n.rpc_url.clone());
+        (
+            cluster.enabled,
+            is_replica,
+            primary_url,
+            cluster.replication.last_applied_term,
+            cluster.replication.last_applied_seq,
+        )
+    };
+    if !enabled || !is_replica {
+        return;
+    }
+    let Some(primary_url) = primary_url else {
+        return;
+    };
+    let fetch_params = serde_json::json!({
+        "after_term": after_term,
+        "after_seq": after_seq,
+        "limit": REPLICATION_CATCHUP_BATCH,
+    });
+    let resp = match call_remote_rpc_result(&primary_url, "cluster.replication.fetch", fetch_params)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::debug!(primary = %primary_url, error = ?err, "replication catch-up fetch failed");
+            return;
+        }
+    };
+    if resp
+        .get("resync_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            after_term,
+            after_seq,
+            "replica has fallen behind the primary's op-log buffer — snapshot re-sync required"
+        );
+        return;
+    }
+    let ops = resp
+        .get("ops")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if ops.is_empty() {
+        return;
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    let auth_token = std::env::var("SKEINDB_TOKEN").ok();
+    let self_url = format!("{}/api/v1/rpc", state.local_rpc_url.trim_end_matches('/'));
+    for op in ops {
+        let (Some(term), Some(seq), Some(method)) = (
+            op.get("term").and_then(|v| v.as_u64()),
+            op.get("seq").and_then(|v| v.as_u64()),
+            op.get("method").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let params = op.get("params").cloned().unwrap_or(Value::Null);
+        let payload = serde_json::json!({
+            "skeinql": SKEINQL_VERSION,
+            "method": method,
+            "params": params,
+        });
+        let mut req = client
+            .post(&self_url)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .header(REPLICATION_HEADER, "1")
+            .header(REPLICATION_SEQ_HEADER, format!("{}:{}", term, seq))
+            .json(&payload);
+        if let Some(tok) = auth_token.as_ref() {
+            req = req.bearer_auth(tok);
+        }
+        // Apply in order; stop the round on the first transport failure and resume next tick.
+        if let Err(err) = req.send().await {
+            tracing::debug!(error = %err, "replication catch-up apply failed");
+            break;
         }
     }
 }
@@ -36584,6 +36920,29 @@ mod tests {
     }
 
     #[test]
+    fn replication_apply_decision_orders_dedups_and_detects_gaps() {
+        use ReplicationApplyDecision::*;
+        // Steady state within one term: the next op applies, a re-delivery is a duplicate, and a
+        // hole above our position is a gap the catch-up loop must fill.
+        assert_eq!(decide_replication_apply(0, 0, 0, 1), Apply); // first op
+        assert_eq!(decide_replication_apply(5, 10, 5, 11), Apply); // exactly next
+        assert_eq!(decide_replication_apply(5, 10, 5, 10), Duplicate); // already applied
+        assert_eq!(decide_replication_apply(5, 10, 5, 3), Duplicate); // far behind = dup
+        assert_eq!(decide_replication_apply(5, 10, 5, 13), Gap); // 11,12 missing
+                                                                 // A newer leadership term is adopted at the op that carries it; a stale term is ignored.
+        assert_eq!(decide_replication_apply(5, 10, 6, 1), Apply); // new leader
+        assert_eq!(decide_replication_apply(6, 4, 5, 99), Duplicate); // superseded leader
+    }
+
+    #[test]
+    fn parse_replication_seq_roundtrips() {
+        assert_eq!(parse_replication_seq("3:42"), Some((3, 42)));
+        assert_eq!(parse_replication_seq("0:1"), Some((0, 1)));
+        assert_eq!(parse_replication_seq("bad"), None);
+        assert_eq!(parse_replication_seq("1:x"), None);
+    }
+
+    #[test]
     fn election_prefers_most_up_to_date_replica() {
         let now = 100_000u64;
         let timeout = 15_000u64;
@@ -37184,7 +37543,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 152);
+        assert_eq!(methods.len(), 153);
         assert!(methods.contains(&"cluster.failover.status"));
         assert!(methods.contains(&"cluster.shard.failover.status"));
         assert!(methods.contains(&"cluster.node.heartbeat"));
@@ -37522,6 +37881,7 @@ mod tests {
                 local_rpc_url,
             ))),
             replication_causality: Arc::new(Mutex::new(None)),
+            replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             counters: Arc::new(Mutex::new(Counters::default())),
             txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
