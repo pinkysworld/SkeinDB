@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.28 - 2026-07-15
+
+Self-healing replication: a replica that falls behind — a transient network blip, or joining after writes have already happened — now **catches up automatically** instead of diverging permanently. Behavior-preserving for single-node and legacy senders.
+
+- **Clustering — self-healing replication.** Baseline replication was best-effort primary→replica fan-out with no ordering, de-duplication, or recovery, so a replica that missed a write had no way to backfill it. Now every replicated write carries a primary-assigned log position `(term, seq)` (header `x-skeindb-replication-seq`), and the primary keeps a bounded in-memory **op-log ring buffer** (capacity 4096) of recent ops. A replica tracks its **contiguous applied position** and, per incoming op, either applies it in order, treats an already-seen op as an **idempotent no-op** (safe re-delivery), or recognises a **gap** and leaves its position unchanged. A replica's background loop then pulls whatever it is missing from the primary via the new read RPC **`cluster.replication.fetch`** (`{after_term, after_seq}` → the next ops, in order) and applies them — so a replica that fell behind or joined late **converges to the primary on its own**. If it has fallen further behind than the buffer still retains, the primary reports `resync_required` and that replica is re-synced from a snapshot (backup/restore). Each node's position is exposed in `cluster.replication.status` (`op_seq`, `last_applied_term`, `last_applied_seq`) and per node in `cluster.failover.status`. Steady-state lag self-heals; reconciling logs across a **leadership change** remains best-effort until the commit-index consensus slice (see `docs/CLUSTERING.md` §2.5). Blast radius is confined to clustered replication — non-clustered single-node is untouched, and a legacy sender without the sequence header takes the exact previous path.
+- **Dependencies.** Bumped `tokio-tungstenite` 0.29 → 0.30 and a group of three minor/patch crate updates (Dependabot).
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including 2 new end-to-end tests — one exercising the catch-up pull source, one driving a real replica that missed every write and self-heals. Docs (`CLUSTERING.md`, `CONFIGURATION.md`), the cluster tutorial, and the website updated.
+
 ## v0.3.27 - 2026-07-15
 
 Failover data-safety: automated failover now elects the **most up-to-date replica** and applies a Raft log-matching check to the vote round, so a promotion can no longer lose acknowledged writes. Behavior-preserving for single-node and manual-failover deployments.
