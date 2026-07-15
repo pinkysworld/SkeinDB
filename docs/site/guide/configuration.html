@@ -394,7 +394,16 @@ Current coverage:
 </ul>
 <p>Because a candidate needs both a quorum and a majority of votes for its term — and two disjoint partitions can never both hold a majority — <strong>at most one primary is ever elected per term and at most one accepts writes</strong>. Run <strong>3+ nodes</strong> so the cluster keeps a majority (and write availability) when a single node fails.</p>
 <p><strong>Per shard.</strong> When databases/tables are sharded, the same machinery runs <strong>independently per shard</strong>: each shard has its own primary, leadership epoch, quorum (a majority of <em>that shard's</em> node set), and vote round (<code>cluster.request_vote</code> / <code>cluster.leader.announce</code> carry a <code>shard_id</code>). The failover tick evaluates every shard as well as the whole cluster, so a shard whose primary is down is failed over on its own — write-fenced when it loses its shard quorum, then re-elected among its replicas. <code>cluster.shard.failover.status</code> reports each shard's readiness.</p>
-<p>The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election; it does not (yet) include log-matching/replication safety, so it pairs with SkeinDB's existing replication rather than replacing it.</p>
+<p>The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election, with the log-matching / up-to-date rule described above; a full commit-index consensus (majority-ack + divergent-log reconciliation across a leadership change) is the remaining roadmap item (see docs/CLUSTERING.md §2.5).</p>
+<h3 id="self-healing-replication">Self-healing replication<a class="headerlink" href="#self-healing-replication" title="Permanent link">¶</a></h3>
+<p>Replication ships each write from the primary to its replicas and now <strong>heals replicas that fall behind</strong> — no manual rebuild after a transient network blip or a late join.</p>
+<ul>
+<li>Every replicated write carries a primary-assigned log position <code>(term, seq)</code> (header <code>x-skeindb-replication-seq</code>), and the primary keeps a bounded in-memory <strong>op-log ring buffer</strong> of recent ops (capacity 4096).</li>
+<li>A replica tracks its <strong>contiguous applied position</strong> and, per incoming op, applies it in order, treats an already-seen op as an <strong>idempotent no-op</strong> (safe re-delivery), or detects a <strong>gap</strong> and leaves its position unchanged.</li>
+<li>A replica's background loop pulls whatever it is missing from the primary via <strong><code>cluster.replication.fetch</code></strong> (<code>{after_term, after_seq}</code> → the next ops in order) and applies them, so it converges to the primary automatically. Each node's position is visible in <code>cluster.replication.status</code> (<code>op_seq</code>, <code>last_applied_term</code>, <code>last_applied_seq</code>) and per node in <code>cluster.failover.status</code>.</li>
+<li>If a replica has fallen further behind than the buffer still retains, <code>cluster.replication.fetch</code> returns <code>resync_required: true</code> — that replica must be re-synced from a snapshot (backup/restore) rather than from the op-log.</li>
+</ul>
+<p>Steady-state lag heals on its own; reconciling logs across a <strong>leadership change</strong> remains best-effort until the commit-index slice (§2.5).</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CONFIGURATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -430,6 +439,7 @@ Current coverage:
 <li><a href="#failure-detection-failover-readiness">Failure detection &amp; failover readiness</a></li>
 <li><a href="#quorum-fencing-split-brain-prevention">Quorum fencing (split-brain prevention)</a></li>
 <li><a href="#automated-fenced-failover-opt-in">Automated fenced failover (opt-in)</a></li>
+<li><a href="#self-healing-replication">Self-healing replication</a></li>
 </ul>
 </li>
 </ul>

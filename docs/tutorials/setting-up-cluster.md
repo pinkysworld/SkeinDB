@@ -74,6 +74,8 @@ curl -s -XPOST http://127.0.0.1:8002/api/v1/rpc \
 
 Replicas accept read queries but forward writes. RPC fanout is recursion-suppressed, so cluster-wide operations are exactly-once.
 
+Replication is **self-healing**: each write carries a primary-assigned log position, and a replica that falls behind (a transient blip) or joins late automatically pulls the ops it missed from the primary and catches up — no manual rebuild. Each node's applied position shows up in `cluster.replication.status` and `cluster.failover.status`. (A replica that has fallen further behind than the primary's op-log buffer retains reports `resync_required` and is re-synced from a backup instead.)
+
 ## 5. Simulate a failure
 
 Stop `n1`:

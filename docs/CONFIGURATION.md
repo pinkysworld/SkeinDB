@@ -259,4 +259,15 @@ Because a candidate needs both a quorum and a majority of votes for its term —
 
 **Per shard.** When databases/tables are sharded, the same machinery runs **independently per shard**: each shard has its own primary, leadership epoch, quorum (a majority of *that shard's* node set), and vote round (`cluster.request_vote` / `cluster.leader.announce` carry a `shard_id`). The failover tick evaluates every shard as well as the whole cluster, so a shard whose primary is down is failed over on its own — write-fenced when it loses its shard quorum, then re-elected among its replicas. `cluster.shard.failover.status` reports each shard's readiness.
 
-The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election; it does not (yet) include log-matching/replication safety, so it pairs with SkeinDB's existing replication rather than replacing it.
+The vote is persisted before it is granted, so a node cannot vote twice in one term even across a crash. This is a quorum-and-term-based election in the spirit of Raft leader election, with the log-matching / up-to-date rule described above; a full commit-index consensus (majority-ack + divergent-log reconciliation across a leadership change) is the remaining roadmap item (see docs/CLUSTERING.md §2.5).
+
+### Self-healing replication
+
+Replication ships each write from the primary to its replicas and now **heals replicas that fall behind** — no manual rebuild after a transient network blip or a late join.
+
+- Every replicated write carries a primary-assigned log position `(term, seq)` (header `x-skeindb-replication-seq`), and the primary keeps a bounded in-memory **op-log ring buffer** of recent ops (capacity 4096).
+- A replica tracks its **contiguous applied position** and, per incoming op, applies it in order, treats an already-seen op as an **idempotent no-op** (safe re-delivery), or detects a **gap** and leaves its position unchanged.
+- A replica's background loop pulls whatever it is missing from the primary via **`cluster.replication.fetch`** (`{after_term, after_seq}` → the next ops in order) and applies them, so it converges to the primary automatically. Each node's position is visible in `cluster.replication.status` (`op_seq`, `last_applied_term`, `last_applied_seq`) and per node in `cluster.failover.status`.
+- If a replica has fallen further behind than the buffer still retains, `cluster.replication.fetch` returns `resync_required: true` — that replica must be re-synced from a snapshot (backup/restore) rather than from the op-log.
+
+Steady-state lag heals on its own; reconciling logs across a **leadership change** remains best-effort until the commit-index slice (§2.5).
