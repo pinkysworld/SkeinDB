@@ -268,6 +268,13 @@ struct ClusterNode {
     status: String,
     joined_at_ms: u64,
     last_seen_ms: u64,
+    /// Last-known replication progress for this node — the count of replicated writes it has
+    /// applied (`ClusterReplicationState.applied_ops`), propagated via heartbeats. Failover
+    /// elects the replica with the highest `applied_ops` (the most up-to-date), and the vote
+    /// round refuses a candidate less caught up than the voter, so a promotion never loses a
+    /// write that a majority already held.
+    #[serde(default)]
+    applied_ops: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -357,6 +364,7 @@ impl ClusterStateModel {
             status: "online".to_string(),
             joined_at_ms: ts,
             last_seen_ms: ts,
+            applied_ops: 0,
         };
         Self {
             enabled: false,
@@ -19294,9 +19302,11 @@ pub(crate) async fn handle_rpc(
                     #[derive(serde::Deserialize)]
                     struct P {
                         node_id: String,
+                        #[serde(default)]
+                        applied_ops: u64,
                     }
                     let p: P = parse_params(params.clone())?;
-                    cluster_node_heartbeat(state, &p.node_id)
+                    cluster_node_heartbeat(state, &p.node_id, p.applied_ops)
                 }
                 "cluster.join_token.create" => {
                     let p = if params.is_some() {
@@ -19343,10 +19353,18 @@ pub(crate) async fn handle_rpc(
                         candidate: String,
                         term: u64,
                         #[serde(default)]
+                        applied_ops: u64,
+                        #[serde(default)]
                         shard_id: Option<String>,
                     }
                     let p: P = parse_params(params.clone())?;
-                    cluster_request_vote(state, &p.candidate, p.term, p.shard_id.as_deref())
+                    cluster_request_vote(
+                        state,
+                        &p.candidate,
+                        p.term,
+                        p.applied_ops,
+                        p.shard_id.as_deref(),
+                    )
                 }
                 "cluster.shard.create" => {
                     let p: ClusterShardCreateParams = parse_params(params.clone())?;
@@ -21829,6 +21847,7 @@ fn cluster_node_join(state: &AppState, params: ClusterNodeJoinParams) -> Result<
                 status: "online".to_string(),
                 joined_at_ms: now,
                 last_seen_ms: now,
+                applied_ops: 0,
             };
             cluster.nodes.push(node.clone());
             node
@@ -21894,6 +21913,7 @@ fn cluster_node_remove(
                     status: "online".to_string(),
                     joined_at_ms: now_unix_ms_u64(),
                     last_seen_ms: now_unix_ms_u64(),
+                    applied_ops: 0,
                 });
             }
         }
@@ -22065,16 +22085,19 @@ fn elect_failover_candidate(
                 && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
         })
         .collect();
+    // Prefer the most up-to-date replica (highest applied replication progress) so failover loses
+    // the least data; break ties by freshest heartbeat, then by node_id for determinism.
     candidates.sort_by(|a, b| {
-        b.last_seen_ms
-            .cmp(&a.last_seen_ms)
+        b.applied_ops
+            .cmp(&a.applied_ops)
+            .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
     candidates.first().map(|c| FailoverPlan {
         candidate_node_id: c.node_id.clone(),
         reason: format!(
             "primary '{primary_node_id}' has not heartbeat in >{timeout_ms}ms; \
-             promote the freshest online replica"
+             promote the most up-to-date online replica"
         ),
     })
 }
@@ -22327,9 +22350,11 @@ fn shard_failover_candidate(
                 && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
         })
         .collect();
+    // Most up-to-date replica first (least data loss), ties by freshest heartbeat then node_id.
     candidates.sort_by(|a, b| {
-        b.last_seen_ms
-            .cmp(&a.last_seen_ms)
+        b.applied_ops
+            .cmp(&a.applied_ops)
+            .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
     candidates.first().map(|c| c.node_id.clone())
@@ -22396,7 +22421,11 @@ fn cluster_shard_failover_status(state: &AppState) -> Value {
 
 /// Record a heartbeat from `node_id`, refreshing its liveness (`last_seen_ms` + `status =
 /// online`). This is the signal `cluster.failover.status` uses to detect a dead primary.
-fn cluster_node_heartbeat(state: &AppState, node_id: &str) -> Result<Value, RpcError> {
+fn cluster_node_heartbeat(
+    state: &AppState,
+    node_id: &str,
+    applied_ops: u64,
+) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     {
         let mut cluster = state
@@ -22410,6 +22439,9 @@ fn cluster_node_heartbeat(state: &AppState, node_id: &str) -> Result<Value, RpcE
             .ok_or_else(|| RpcError::new("not_found", "node not found"))?;
         node.last_seen_ms = now;
         node.status = "online".to_string();
+        // Record the sender's replication progress (monotonic) so failover can elect the most
+        // up-to-date replica.
+        node.applied_ops = node.applied_ops.max(applied_ops);
     }
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
     Ok(serde_json::json!({
@@ -22589,6 +22621,7 @@ fn cluster_request_vote(
     state: &AppState,
     candidate: &str,
     term: u64,
+    candidate_applied_ops: u64,
     shard_id: Option<&str>,
 ) -> Result<Value, RpcError> {
     let (granted, current_epoch) = {
@@ -22599,6 +22632,11 @@ fn cluster_request_vote(
         if !cluster.nodes.iter().any(|n| n.node_id == candidate) {
             return Err(RpcError::new("not_found", "candidate not in cluster"));
         }
+        // Raft log-matching / up-to-date rule: never vote for a candidate less caught up on
+        // replication than we are. Since a committed write is replicated to a majority, and a
+        // winner needs a majority of votes, the winner is guaranteed to hold every committed
+        // write — so failover cannot lose acknowledged data.
+        let up_to_date = candidate_applied_ops >= cluster.replication.applied_ops;
         match shard_id {
             // Per-shard election: vote at most once per (shard, term), and only for a term newer
             // than the shard's current leader — independent of the whole-cluster election.
@@ -22610,12 +22648,13 @@ fn cluster_request_vote(
                     .map(|s| s.leadership_epoch)
                     .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
                 let prior = cluster.shard_votes.get(shard_id).cloned();
-                let grant = match &prior {
-                    Some((voted_term, _)) if term <= *voted_term => {
-                        matches!(&prior, Some((t, cand)) if *t == term && cand == candidate)
-                    }
-                    _ => term > shard_epoch,
-                };
+                let grant = up_to_date
+                    && match &prior {
+                        Some((voted_term, _)) if term <= *voted_term => {
+                            matches!(&prior, Some((t, cand)) if *t == term && cand == candidate)
+                        }
+                        _ => term > shard_epoch,
+                    };
                 if grant {
                     cluster
                         .shard_votes
@@ -22625,13 +22664,14 @@ fn cluster_request_vote(
             }
             // Whole-cluster election.
             None => {
-                let grant = if term > cluster.voted_epoch && term > cluster.leadership_epoch {
-                    true
-                } else {
-                    // Idempotent re-request from the same candidate in the same term; anything
-                    // else (an older term, or a second candidate in a voted term) is refused.
-                    term == cluster.voted_epoch && cluster.voted_for == candidate
-                };
+                let grant = up_to_date
+                    && if term > cluster.voted_epoch && term > cluster.leadership_epoch {
+                        true
+                    } else {
+                        // Idempotent re-request from the same candidate in the same term; anything
+                        // else (an older term, or a second candidate in a voted term) is refused.
+                        term == cluster.voted_epoch && cluster.voted_for == candidate
+                    };
                 if grant {
                     cluster.voted_epoch = term;
                     cluster.voted_for = candidate.to_string();
@@ -34998,7 +35038,7 @@ async fn run_cluster_failover_tick(state: &AppState) {
 async fn run_cluster_election(state: &AppState, local: &str, now_ms: u64, timeout_ms: u64) {
     // Start the term and vote for ourselves (recording it so we won't also vote for a rival at
     // this term). Bail if we've lost quorum or already become primary since the snapshot.
-    let (term, quorum, peer_urls) = {
+    let (term, quorum, peer_urls, applied_ops) = {
         let mut cluster = state
             .cluster
             .lock()
@@ -35018,13 +35058,15 @@ async fn run_cluster_election(state: &AppState, local: &str, now_ms: u64, timeou
             .filter(|n| n.node_id != local)
             .map(|n| n.rpc_url.clone())
             .collect();
-        (term, quorum, peer_urls)
+        (term, quorum, peer_urls, cluster.replication.applied_ops)
     };
     let _ = persist_cluster_state(state);
 
-    // Collect votes from peers (best effort). We already have our own vote.
+    // Collect votes from peers (best effort). We already have our own vote. Our replication
+    // progress is included so peers apply the log-matching rule.
     let mut votes = 1usize;
-    let params = serde_json::json!({ "candidate": local, "term": term });
+    let params =
+        serde_json::json!({ "candidate": local, "term": term, "applied_ops": applied_ops });
     for rpc_url in peer_urls {
         if let Ok(resp) =
             call_remote_rpc_result(&rpc_url, "cluster.request_vote", params.clone()).await
@@ -35118,7 +35160,7 @@ async fn run_shard_election(
     now_ms: u64,
     timeout_ms: u64,
 ) {
-    let Some((term, quorum, peer_urls)) = ({
+    let Some((term, quorum, peer_urls, applied_ops)) = ({
         let mut cluster = state
             .cluster
             .lock()
@@ -35149,14 +35191,14 @@ async fn run_shard_election(
         cluster
             .shard_votes
             .insert(shard_id.to_string(), (term, local.to_string()));
-        Some((term, quorum, peer_urls))
+        Some((term, quorum, peer_urls, cluster.replication.applied_ops))
     }) else {
         return;
     };
     let _ = persist_cluster_state(state);
 
     let mut votes = 1usize;
-    let params = serde_json::json!({ "candidate": local, "term": term, "shard_id": shard_id });
+    let params = serde_json::json!({ "candidate": local, "term": term, "applied_ops": applied_ops, "shard_id": shard_id });
     for rpc_url in peer_urls {
         if let Ok(resp) =
             call_remote_rpc_result(&rpc_url, "cluster.request_vote", params.clone()).await
@@ -35245,7 +35287,7 @@ async fn announce_shard_leadership_to_peers(
 /// node so each peer refreshes the local node's liveness. Best-effort — an unreachable peer is
 /// simply not refreshed on our side and ages out to offline. No-op unless clustering is enabled.
 async fn run_cluster_heartbeat_once(state: &AppState) {
-    let (enabled, local_node_id, targets) = {
+    let (enabled, local_node_id, applied_ops, targets) = {
         let cluster = state
             .cluster
             .lock()
@@ -35253,6 +35295,7 @@ async fn run_cluster_heartbeat_once(state: &AppState) {
         (
             cluster.enabled,
             cluster.local_node_id.clone(),
+            cluster.replication.applied_ops,
             cluster
                 .nodes
                 .iter()
@@ -35264,7 +35307,8 @@ async fn run_cluster_heartbeat_once(state: &AppState) {
     if !enabled || targets.is_empty() {
         return;
     }
-    let params = serde_json::json!({ "node_id": local_node_id });
+    // Carry our replication progress so peers can elect the most up-to-date replica on failover.
+    let params = serde_json::json!({ "node_id": local_node_id, "applied_ops": applied_ops });
     for rpc_url in targets {
         if let Err(err) =
             call_remote_rpc_result(&rpc_url, "cluster.node.heartbeat", params.clone()).await
@@ -35662,6 +35706,7 @@ fn load_cluster_state(state: &AppState) -> anyhow::Result<()> {
                 status: "online".to_string(),
                 joined_at_ms: now,
                 last_seen_ms: now,
+                applied_ops: 0,
             });
         }
     }
@@ -36307,6 +36352,7 @@ mod tests {
             status: status.to_string(),
             joined_at_ms: 0,
             last_seen_ms,
+            applied_ops: 0,
         }
     }
 
@@ -36466,25 +36512,25 @@ mod tests {
         // Shard s1: candidate `a` wins term 2; a second candidate `b` at term 2 is refused;
         // `a` re-requesting the same term is idempotently granted.
         assert!(g(
-            &cluster_request_vote(&state, "a", 2, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "a", 2, 0, Some("s1")).expect("v")
         ));
         assert!(!g(
-            &cluster_request_vote(&state, "b", 2, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "b", 2, 0, Some("s1")).expect("v")
         ));
         assert!(g(
-            &cluster_request_vote(&state, "a", 2, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "a", 2, 0, Some("s1")).expect("v")
         ));
         // Shard s2 is a SEPARATE election: `b` can win term 2 on s2 even though `a` won it on s1.
         assert!(g(
-            &cluster_request_vote(&state, "b", 2, Some("s2")).expect("v")
+            &cluster_request_vote(&state, "b", 2, 0, Some("s2")).expect("v")
         ));
         // A term not newer than the shard's leader epoch (or an already-voted term) is refused.
         assert!(!g(
-            &cluster_request_vote(&state, "a", 1, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "a", 1, 0, Some("s1")).expect("v")
         ));
         // Unknown shard errors; a whole-cluster vote is independent of shard votes.
-        assert!(cluster_request_vote(&state, "a", 3, Some("ghost")).is_err());
-        assert!(g(&cluster_request_vote(&state, "a", 5, None).expect("v")));
+        assert!(cluster_request_vote(&state, "a", 3, 0, Some("ghost")).is_err());
+        assert!(g(&cluster_request_vote(&state, "a", 5, 0, None).expect("v")));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -36531,6 +36577,78 @@ mod tests {
         assert!(!local_should_promote_shard(
             &shard, &minority, "r2", now, timeout
         ));
+    }
+
+    #[test]
+    fn election_prefers_most_up_to_date_replica() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // Primary down. r1 has the freshest heartbeat but is BEHIND on replication; r2 is a bit
+        // staler on heartbeat but MORE caught up — r2 must win, to lose the least data.
+        let mut r1 = cnode("r1", "replica", "online", now - 500);
+        r1.applied_ops = 5;
+        let mut r2 = cnode("r2", "replica", "online", now - 3_000);
+        r2.applied_ops = 42;
+        let nodes = vec![cnode("p", "primary", "online", now - 60_000), r1, r2];
+
+        assert_eq!(
+            elect_failover_candidate(&nodes, "p", "obs", now, timeout)
+                .expect("failover")
+                .candidate_node_id,
+            "r2"
+        );
+        // The per-shard election uses the same rule.
+        let shard = cshard("s1", "p", &["r1", "r2"]);
+        assert_eq!(
+            shard_failover_candidate(&shard, &nodes, "obs", now, timeout),
+            Some("r2".to_string())
+        );
+    }
+
+    #[test]
+    fn request_vote_applies_log_matching() -> anyhow::Result<()> {
+        let dir = temp_dir("vote_log_matching");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.local_node_id = "voter".to_string();
+            cluster.primary_node_id = "old".to_string();
+            cluster.nodes = vec![
+                cnode("voter", "replica", "online", now_unix_ms_u64()),
+                cnode("a", "replica", "online", now_unix_ms_u64()),
+                cnode("old", "primary", "online", 0),
+            ];
+            // This voter has applied 10 replicated writes.
+            cluster.replication.applied_ops = 10;
+            cluster.shards = vec![cshard("s1", "old", &["voter", "a"])];
+        }
+        let granted = |v: &Value| v["granted"].as_bool().unwrap();
+
+        // Whole-cluster: a candidate BEHIND the voter (applied 5 < 10) is refused even for a fresh
+        // term — promoting it could lose a write the voter already holds.
+        assert!(!granted(
+            &cluster_request_vote(&state, "a", 5, 5, None).expect("v")
+        ));
+        // A candidate at least as caught up (applied 10 >= 10) is granted.
+        assert!(granted(
+            &cluster_request_vote(&state, "a", 5, 10, None).expect("v")
+        ));
+
+        // Per-shard votes apply the same log-matching rule.
+        assert!(!granted(
+            &cluster_request_vote(&state, "a", 5, 5, Some("s1")).expect("v")
+        ));
+        assert!(granted(
+            &cluster_request_vote(&state, "a", 6, 10, Some("s1")).expect("v")
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]
@@ -36679,7 +36797,7 @@ mod tests {
             .to_string();
         assert_eq!(replica_health, "offline");
 
-        cluster_node_heartbeat(&state, "replica-1").expect("heartbeat ok");
+        cluster_node_heartbeat(&state, "replica-1", 0).expect("heartbeat ok");
 
         let after = cluster_failover_status(&state);
         let replica_health = after["nodes"]
@@ -36694,7 +36812,7 @@ mod tests {
         assert_eq!(replica_health, "online");
 
         // An unknown node cannot heartbeat.
-        assert!(cluster_node_heartbeat(&state, "ghost").is_err());
+        assert!(cluster_node_heartbeat(&state, "ghost", 0).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -36931,19 +37049,19 @@ mod tests {
 
         // Fresh term (4 > leader epoch 3): candidate "a" is granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4, None).expect("vote")
+            &cluster_request_vote(&state, "a", 4, 0, None).expect("vote")
         ));
         // Idempotent re-request from the same candidate/term is still granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4, None).expect("vote")
+            &cluster_request_vote(&state, "a", 4, 0, None).expect("vote")
         ));
         // A SECOND candidate "b" in the same term is refused (one vote per term = safety).
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 4, None).expect("vote")
+            &cluster_request_vote(&state, "b", 4, 0, None).expect("vote")
         ));
         // A lower/equal term than one already voted is refused.
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 3, None).expect("vote")
+            &cluster_request_vote(&state, "b", 3, 0, None).expect("vote")
         ));
         // A term that does not exceed the recognized leader epoch is refused even if unvoted.
         //   (bump leader epoch to 5; a term of 5 must not unseat it)
@@ -36955,15 +37073,15 @@ mod tests {
             cluster.leadership_epoch = 5;
         }
         assert!(!granted(
-            &cluster_request_vote(&state, "a", 5, None).expect("vote")
+            &cluster_request_vote(&state, "a", 5, 0, None).expect("vote")
         ));
         // But a term newer than both the vote and the leader is granted again.
         assert!(granted(
-            &cluster_request_vote(&state, "b", 6, None).expect("vote")
+            &cluster_request_vote(&state, "b", 6, 0, None).expect("vote")
         ));
 
         // An unknown candidate is rejected outright, and no vote changes leadership.
-        assert!(cluster_request_vote(&state, "ghost", 7, None).is_err());
+        assert!(cluster_request_vote(&state, "ghost", 7, 0, None).is_err());
         {
             let cluster = state
                 .cluster
@@ -49747,6 +49865,7 @@ mod tests {
                 status: "online".to_string(),
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
+                applied_ops: 0,
             });
         }
 
@@ -50001,6 +50120,7 @@ mod tests {
                 status: "online".to_string(),
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
+                applied_ops: 0,
             });
         }
 
@@ -50101,6 +50221,7 @@ mod tests {
                 status: "online".to_string(),
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
+                applied_ops: 0,
             });
         }
 
@@ -50606,6 +50727,7 @@ mod tests {
                 status: "online".to_string(),
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
+                applied_ops: 0,
             });
         }
 
@@ -50650,6 +50772,7 @@ mod tests {
                 status: "online".to_string(),
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
+                applied_ops: 0,
             });
         }
 

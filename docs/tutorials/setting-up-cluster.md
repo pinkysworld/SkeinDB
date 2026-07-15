@@ -103,7 +103,7 @@ With this enabled, each node runs a background tick that:
 
 1. **Heartbeats** its peers so the cluster keeps a live health view (a node unseen for `SKEINDB_CLUSTER_NODE_TIMEOUT_MS`, default 15s, is considered offline).
 2. **Fences** itself if it is the primary but has lost quorum — it refuses writes (clients get a `fenced` error) so it can't diverge from the new primary the majority side will elect.
-3. **Elects** a new primary on the majority side: the freshest online replica requests votes from its peers (`cluster.request_vote`) and promotes itself only if a **majority** grant it. Each node votes at most once per election term, so at most one candidate can win — no split-brain.
+3. **Elects** a new primary on the majority side: the **most up-to-date** online replica (the one with the highest applied replication progress — heartbeats carry each node's `applied_ops`) requests votes from its peers (`cluster.request_vote`) and promotes itself only if a **majority** grant it. Each node votes at most once per election term, so at most one candidate can win — no split-brain. A voter also **refuses any candidate less caught up than itself** (Raft's log-matching rule), so the winner is guaranteed to hold every committed write — failover can't lose acknowledged data.
 
 Watch the failover decision live (read-only, safe to poll):
 
@@ -116,7 +116,7 @@ curl -s -XPOST http://127.0.0.1:8001/api/v1/rpc \
 
 > **Run 3+ nodes.** Quorum is a majority, so a 2-node cluster loses write availability when either node is down (neither side is a majority). Three nodes tolerate one failure; five tolerate two.
 
-Sharded clusters fail over **per shard** — each shard is its own replication group with an independent primary, quorum, leadership epoch, and election. With `SKEINDB_CLUSTER_AUTO_FAILOVER=1` the failover tick evaluates every shard as well as the whole cluster: a shard whose primary is down has the freshest online replica auto-promoted through a **per-shard** vote round (majority of that shard's node set), and a shard primary that loses its shard quorum is write-fenced. Watch every shard's readiness with `cluster.shard.failover.status`; promote manually with `cluster.replica.promote` + a `shard_id` (also quorum-gated). See [Configuration → Automated fenced failover](configuration.html#automated-fenced-failover-opt-in).
+Sharded clusters fail over **per shard** — each shard is its own replication group with an independent primary, quorum, leadership epoch, and election. With `SKEINDB_CLUSTER_AUTO_FAILOVER=1` the failover tick evaluates every shard as well as the whole cluster: a shard whose primary is down has its most up-to-date online replica auto-promoted through a **per-shard** vote round (majority of that shard's node set, with the same log-matching guarantee), and a shard primary that loses its shard quorum is write-fenced. Watch every shard's readiness with `cluster.shard.failover.status`; promote manually with `cluster.replica.promote` + a `shard_id` (also quorum-gated). See [Configuration → Automated fenced failover](configuration.html#automated-fenced-failover-opt-in).
 
 ## 7. Production notes
 
