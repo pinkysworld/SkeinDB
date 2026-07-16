@@ -313,7 +313,7 @@
 <tr>
 <td>Phase 14 Cluster scale-out</td>
 <td>Implemented baseline</td>
-<td>Node identity, replication, shard movement, CAS transfer, and routing hints exist.</td>
+<td>Node identity, replication, shard movement, CAS transfer, and routing hints exist. <strong>HA is hardened</strong>: automated fenced failover (whole-cluster + per-shard) with quorum fencing, leadership epoch, and a Raft-style vote round; <strong>data-safe election</strong> on true <code>(term, index)</code> log positions; <strong>self-healing replication</strong> (op-log <code>(term, seq)</code>, idempotent/gap-aware apply, leader-driven catch-up); and a <strong>commit index</strong> (majority-ack) propagated cluster-wide with per-node <code>commit_lag</code>. Remaining consensus follow-ons (read-committed replica reads, automated snapshot transfer for re-sync) are enhancements, not failover-safety gaps — see docs/CLUSTERING.md §2.5.</td>
 </tr>
 <tr>
 <td>Phase 15 Perf improvements</td>
