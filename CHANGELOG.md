@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.33 - 2026-07-16
+
+Logical snapshot export — the read-only primitive for re-syncing a replica that has fallen further behind than the op-log retains. Behavior-preserving for single-node deployments.
+
+- **Clustering — logical snapshot export (`cluster.replication.snapshot`).** A new read-only RPC exports a node's entire logical state as a sequence of **replayable ops** — `schema.create_database`, `schema.create_table` (carrying the table's `auto_inc_next` auto-increment counters so a re-synced node that is later promoted keeps generating non-colliding ids), and chunked `data.insert` (1024 rows per op) — tagged with the log position (`snapshot_term`/`snapshot_seq`) at which it was taken. Applying those ops to a fresh node faithfully reconstructs every database, table, and row (verified by a round-trip test), so an operator can re-sync a replica that reports `resync_required` today, and it is the primitive the automated re-sync flow plugs into. This is slice 4d of the replication-consensus roadmap; the *automated* wipe-and-apply on the replica (with an exact consistency barrier) and memory-bounded streaming of very large tables remain follow-ons, and are documented in `docs/CLUSTERING.md` §2.5.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a new end-to-end test that exports a snapshot from one node, applies its ops to a fresh node, and verifies every database, table, and row round-trips. Docs (`CLUSTERING.md`, `CONFIGURATION.md`) and the docs site updated.
+
 ## v0.3.32 - 2026-07-16
 
 Documentation and website consistency pass: brings the top-level `README`, the true-status matrix, and the website in line with the replication/consensus work shipped across v0.3.28–v0.3.31. No code changes.
