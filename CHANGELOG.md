@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.29 - 2026-07-16
+
+Commit index: SkeinDB now tracks and exposes how far a **majority** of the cluster has durably replicated — the foundation of true consensus, and a real durability signal for operators. Behavior-preserving for single-node deployments.
+
+- **Clustering — commit index (majority-ack).** Every node advertises its replication log position on each heartbeat — a replica its contiguous applied position, the primary its log head `op_seq` — and the primary computes the **commit index**: the highest `(term, seq)` a **majority** of nodes have applied. A write at or below the commit index is durable on a quorum, so it survives any single-node loss and any failover (the elected primary is always drawn from the majority). The position is exposed as `commit_term`/`commit_seq` by a new read RPC **`cluster.replication.status`** (which also returns `op_seq` and each node's `last_applied_*`). This is slice 4a of the replication-consensus roadmap; wiring the commit index into the election/reads and reconciling divergent logs across a leadership change (slice 4b) remains, and is documented in `docs/CLUSTERING.md` §2.5.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a pure-function unit test and an end-to-end test that drives the commit index from 0 to a committed position only once a majority of nodes report the write. Docs (`CLUSTERING.md`, `CONFIGURATION.md`) and the docs site updated.
+
 ## v0.3.28 - 2026-07-15
 
 Self-healing replication: a replica that falls behind — a transient network blip, or joining after writes have already happened — now **catches up automatically** instead of diverging permanently. Behavior-preserving for single-node and legacy senders.
