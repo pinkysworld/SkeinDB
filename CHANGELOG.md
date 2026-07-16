@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.30 - 2026-07-16
+
+Failover elections now decide on the true replication **log position** `(term, index)` rather than a heuristic count, completing the data-safety path of consensus: the elected primary provably holds every committed write. Behavior-preserving for single-node deployments and for clusters already on the previous count-based comparison.
+
+- **Clustering — failover election on true `(term, index)`.** Candidate selection (`elect_failover_candidate` and the per-shard variant) and the vote round (`cluster.request_vote`) now compare the true replication log position `(applied_term, applied_seq)` instead of the `applied_ops` count: a later leadership term always outranks an earlier one, a higher sequence wins within a term, and the count survives only as a legacy tie-breaker (nodes that predate log positions report `(0, 0)` and fall back to it). A voter refuses any candidate whose `(term, seq)` is behind its own (the Raft up-to-date rule). Combined with the commit index shipped in v0.3.29 and the majority-vote requirement, the elected primary is guaranteed to hold every committed write **by true log position, not a count** — closing the count-vs-`(term, index)` caveat for the failover-safety path. The change is backward-compatible: with positions unset the comparison reduces to the previous count-based behavior. The remaining consensus follow-ons (read-committed replica reads and automated snapshot transfer for re-syncing a divergent or too-far-behind replica) are enhancements rather than failover-safety gaps, and are documented in `docs/CLUSTERING.md` §2.5.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including new unit tests that prove a later log term is preferred over a higher count in both candidate selection and the vote gate. Docs (`CLUSTERING.md`, `CONFIGURATION.md`), the website, and the docs site updated.
+
 ## v0.3.29 - 2026-07-16
 
 Commit index: SkeinDB now tracks and exposes how far a **majority** of the cluster has durably replicated — the foundation of true consensus, and a real durability signal for operators. Behavior-preserving for single-node deployments.
