@@ -342,6 +342,13 @@ struct ClusterReplicationState {
     /// `last_applied_term`. A replica pulls ops after this position from the primary to catch up.
     #[serde(default)]
     last_applied_seq: u64,
+    /// Best-known cluster **commit index** `(commit_term, commit_seq)` — the log position a majority
+    /// of nodes have durably applied. The primary computes it from every node's position; a replica
+    /// adopts the primary's value from heartbeats. Lets any node report replication commit-lag.
+    #[serde(default)]
+    commit_term: u64,
+    #[serde(default)]
+    commit_seq: u64,
 }
 
 impl Default for ClusterReplicationState {
@@ -355,6 +362,8 @@ impl Default for ClusterReplicationState {
             op_seq: 0,
             last_applied_term: 0,
             last_applied_seq: 0,
+            commit_term: 0,
+            commit_seq: 0,
         }
     }
 }
@@ -19402,6 +19411,10 @@ pub(crate) async fn handle_rpc(
                         applied_term: u64,
                         #[serde(default)]
                         applied_seq: u64,
+                        #[serde(default)]
+                        commit_term: u64,
+                        #[serde(default)]
+                        commit_seq: u64,
                     }
                     let p: P = parse_params(params.clone())?;
                     cluster_node_heartbeat(
@@ -19410,6 +19423,8 @@ pub(crate) async fn handle_rpc(
                         p.applied_ops,
                         p.applied_term,
                         p.applied_seq,
+                        p.commit_term,
+                        p.commit_seq,
                     )
                 }
                 "cluster.join_token.create" => {
@@ -21473,7 +21488,20 @@ async fn sql_exec_http_handler(
 fn should_guard_cluster_write(method: &str) -> bool {
     if matches!(
         method,
-        "cluster.status" | "cluster.nodes" | "system.shutdown"
+        "cluster.status"
+            | "cluster.nodes"
+            | "system.shutdown"
+            // Peer-to-peer consensus + liveness RPCs and local reads: these must be processed
+            // locally on ANY node regardless of its primary/replica role — routing them to the
+            // primary would break heartbeats, elections, catch-up, and commit propagation on a
+            // node that has adopted a primary (the normal state of a real replica).
+            | "cluster.node.heartbeat"
+            | "cluster.request_vote"
+            | "cluster.leader.announce"
+            | "cluster.replication.fetch"
+            | "cluster.replication.status"
+            | "cluster.failover.status"
+            | "cluster.shard.failover.status"
     ) {
         return false;
     }
@@ -21917,16 +21945,26 @@ fn cluster_commit_position(cluster: &ClusterStateModel) -> (u64, u64) {
 }
 
 fn cluster_replication_status_json(state: &AppState) -> Value {
-    let (replication, commit) = {
+    let (mut replication, commit) = {
         let cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (
-            cluster.replication.clone(),
-            cluster_commit_position(&cluster),
-        )
+        // The primary computes the commit index fresh from every node's position; a replica reports
+        // the value it last adopted from the primary's heartbeat.
+        let commit = if cluster.local_node_id == cluster.primary_node_id {
+            cluster_commit_position(&cluster)
+        } else {
+            (
+                cluster.replication.commit_term,
+                cluster.replication.commit_seq,
+            )
+        };
+        (cluster.replication.clone(), commit)
     };
+    // Keep the reported commit index consistent with the per-role computation above.
+    replication.commit_term = commit.0;
+    replication.commit_seq = commit.1;
     let causality = state
         .replication_causality
         .lock()
@@ -21934,9 +21972,6 @@ fn cluster_replication_status_json(state: &AppState) -> Value {
         .clone();
     let mut value = serde_json::to_value(replication).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = value.as_object_mut() {
-        // The commit index: how far a majority of nodes have durably replicated.
-        obj.insert("commit_term".to_string(), Value::from(commit.0));
-        obj.insert("commit_seq".to_string(), Value::from(commit.1));
         if let Some(token) = causality {
             obj.insert(
                 "causality".to_string(),
@@ -22566,10 +22601,41 @@ fn cluster_failover_status(state: &AppState) -> Value {
     let reachable = reachable_member_count(&cluster.nodes, &cluster.local_node_id, now, timeout);
     let has_quorum = cluster_has_quorum(&cluster.nodes, &cluster.local_node_id, now, timeout);
     let local_is_primary = cluster.local_node_id == cluster.primary_node_id;
+    // The commit index (most accurate on the primary, which learns every node's position). Used to
+    // report how far each node's durably-applied log is behind the committed point.
+    let commit = cluster_commit_position(&cluster);
+    // This node's true log position for a given `ClusterNode`: the local node knows its own head
+    // (primary) or contiguous applied position (replica) precisely; a peer's is what it last
+    // advertised via heartbeat.
+    let node_position = |n: &ClusterNode| -> (u64, u64) {
+        if n.node_id == cluster.local_node_id {
+            if local_is_primary {
+                (cluster.leadership_epoch, cluster.replication.op_seq)
+            } else {
+                (
+                    cluster.replication.last_applied_term,
+                    cluster.replication.last_applied_seq,
+                )
+            }
+        } else {
+            (n.applied_term, n.applied_seq)
+        }
+    };
     let node_health: Vec<Value> = cluster
         .nodes
         .iter()
         .map(|n| {
+            let pos = node_position(n);
+            // How far this node is behind the commit index. 0 if it is at or ahead of the committed
+            // point; within a term it is the sequence gap; a whole-term deficit reports the commit
+            // sequence (a rough lower bound). Lets operators spot replicas behind on durability.
+            let commit_lag = if pos >= commit {
+                0
+            } else if pos.0 == commit.0 {
+                commit.1.saturating_sub(pos.1)
+            } else {
+                commit.1
+            };
             serde_json::json!({
                 "node_id": n.node_id,
                 "role": n.role,
@@ -22582,6 +22648,10 @@ fn cluster_failover_status(state: &AppState) -> Value {
                 // signal the data-safe election uses to pick the most up-to-date replica, so
                 // exposing it makes the failover decision auditable by operators.
                 "applied_ops": n.applied_ops,
+                // This node's contiguous log position and how far it is behind the commit index.
+                "applied_term": pos.0,
+                "applied_seq": pos.1,
+                "commit_lag": commit_lag,
             })
         })
         .collect();
@@ -22749,6 +22819,8 @@ fn cluster_node_heartbeat(
     applied_ops: u64,
     applied_term: u64,
     applied_seq: u64,
+    commit_term: u64,
+    commit_seq: u64,
 ) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     {
@@ -22756,6 +22828,7 @@ fn cluster_node_heartbeat(
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let is_primary_sender = node_id == cluster.primary_node_id;
         let node = cluster
             .nodes
             .iter_mut()
@@ -22771,6 +22844,18 @@ fn cluster_node_heartbeat(
         if (applied_term, applied_seq) > (node.applied_term, node.applied_seq) {
             node.applied_term = applied_term;
             node.applied_seq = applied_seq;
+        }
+        // Adopt the commit index the primary advertises (monotonic), so this replica can report how
+        // far behind the committed point it is.
+        if is_primary_sender
+            && (commit_term, commit_seq)
+                > (
+                    cluster.replication.commit_term,
+                    cluster.replication.commit_seq,
+                )
+        {
+            cluster.replication.commit_term = commit_term;
+            cluster.replication.commit_seq = commit_seq;
         }
     }
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
@@ -35755,8 +35840,17 @@ async fn announce_shard_leadership_to_peers(
 /// node so each peer refreshes the local node's liveness. Best-effort — an unreachable peer is
 /// simply not refreshed on our side and ages out to offline. No-op unless clustering is enabled.
 async fn run_cluster_heartbeat_once(state: &AppState) {
-    let (enabled, local_node_id, applied_ops, applied_term, applied_seq, targets) = {
-        let cluster = state
+    let (
+        enabled,
+        local_node_id,
+        applied_ops,
+        applied_term,
+        applied_seq,
+        commit_term,
+        commit_seq,
+        targets,
+    ) = {
+        let mut cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -35771,30 +35865,44 @@ async fn run_cluster_heartbeat_once(state: &AppState) {
                 cluster.replication.last_applied_seq,
             )
         };
+        // The primary recomputes the commit index from every node's position and records it; a
+        // replica advertises the value it last adopted from the primary. The receiver only adopts a
+        // commit index from the current primary, so a replica advertising its own value is harmless.
+        if cluster.local_node_id == cluster.primary_node_id {
+            let (ct, cs) = cluster_commit_position(&cluster);
+            cluster.replication.commit_term = ct;
+            cluster.replication.commit_seq = cs;
+        }
+        let targets = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.node_id != cluster.local_node_id)
+            .map(|n| n.rpc_url.clone())
+            .collect::<Vec<_>>();
         (
             cluster.enabled,
             cluster.local_node_id.clone(),
             cluster.replication.applied_ops,
             applied_term,
             applied_seq,
-            cluster
-                .nodes
-                .iter()
-                .filter(|n| n.node_id != cluster.local_node_id)
-                .map(|n| n.rpc_url.clone())
-                .collect::<Vec<_>>(),
+            cluster.replication.commit_term,
+            cluster.replication.commit_seq,
+            targets,
         )
     };
     if !enabled || targets.is_empty() {
         return;
     }
-    // Carry our replication progress + contiguous log position so peers can elect the most
-    // up-to-date replica on failover and the primary can compute the commit index.
+    // Carry our replication progress + contiguous log position (so peers can elect the most
+    // up-to-date replica on failover and the primary can compute the commit index) and the commit
+    // index (so replicas learn how far a majority has durably replicated).
     let params = serde_json::json!({
         "node_id": local_node_id,
         "applied_ops": applied_ops,
         "applied_term": applied_term,
         "applied_seq": applied_seq,
+        "commit_term": commit_term,
+        "commit_seq": commit_seq,
     });
     for rpc_url in targets {
         if let Err(err) =
@@ -37438,7 +37546,7 @@ mod tests {
             .to_string();
         assert_eq!(replica_health, "offline");
 
-        cluster_node_heartbeat(&state, "replica-1", 0, 0, 0).expect("heartbeat ok");
+        cluster_node_heartbeat(&state, "replica-1", 0, 0, 0, 0, 0).expect("heartbeat ok");
 
         let after = cluster_failover_status(&state);
         let replica_health = after["nodes"]
@@ -37453,7 +37561,7 @@ mod tests {
         assert_eq!(replica_health, "online");
 
         // An unknown node cannot heartbeat.
-        assert!(cluster_node_heartbeat(&state, "ghost", 0, 0, 0).is_err());
+        assert!(cluster_node_heartbeat(&state, "ghost", 0, 0, 0, 0, 0).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
