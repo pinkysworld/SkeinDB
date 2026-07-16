@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.32 - 2026-07-16
+
+Documentation and website consistency pass: brings the top-level `README`, the true-status matrix, and the website in line with the replication/consensus work shipped across v0.3.28–v0.3.31. No code changes.
+
+- **README.** The high-availability section now describes the full story: automated fenced failover (whole-cluster + per-shard), **data-safe failover on true `(term, index)` log positions**, **self-healing replication** (op-log + leader-driven catch-up), and the **commit index** (majority-ack durability with per-node `commit_lag`). Added an honest "still partial" note that the two remaining consensus enhancements (read-committed replica reads, automated snapshot transfer) are not failover-safety gaps.
+- **Status matrix.** `docs/TRUE_STATUS_MATRIX.md` (Phase 14 cluster scale-out) updated to reflect the hardened HA/replication/consensus surface and the remaining follow-ons, and the generated docs site regenerated to match.
+- **Website.** The home-page cluster card and the roadmap now mention the commit index and the true-`(term, index)` election alongside the existing self-healing and data-safe-failover language.
+
 ## v0.3.31 - 2026-07-16
 
 Commit-index propagation and durability observability across the cluster, and a fix for a latent guard bug that broke consensus RPCs on real replicas. Behavior-preserving for single-node deployments.
