@@ -483,12 +483,12 @@ async fn failover_vote_over_wire_enforces_log_matching() -> anyhow::Result<()> {
         })
         .ok_or_else(|| anyhow!("missing observer_node_id"))?;
 
-    // A candidate BEHIND the voter's replication progress is refused (a refused vote does not
+    // A candidate BEHIND the voter's log position `(term, seq)` is refused (a refused vote does not
     // record a term, so it can't taint the grant that follows).
     let refused = replica_client
         .rpc(
             "cluster.request_vote",
-            json!({"candidate": local_id, "term": 5000, "applied_ops": 0}),
+            json!({"candidate": local_id, "term": 5000, "last_term": 0, "last_seq": 0, "applied_ops": 0}),
         )
         .await?;
     assert!(refused.ok);
@@ -502,11 +502,11 @@ async fn failover_vote_over_wire_enforces_log_matching() -> anyhow::Result<()> {
         "a candidate behind on replication must be refused"
     );
 
-    // A candidate at least as caught up wins the vote in a fresh term.
+    // A candidate at least as caught up (higher log position) wins the vote in a fresh term.
     let granted = replica_client
         .rpc(
             "cluster.request_vote",
-            json!({"candidate": local_id, "term": 5000, "applied_ops": 1_000_000}),
+            json!({"candidate": local_id, "term": 5000, "last_term": 0, "last_seq": 1_000_000, "applied_ops": 1_000_000}),
         )
         .await?;
     assert!(granted.ok);
