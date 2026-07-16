@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.31 - 2026-07-16
+
+Commit-index propagation and durability observability across the cluster, and a fix for a latent guard bug that broke consensus RPCs on real replicas. Behavior-preserving for single-node deployments.
+
+- **Clustering — commit-index propagation + durability observability.** The primary already computed the commit index (the log position a majority has durably replicated); it now **advertises it on every heartbeat**, and each replica **adopts** it (monotonically, and only from the current primary). As a result `cluster.replication.status` reports `commit_term`/`commit_seq` on **every** node, and `cluster.failover.status` reports each node's `applied_term`/`applied_seq` and its **`commit_lag`** — how far behind the committed point that node is — so operators can see exactly which replicas are behind on durability and decide when one needs attention.
+- **Clustering — fix: peer consensus/liveness RPCs are processed locally.** The cluster write-guard was routing peer-to-peer consensus and liveness RPCs to the primary, so a node that had **adopted a primary** (the normal state of a real replica) would reject `cluster.node.heartbeat`, `cluster.request_vote`, `cluster.leader.announce`, `cluster.replication.fetch`/`.status`, `cluster.failover.status`, and `cluster.shard.failover.status` with a *“write routed to primary”* error. These are now always handled locally, which is required for heartbeats, elections, catch-up, and commit propagation to work on a real replica. (The prior test harness never made a replica adopt a different primary, so this was not previously exercised.)
+- This is slice 4c of the replication-consensus roadmap; the remaining follow-ons (read-committed replica reads and automated snapshot transfer for re-sync) are enhancements rather than failover-safety gaps and are documented in `docs/CLUSTERING.md` §2.5.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a new end-to-end test that a replica adopts the primary's advertised commit index (only from the primary, monotonically) and processes consensus RPCs locally after adopting a primary. Docs (`CLUSTERING.md`, `CONFIGURATION.md`) and the docs site updated.
+
 ## v0.3.30 - 2026-07-16
 
 Failover elections now decide on the true replication **log position** `(term, index)` rather than a heuristic count, completing the data-safety path of consensus: the elected primary provably holds every committed write. Behavior-preserving for single-node deployments and for clusters already on the previous count-based comparison.
