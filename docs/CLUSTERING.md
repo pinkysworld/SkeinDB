@@ -101,11 +101,13 @@ A replica's background loop then **pulls** whatever it is missing from the prima
 
 This corresponds to slices 1–3 of the roadmap below (op identity → gap-aware ordered apply → leader-driven catch-up). The failover **data-safety** guarantee (2.4) sits on top: `applied_ops` is monotonic, and with one primary per term positions share a common prefix, so "most-caught-up wins + a voter refuses a less-caught-up candidate" preserves every committed write.
 
-**Remaining: true `(term, index)` consensus.**
+**Toward true `(term, index)` consensus (slice 4, in progress).**
 
-4. **Commit index (majority-ack).** A write becomes "committed" once a majority has acked its `(term, seq)`; only committed ops are electable, the election compares true `(term, index)` positions, and a leadership change reconciles divergent log tails rather than adopting best-effort. Closes the count-vs-`(term, index)` caveat and completes the move from best-effort self-healing to full log-replication consensus. Sequenced as a dedicated project (see also the per-database lock-sharding finding in docs/PERFORMANCE.md §4b).
+4a. **Commit index (majority-ack) — shipped.** Each node advertises its log position on every heartbeat (a replica its contiguous applied position, the primary its log head `op_seq`), and the primary computes the **commit index**: the highest `(term, seq)` a majority of nodes have applied. A write at or below it is durable on a quorum, so it survives any single-node loss and any failover (the elected primary is drawn from the majority). Exposed as `commit_term`/`commit_seq` in `cluster.replication.status`.
 
-> **Scope note.** Slices 1–3 make steady-state replication self-healing (the common production case: a replica lags on a blip and recovers). Reconciling logs across a *leadership change* is best-effort until slice 4 — a replica adopts a new leader at the op that first reaches it, and if the buffer cannot cover the gap it falls back to a snapshot re-sync.
+4b. **Remaining.** Make the election and reads *use* the commit index — compare true `(term, index)` positions in the vote round (superseding the `applied_ops` count), gate replica reads to committed data, and reconcile divergent log tails on a leadership change (truncate/backfill) rather than adopting best-effort. This closes the count-vs-`(term, index)` caveat and completes the move to full log-replication consensus. Sequenced as a dedicated project (see also the per-database lock-sharding finding in docs/PERFORMANCE.md §4b).
+
+> **Scope note.** Slices 1–3 make steady-state replication self-healing (the common production case: a replica lags on a blip and recovers), and 4a makes majority-durability observable. Reconciling logs across a *leadership change* remains best-effort until 4b — a replica adopts a new leader at the op that first reaches it, and if the buffer cannot cover the gap it falls back to a snapshot re-sync.
 
 ---
 
@@ -212,4 +214,4 @@ Cluster settings section should include:
 - [x] CL07: sharding metadata + router prototype (write ownership + shard primary checks)
 - [x] CL08: shard move and rebalance (v1)
 - [x] CL09: automated fenced failover — quorum fencing, leadership epoch, Raft-style vote round (whole-cluster + per-shard), **data-safe election** (log-matching by `applied_ops`)
-- [~] CL10: self-healing replication (§2.5) — **shipped**: idempotent apply, gap-aware ordered apply, leader-driven catch-up (slices 1–3). Remaining: commit-index / true `(term, index)` consensus (slice 4)
+- [~] CL10: self-healing replication (§2.5) — **shipped**: idempotent apply, gap-aware ordered apply, leader-driven catch-up (slices 1–3), and the **commit index** (majority-ack, slice 4a). Remaining: wire the commit index into the election/reads + divergent-log reconciliation (slice 4b)
