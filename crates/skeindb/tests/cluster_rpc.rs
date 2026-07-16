@@ -721,6 +721,112 @@ async fn replication_commit_index_tracks_majority() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// End-to-end: a replica adopts the commit index the primary advertises on its heartbeat (and only
+/// the primary's), monotonically — so any node can report how far a majority has durably replicated.
+#[tokio::test]
+async fn replica_adopts_primary_commit_index() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let replica = HttpHarness::start("commitprop_replica")?;
+    let rc = RpcHttpClient::new(replica.base_url());
+
+    // Teach the replica about a primary "P" and a peer "other", and adopt P as leader.
+    for (id, role) in [("P", "primary"), ("other", "replica")] {
+        let token = rc
+            .rpc("cluster.join_token.create", json!({}))
+            .await?
+            .result
+            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+            .ok_or_else(|| anyhow!("missing token"))?;
+        assert!(
+            rc.rpc(
+                "cluster.node.join",
+                json!({"token": token, "node_id": id, "rpc_url": "http://127.0.0.1:9/", "role": role}),
+            )
+            .await?
+            .ok
+        );
+    }
+    assert!(
+        rc.rpc(
+            "cluster.leader.announce",
+            json!({"node_id": "P", "epoch": 1})
+        )
+        .await?
+        .ok
+    );
+
+    let commit_seq = |resp: &RpcResponse| -> u64 {
+        resp.result
+            .as_ref()
+            .and_then(|v| v.get("commit_seq"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX)
+    };
+
+    // A heartbeat from the primary carries the cluster commit index; the replica adopts it. (The
+    // replica has adopted P as its primary, so this also exercises that peer consensus/liveness
+    // RPCs are accepted locally rather than being routed to the primary.)
+    assert!(
+        rc.rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": "P", "applied_term": 0, "applied_seq": 9, "commit_term": 0, "commit_seq": 3}),
+        )
+        .await?
+        .ok
+    );
+    let status = rc.rpc("cluster.replication.status", json!({})).await?;
+    assert_eq!(
+        commit_seq(&status),
+        3,
+        "replica should adopt the primary's advertised commit index"
+    );
+
+    // A heartbeat from a NON-primary peer must not move the commit index.
+    assert!(
+        rc.rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": "other", "commit_seq": 99}),
+        )
+        .await?
+        .ok
+    );
+    let status = rc.rpc("cluster.replication.status", json!({})).await?;
+    assert_eq!(
+        commit_seq(&status),
+        3,
+        "only the primary's commit index is adopted"
+    );
+
+    // Monotonic: a lower primary commit index does not roll it back.
+    assert!(
+        rc.rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": "P", "commit_seq": 1}),
+        )
+        .await?
+        .ok
+    );
+    let status = rc.rpc("cluster.replication.status", json!({})).await?;
+    assert_eq!(commit_seq(&status), 3, "commit index does not regress");
+
+    // Other peer consensus / read RPCs are likewise accepted locally on a replica that has adopted
+    // a primary, rather than being (incorrectly) routed to the primary.
+    assert!(
+        rc.rpc(
+            "cluster.request_vote",
+            json!({"candidate": "other", "term": 10, "last_term": 0, "last_seq": 0}),
+        )
+        .await?
+        .ok,
+        "a replica must process request_vote locally, not route it to the primary"
+    );
+    assert!(
+        rc.rpc("cluster.failover.status", json!({})).await?.ok,
+        "a replica must serve failover.status locally"
+    );
+    Ok(())
+}
+
 /// End-to-end self-healing replication: a replica that missed writes entirely (they were made
 /// before it was pointed at the primary) automatically catches up via its background pull loop.
 #[tokio::test]
