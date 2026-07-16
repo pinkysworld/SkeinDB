@@ -626,6 +626,101 @@ async fn replication_fetch_serves_buffered_ops() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// End-to-end: the commit index advances only once a **majority** of nodes have applied a write.
+/// The primary learns each node's log position from heartbeats and reports the majority-held
+/// position as `commit_seq` in `cluster.replication.status`.
+#[tokio::test]
+async fn replication_commit_index_tracks_majority() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start("commit_primary")?;
+    let client = RpcHttpClient::new(primary.base_url());
+
+    // A 3-node cluster (quorum = 2): the primary plus two replicas registered by node id. Their
+    // fan-out targets are unreachable, but every write still advances the primary's op-log.
+    for id in ["r1", "r2"] {
+        let token = client
+            .rpc("cluster.join_token.create", json!({}))
+            .await?
+            .result
+            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+            .ok_or_else(|| anyhow!("missing token"))?;
+        assert!(
+            client
+                .rpc(
+                    "cluster.node.join",
+                    json!({"token": token, "node_id": id, "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+                )
+                .await?
+                .ok
+        );
+    }
+
+    // Three writes → the primary's log head is seq 3.
+    assert!(
+        client
+            .rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        client
+            .rpc(
+                "schema.create_table",
+                json!({
+                    "db": "app", "table": "users",
+                    "columns": [{"name": "id", "type": {"kind": "u64"}, "nullable": false}],
+                    "primary_key": ["id"]
+                }),
+            )
+            .await?
+            .ok
+    );
+    assert!(
+        client
+            .rpc(
+                "data.insert",
+                json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": 1}}]}),
+            )
+            .await?
+            .ok
+    );
+
+    let commit_seq = |resp: &RpcResponse| -> u64 {
+        resp.result
+            .as_ref()
+            .and_then(|v| v.get("commit_seq"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX)
+    };
+
+    // Only the primary holds seq 3 so far — not a majority → commit index has not reached it.
+    let status = client.rpc("cluster.replication.status", json!({})).await?;
+    assert_eq!(
+        commit_seq(&status),
+        0,
+        "commit must not advance before a majority applies the write"
+    );
+
+    // One replica reports it has applied up to seq 3 (via heartbeat). Now the primary + r1 form a
+    // majority at seq 3 → the commit index advances to 3.
+    assert!(
+        client
+            .rpc(
+                "cluster.node.heartbeat",
+                json!({"node_id": "r1", "applied_ops": 3, "applied_term": 0, "applied_seq": 3}),
+            )
+            .await?
+            .ok
+    );
+    let status = client.rpc("cluster.replication.status", json!({})).await?;
+    assert_eq!(
+        commit_seq(&status),
+        3,
+        "commit should advance once a majority (primary + r1) holds the write"
+    );
+    Ok(())
+}
+
 /// End-to-end self-healing replication: a replica that missed writes entirely (they were made
 /// before it was pointed at the primary) automatically catches up via its background pull loop.
 #[tokio::test]

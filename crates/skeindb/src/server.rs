@@ -289,6 +289,13 @@ struct ClusterNode {
     /// write that a majority already held.
     #[serde(default)]
     applied_ops: u64,
+    /// Last-known contiguous replication log position `(applied_term, applied_seq)` this node has
+    /// applied, propagated via heartbeats. The primary uses the majority position across all nodes
+    /// to compute the **commit index** — the point up to which a write is durable on a quorum.
+    #[serde(default)]
+    applied_term: u64,
+    #[serde(default)]
+    applied_seq: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -404,6 +411,8 @@ impl ClusterStateModel {
             joined_at_ms: ts,
             last_seen_ms: ts,
             applied_ops: 0,
+            applied_term: 0,
+            applied_seq: 0,
         };
         Self {
             enabled: false,
@@ -19364,6 +19373,7 @@ pub(crate) async fn handle_rpc(
                 }
                 "cluster.failover.status" => Ok(cluster_failover_status(state)),
                 "cluster.shard.failover.status" => Ok(cluster_shard_failover_status(state)),
+                "cluster.replication.status" => Ok(cluster_replication_status_json(state)),
                 "cluster.replication.fetch" => {
                     #[derive(serde::Deserialize)]
                     struct P {
@@ -19388,9 +19398,19 @@ pub(crate) async fn handle_rpc(
                         node_id: String,
                         #[serde(default)]
                         applied_ops: u64,
+                        #[serde(default)]
+                        applied_term: u64,
+                        #[serde(default)]
+                        applied_seq: u64,
                     }
                     let p: P = parse_params(params.clone())?;
-                    cluster_node_heartbeat(state, &p.node_id, p.applied_ops)
+                    cluster_node_heartbeat(
+                        state,
+                        &p.node_id,
+                        p.applied_ops,
+                        p.applied_term,
+                        p.applied_seq,
+                    )
                 }
                 "cluster.join_token.create" => {
                     let p = if params.is_some() {
@@ -21847,24 +21867,76 @@ fn note_applied_replication(
     persist_cluster_state(state).ok();
 }
 
+/// The **commit index**: the highest log position `(term, seq)` that a quorum (majority) of nodes
+/// have applied. Given each node's advertised position and the quorum size, it is the `quorum`-th
+/// highest position — at least `quorum` nodes have reached at or beyond it. Pure + unit-testable.
+///
+/// A write at or below the commit index is durable on a majority, so it survives any single-node
+/// loss and any failover (the elected primary is drawn from the majority). Returns `(0, 0)` when
+/// there is no quorum yet.
+fn replication_commit_position(mut positions: Vec<(u64, u64)>, quorum: usize) -> (u64, u64) {
+    if quorum == 0 || positions.len() < quorum {
+        return (0, 0);
+    }
+    positions.sort_unstable_by(|a, b| b.cmp(a)); // descending
+    positions[quorum - 1]
+}
+
+/// Compute the commit position from the local view of the cluster. Most accurate on the primary,
+/// which learns every node's position from heartbeats; the primary counts its own log head
+/// (`op_seq`), replicas count their contiguous applied position.
+fn cluster_commit_position(cluster: &ClusterStateModel) -> (u64, u64) {
+    let quorum = cluster_quorum_size(cluster.nodes.len());
+    let local_is_primary = cluster.local_node_id == cluster.primary_node_id;
+    let local_pos = if local_is_primary {
+        (cluster.leadership_epoch, cluster.replication.op_seq)
+    } else {
+        (
+            cluster.replication.last_applied_term,
+            cluster.replication.last_applied_seq,
+        )
+    };
+    let positions: Vec<(u64, u64)> = cluster
+        .nodes
+        .iter()
+        .map(|n| {
+            if n.node_id == cluster.local_node_id {
+                local_pos
+            } else {
+                (n.applied_term, n.applied_seq)
+            }
+        })
+        .collect();
+    replication_commit_position(positions, quorum)
+}
+
 fn cluster_replication_status_json(state: &AppState) -> Value {
-    let replication = state
-        .cluster
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .replication
-        .clone();
+    let (replication, commit) = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            cluster.replication.clone(),
+            cluster_commit_position(&cluster),
+        )
+    };
     let causality = state
         .replication_causality
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let mut value = serde_json::to_value(replication).unwrap_or_else(|_| serde_json::json!({}));
-    if let (Some(obj), Some(token)) = (value.as_object_mut(), causality) {
-        obj.insert(
-            "causality".to_string(),
-            serde_json::to_value(token).unwrap_or(Value::Null),
-        );
+    if let Some(obj) = value.as_object_mut() {
+        // The commit index: how far a majority of nodes have durably replicated.
+        obj.insert("commit_term".to_string(), Value::from(commit.0));
+        obj.insert("commit_seq".to_string(), Value::from(commit.1));
+        if let Some(token) = causality {
+            obj.insert(
+                "causality".to_string(),
+                serde_json::to_value(token).unwrap_or(Value::Null),
+            );
+        }
     }
     value
 }
@@ -21928,6 +22000,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.nodes",
         "cluster.failover.status",
         "cluster.shard.failover.status",
+        "cluster.replication.status",
         "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
@@ -22078,6 +22151,8 @@ fn cluster_node_join(state: &AppState, params: ClusterNodeJoinParams) -> Result<
                 joined_at_ms: now,
                 last_seen_ms: now,
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             };
             cluster.nodes.push(node.clone());
             node
@@ -22144,6 +22219,8 @@ fn cluster_node_remove(
                     joined_at_ms: now_unix_ms_u64(),
                     last_seen_ms: now_unix_ms_u64(),
                     applied_ops: 0,
+                    applied_term: 0,
+                    applied_seq: 0,
                 });
             }
         }
@@ -22659,6 +22736,8 @@ fn cluster_node_heartbeat(
     state: &AppState,
     node_id: &str,
     applied_ops: u64,
+    applied_term: u64,
+    applied_seq: u64,
 ) -> Result<Value, RpcError> {
     let now = now_unix_ms_u64();
     {
@@ -22676,6 +22755,12 @@ fn cluster_node_heartbeat(
         // Record the sender's replication progress (monotonic) so failover can elect the most
         // up-to-date replica.
         node.applied_ops = node.applied_ops.max(applied_ops);
+        // Record the sender's contiguous log position, advancing only forward, so the primary can
+        // compute the commit index (the position a majority of nodes have durably applied).
+        if (applied_term, applied_seq) > (node.applied_term, node.applied_seq) {
+            node.applied_term = applied_term;
+            node.applied_seq = applied_seq;
+        }
     }
     persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
     Ok(serde_json::json!({
@@ -33582,6 +33667,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cluster.nodes",
         "cluster.failover.status",
         "cluster.shard.failover.status",
+        "cluster.replication.status",
         "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
@@ -35627,15 +35713,28 @@ async fn announce_shard_leadership_to_peers(
 /// node so each peer refreshes the local node's liveness. Best-effort — an unreachable peer is
 /// simply not refreshed on our side and ages out to offline. No-op unless clustering is enabled.
 async fn run_cluster_heartbeat_once(state: &AppState) {
-    let (enabled, local_node_id, applied_ops, targets) = {
+    let (enabled, local_node_id, applied_ops, applied_term, applied_seq, targets) = {
         let cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The log position we advertise: the primary holds its whole log up to `op_seq`, whereas a
+        // replica advertises how far it has contiguously applied. This is what the primary counts
+        // toward the commit index.
+        let (applied_term, applied_seq) = if cluster.local_node_id == cluster.primary_node_id {
+            (cluster.leadership_epoch, cluster.replication.op_seq)
+        } else {
+            (
+                cluster.replication.last_applied_term,
+                cluster.replication.last_applied_seq,
+            )
+        };
         (
             cluster.enabled,
             cluster.local_node_id.clone(),
             cluster.replication.applied_ops,
+            applied_term,
+            applied_seq,
             cluster
                 .nodes
                 .iter()
@@ -35647,8 +35746,14 @@ async fn run_cluster_heartbeat_once(state: &AppState) {
     if !enabled || targets.is_empty() {
         return;
     }
-    // Carry our replication progress so peers can elect the most up-to-date replica on failover.
-    let params = serde_json::json!({ "node_id": local_node_id, "applied_ops": applied_ops });
+    // Carry our replication progress + contiguous log position so peers can elect the most
+    // up-to-date replica on failover and the primary can compute the commit index.
+    let params = serde_json::json!({
+        "node_id": local_node_id,
+        "applied_ops": applied_ops,
+        "applied_term": applied_term,
+        "applied_seq": applied_seq,
+    });
     for rpc_url in targets {
         if let Err(err) =
             call_remote_rpc_result(&rpc_url, "cluster.node.heartbeat", params.clone()).await
@@ -36047,6 +36152,8 @@ fn load_cluster_state(state: &AppState) -> anyhow::Result<()> {
                 joined_at_ms: now,
                 last_seen_ms: now,
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
     }
@@ -36693,6 +36800,8 @@ mod tests {
             joined_at_ms: 0,
             last_seen_ms,
             applied_ops: 0,
+            applied_term: 0,
+            applied_seq: 0,
         }
     }
 
@@ -36943,6 +37052,28 @@ mod tests {
     }
 
     #[test]
+    fn commit_position_is_the_majority_held_log_position() {
+        // 3 nodes, quorum 2: the 2nd-highest position — a majority hold at least it.
+        assert_eq!(
+            replication_commit_position(vec![(1, 10), (1, 8), (1, 5)], 2),
+            (1, 8)
+        );
+        // 5 nodes, quorum 3: a lagging minority (9, 2) can't hold commit back below the 3rd-highest.
+        assert_eq!(
+            replication_commit_position(vec![(1, 20), (1, 18), (1, 15), (1, 9), (1, 2)], 3),
+            (1, 15)
+        );
+        // A newer term outranks a higher seq in an older term.
+        assert_eq!(
+            replication_commit_position(vec![(2, 1), (2, 1), (1, 99)], 2),
+            (2, 1)
+        );
+        // No quorum yet → nothing is committed.
+        assert_eq!(replication_commit_position(vec![(1, 10)], 2), (0, 0));
+        assert_eq!(replication_commit_position(vec![], 1), (0, 0));
+    }
+
+    #[test]
     fn election_prefers_most_up_to_date_replica() {
         let now = 100_000u64;
         let timeout = 15_000u64;
@@ -37160,7 +37291,7 @@ mod tests {
             .to_string();
         assert_eq!(replica_health, "offline");
 
-        cluster_node_heartbeat(&state, "replica-1", 0).expect("heartbeat ok");
+        cluster_node_heartbeat(&state, "replica-1", 0, 0, 0).expect("heartbeat ok");
 
         let after = cluster_failover_status(&state);
         let replica_health = after["nodes"]
@@ -37175,7 +37306,7 @@ mod tests {
         assert_eq!(replica_health, "online");
 
         // An unknown node cannot heartbeat.
-        assert!(cluster_node_heartbeat(&state, "ghost", 0).is_err());
+        assert!(cluster_node_heartbeat(&state, "ghost", 0, 0, 0).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -37543,7 +37674,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 153);
+        assert_eq!(methods.len(), 154);
         assert!(methods.contains(&"cluster.failover.status"));
         assert!(methods.contains(&"cluster.shard.failover.status"));
         assert!(methods.contains(&"cluster.node.heartbeat"));
@@ -50230,6 +50361,8 @@ mod tests {
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
 
@@ -50485,6 +50618,8 @@ mod tests {
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
 
@@ -50586,6 +50721,8 @@ mod tests {
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
 
@@ -51092,6 +51229,8 @@ mod tests {
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
 
@@ -51137,6 +51276,8 @@ mod tests {
                 joined_at_ms: now_unix_ms_u64(),
                 last_seen_ms: now_unix_ms_u64(),
                 applied_ops: 0,
+                applied_term: 0,
+                applied_seq: 0,
             });
         }
 
