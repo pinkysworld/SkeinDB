@@ -522,6 +522,146 @@ async fn failover_vote_over_wire_enforces_log_matching() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `cluster.replication.snapshot` exports full logical state as replayable ops, and applying those
+/// ops to a fresh node faithfully reconstructs every database, table, and row — the basis for a
+/// re-sync when a replica has fallen further behind than the op-log retains.
+#[tokio::test]
+async fn replication_snapshot_export_round_trips_full_state() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let source = HttpHarness::start("snapshot_source")?;
+    let sc = RpcHttpClient::new(source.base_url());
+
+    // Build state across two databases and two tables.
+    for db in ["shop", "blog"] {
+        assert!(
+            sc.rpc("schema.create_database", json!({"db": db}))
+                .await?
+                .ok
+        );
+    }
+    assert!(
+        sc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "shop", "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    for (id, name) in [(1u64, "Nora"), (2, "Ivan"), (3, "Mara")] {
+        assert!(
+            sc.rpc(
+                "data.insert",
+                json!({
+                    "into": {"db": "shop", "table": "users"},
+                    "rows": [{"id": {"t": "u64", "v": id}, "name": {"t": "str", "v": name}}]
+                }),
+            )
+            .await?
+            .ok
+        );
+    }
+    assert!(
+        sc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "blog", "table": "posts",
+                "columns": [{"name": "slug", "type": {"kind": "str"}, "nullable": false}],
+                "primary_key": ["slug"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        sc.rpc(
+            "data.insert",
+            json!({"into": {"db": "blog", "table": "posts"}, "rows": [{"slug": {"t": "str", "v": "hello"}}]}),
+        )
+        .await?
+        .ok
+    );
+
+    // Export the snapshot.
+    let snap = sc.rpc("cluster.replication.snapshot", json!({})).await?;
+    assert!(snap.ok);
+    let ops = snap
+        .result
+        .as_ref()
+        .and_then(|v| v.get("ops"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(!ops.is_empty(), "snapshot should contain replayable ops");
+
+    // Apply the exported ops, in order, to a fresh node.
+    let target = HttpHarness::start("snapshot_target")?;
+    let tc = RpcHttpClient::new(target.base_url());
+    for op in &ops {
+        let method = op
+            .get("method")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("snapshot op missing method"))?;
+        let params = op.get("params").cloned().unwrap_or_else(|| json!({}));
+        let resp = tc.rpc(method, params).await?;
+        assert!(
+            resp.ok,
+            "applying snapshot op '{}' failed: {:?}",
+            method, resp.error
+        );
+    }
+
+    // The full state round-trips: rows in both databases and the table listing.
+    let got = tc
+        .rpc(
+            "data.get",
+            json!({"table": {"db": "shop", "table": "users"}, "pk": [{"t": "u64", "v": 2}]}),
+        )
+        .await?;
+    assert_eq!(
+        got.result
+            .as_ref()
+            .and_then(|v| v.get("row"))
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.get("v"))
+            .and_then(|v| v.as_str()),
+        Some("Ivan"),
+        "shop.users row should round-trip through the snapshot"
+    );
+    assert!(
+        tc.rpc(
+            "data.get",
+            json!({"table": {"db": "blog", "table": "posts"}, "pk": [{"t": "str", "v": "hello"}]}),
+        )
+        .await?
+        .ok,
+        "blog.posts row should round-trip through the snapshot"
+    );
+    let tables = tc.rpc("schema.list_tables", json!({"db": "shop"})).await?;
+    let names: Vec<String> = tables
+        .result
+        .as_ref()
+        .and_then(|v| v.get("tables"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.contains(&"users".to_string()),
+        "shop.users table should exist after applying the snapshot"
+    );
+    Ok(())
+}
+
 /// The primary's op-log buffer serves a lagging replica's catch-up pull: `cluster.replication.fetch`
 /// returns the ops after a given position, in order, and nothing once caught up.
 #[tokio::test]
