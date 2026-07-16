@@ -19383,6 +19383,34 @@ pub(crate) async fn handle_rpc(
                 "cluster.failover.status" => Ok(cluster_failover_status(state)),
                 "cluster.shard.failover.status" => Ok(cluster_shard_failover_status(state)),
                 "cluster.replication.status" => Ok(cluster_replication_status_json(state)),
+                "cluster.replication.snapshot" => {
+                    // A read-only logical snapshot of the primary's full state as replayable ops
+                    // (schema.create_database / schema.create_table / data.insert), tagged with the
+                    // log position at which it was taken. The basis for re-syncing a replica that has
+                    // fallen further behind than the op-log retains. `snapshot_seq` is captured before
+                    // the export (a lower bound on what the snapshot contains); the automated
+                    // wipe-and-apply flow that consumes this — and the exact consistency barrier —
+                    // is a follow-on (see docs/CLUSTERING.md §2.5 slice 4d).
+                    let (snapshot_term, snapshot_seq) = {
+                        let cluster = state
+                            .cluster
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        (cluster.leadership_epoch, cluster.replication.op_seq)
+                    };
+                    let ops = {
+                        let engine = state.engine.read().await;
+                        engine
+                            .snapshot_export()
+                            .map_err(|e| RpcError::new("internal", e.to_string()))?
+                    };
+                    Ok(serde_json::json!({
+                        "snapshot_term": snapshot_term,
+                        "snapshot_seq": snapshot_seq,
+                        "op_count": ops.len(),
+                        "ops": ops,
+                    }))
+                }
                 "cluster.replication.fetch" => {
                     #[derive(serde::Deserialize)]
                     struct P {
@@ -21500,6 +21528,7 @@ fn should_guard_cluster_write(method: &str) -> bool {
             | "cluster.leader.announce"
             | "cluster.replication.fetch"
             | "cluster.replication.status"
+            | "cluster.replication.snapshot"
             | "cluster.failover.status"
             | "cluster.shard.failover.status"
     ) {
@@ -22042,6 +22071,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.failover.status",
         "cluster.shard.failover.status",
         "cluster.replication.status",
+        "cluster.replication.snapshot",
         "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
@@ -33776,6 +33806,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "cluster.failover.status",
         "cluster.shard.failover.status",
         "cluster.replication.status",
+        "cluster.replication.snapshot",
         "cluster.replication.fetch",
         "cluster.join_token.create",
         "cluster.node.join",
@@ -37929,7 +37960,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 154);
+        assert_eq!(methods.len(), 155);
         assert!(methods.contains(&"cluster.failover.status"));
         assert!(methods.contains(&"cluster.shard.failover.status"));
         assert!(methods.contains(&"cluster.node.heartbeat"));

@@ -2710,6 +2710,67 @@ impl Engine {
         }))
     }
 
+    /// Export the full logical state of every database as a sequence of replayable ops
+    /// (`schema.create_database`, `schema.create_table`, `data.insert`). Applying these ops to a
+    /// fresh node reconstructs the same schemas and rows — the basis for re-syncing a replica that
+    /// has fallen further behind than the op-log retains (see docs/CLUSTERING.md §2.5). Read-only.
+    ///
+    /// Rows are chunked into bounded `data.insert` batches. The `create_table` op carries the
+    /// table's auto-increment counters (`auto_inc_next`) so a re-synced node that is later promoted
+    /// keeps generating non-colliding ids. Databases and tables are emitted in sorted order so the
+    /// export is deterministic. (Memory-bounded streaming of very large tables is a follow-on; today
+    /// each table's rows are gathered before chunking.)
+    pub fn snapshot_export(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        const ROWS_PER_INSERT: usize = 1024;
+        let mut ops = Vec::new();
+        let mut databases = self.list_databases();
+        databases.sort();
+        for db in databases {
+            ops.push(serde_json::json!({
+                "method": "schema.create_database",
+                "params": { "db": db },
+            }));
+            let mut tables = self.list_tables(&db)?;
+            tables.sort();
+            for table in tables {
+                let schema = self.get_schema(&db, &table)?;
+                ops.push(serde_json::json!({
+                    "method": "schema.create_table",
+                    "params": {
+                        "db": db,
+                        "table": table,
+                        "columns": serde_json::to_value(&schema.columns)?,
+                        "primary_key": schema.primary_key.clone(),
+                        "auto_inc_next": schema.auto_inc_next.clone(),
+                    },
+                }));
+                let base = BaseTableRef {
+                    db: db.clone(),
+                    table: table.clone(),
+                    r#as: None,
+                };
+                let (_schema, tdata) = self.get_table(&base)?;
+                let mut rows: Vec<serde_json::Value> = Vec::new();
+                self.for_each_table_row(&db, &table, tdata, |entry| {
+                    if !entry.deleted {
+                        rows.push(serde_json::to_value(&entry.row)?);
+                    }
+                    Ok(())
+                })?;
+                for chunk in rows.chunks(ROWS_PER_INSERT) {
+                    ops.push(serde_json::json!({
+                        "method": "data.insert",
+                        "params": {
+                            "into": { "db": db, "table": table },
+                            "rows": chunk.to_vec(),
+                        },
+                    }));
+                }
+            }
+        }
+        Ok(ops)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn schema_set_column_interned(
         &mut self,
