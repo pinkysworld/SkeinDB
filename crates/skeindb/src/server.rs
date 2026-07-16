@@ -19459,6 +19459,10 @@ pub(crate) async fn handle_rpc(
                         #[serde(default)]
                         applied_ops: u64,
                         #[serde(default)]
+                        last_term: u64,
+                        #[serde(default)]
+                        last_seq: u64,
+                        #[serde(default)]
                         shard_id: Option<String>,
                     }
                     let p: P = parse_params(params.clone())?;
@@ -19467,6 +19471,8 @@ pub(crate) async fn handle_rpc(
                         &p.candidate,
                         p.term,
                         p.applied_ops,
+                        p.last_term,
+                        p.last_seq,
                         p.shard_id.as_deref(),
                     )
                 }
@@ -22392,11 +22398,14 @@ fn elect_failover_candidate(
                 && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
         })
         .collect();
-    // Prefer the most up-to-date replica (highest applied replication progress) so failover loses
-    // the least data; break ties by freshest heartbeat, then by node_id for determinism.
+    // Prefer the most up-to-date replica so failover loses the least data. "Most up-to-date" is the
+    // true Raft log position `(applied_term, applied_seq)` — a later term always outranks an earlier
+    // one, and within a term a higher sequence wins — with the `applied_ops` count as a legacy
+    // tie-breaker (nodes predating log positions report `(0, 0)` and fall back to it). Ties then
+    // break by freshest heartbeat, then by node_id for determinism.
     candidates.sort_by(|a, b| {
-        b.applied_ops
-            .cmp(&a.applied_ops)
+        (b.applied_term, b.applied_seq, b.applied_ops)
+            .cmp(&(a.applied_term, a.applied_seq, a.applied_ops))
             .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
@@ -22661,10 +22670,12 @@ fn shard_failover_candidate(
                 && evaluate_node_health(n, local_node_id, now_ms, timeout_ms) == NodeHealth::Online
         })
         .collect();
-    // Most up-to-date replica first (least data loss), ties by freshest heartbeat then node_id.
+    // Most up-to-date replica first (least data loss) by true log position `(applied_term,
+    // applied_seq)`, with the `applied_ops` count as a legacy tie-breaker; ties then by freshest
+    // heartbeat then node_id.
     candidates.sort_by(|a, b| {
-        b.applied_ops
-            .cmp(&a.applied_ops)
+        (b.applied_term, b.applied_seq, b.applied_ops)
+            .cmp(&(a.applied_term, a.applied_seq, a.applied_ops))
             .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
@@ -22941,6 +22952,8 @@ fn cluster_request_vote(
     candidate: &str,
     term: u64,
     candidate_applied_ops: u64,
+    candidate_last_term: u64,
+    candidate_last_seq: u64,
     shard_id: Option<&str>,
 ) -> Result<Value, RpcError> {
     let (granted, current_epoch) = {
@@ -22951,11 +22964,21 @@ fn cluster_request_vote(
         if !cluster.nodes.iter().any(|n| n.node_id == candidate) {
             return Err(RpcError::new("not_found", "candidate not in cluster"));
         }
-        // Raft log-matching / up-to-date rule: never vote for a candidate less caught up on
-        // replication than we are. Since a committed write is replicated to a majority, and a
-        // winner needs a majority of votes, the winner is guaranteed to hold every committed
-        // write — so failover cannot lose acknowledged data.
-        let up_to_date = candidate_applied_ops >= cluster.replication.applied_ops;
+        // Raft log-matching / up-to-date rule: never vote for a candidate whose log is less
+        // up-to-date than ours. "Up-to-date" compares the true log position `(term, seq)` — a later
+        // term outranks an earlier one, a higher sequence wins within a term — with the `applied_ops`
+        // count as a legacy tie-breaker for nodes that predate log positions. Since a committed write
+        // is on a majority and a winner needs a majority of votes, the winner is guaranteed to hold
+        // every committed write — so failover cannot lose acknowledged data.
+        let up_to_date = (
+            candidate_last_term,
+            candidate_last_seq,
+            candidate_applied_ops,
+        ) >= (
+            cluster.replication.last_applied_term,
+            cluster.replication.last_applied_seq,
+            cluster.replication.applied_ops,
+        );
         match shard_id {
             // Per-shard election: vote at most once per (shard, term), and only for a term newer
             // than the shard's current leader — independent of the whole-cluster election.
@@ -35464,7 +35487,7 @@ async fn run_cluster_failover_tick(state: &AppState) {
 async fn run_cluster_election(state: &AppState, local: &str, now_ms: u64, timeout_ms: u64) {
     // Start the term and vote for ourselves (recording it so we won't also vote for a rival at
     // this term). Bail if we've lost quorum or already become primary since the snapshot.
-    let (term, quorum, peer_urls, applied_ops) = {
+    let (term, quorum, peer_urls, applied_ops, last_term, last_seq) = {
         let mut cluster = state
             .cluster
             .lock()
@@ -35484,15 +35507,27 @@ async fn run_cluster_election(state: &AppState, local: &str, now_ms: u64, timeou
             .filter(|n| n.node_id != local)
             .map(|n| n.rpc_url.clone())
             .collect();
-        (term, quorum, peer_urls, cluster.replication.applied_ops)
+        (
+            term,
+            quorum,
+            peer_urls,
+            cluster.replication.applied_ops,
+            cluster.replication.last_applied_term,
+            cluster.replication.last_applied_seq,
+        )
     };
     let _ = persist_cluster_state(state);
 
-    // Collect votes from peers (best effort). We already have our own vote. Our replication
-    // progress is included so peers apply the log-matching rule.
+    // Collect votes from peers (best effort). We already have our own vote. Our log position
+    // `(last_term, last_seq)` + progress count is included so peers apply the up-to-date rule.
     let mut votes = 1usize;
-    let params =
-        serde_json::json!({ "candidate": local, "term": term, "applied_ops": applied_ops });
+    let params = serde_json::json!({
+        "candidate": local,
+        "term": term,
+        "applied_ops": applied_ops,
+        "last_term": last_term,
+        "last_seq": last_seq,
+    });
     for rpc_url in peer_urls {
         if let Ok(resp) =
             call_remote_rpc_result(&rpc_url, "cluster.request_vote", params.clone()).await
@@ -35586,7 +35621,7 @@ async fn run_shard_election(
     now_ms: u64,
     timeout_ms: u64,
 ) {
-    let Some((term, quorum, peer_urls, applied_ops)) = ({
+    let Some((term, quorum, peer_urls, applied_ops, last_term, last_seq)) = ({
         let mut cluster = state
             .cluster
             .lock()
@@ -35617,14 +35652,21 @@ async fn run_shard_election(
         cluster
             .shard_votes
             .insert(shard_id.to_string(), (term, local.to_string()));
-        Some((term, quorum, peer_urls, cluster.replication.applied_ops))
+        Some((
+            term,
+            quorum,
+            peer_urls,
+            cluster.replication.applied_ops,
+            cluster.replication.last_applied_term,
+            cluster.replication.last_applied_seq,
+        ))
     }) else {
         return;
     };
     let _ = persist_cluster_state(state);
 
     let mut votes = 1usize;
-    let params = serde_json::json!({ "candidate": local, "term": term, "applied_ops": applied_ops, "shard_id": shard_id });
+    let params = serde_json::json!({ "candidate": local, "term": term, "applied_ops": applied_ops, "last_term": last_term, "last_seq": last_seq, "shard_id": shard_id });
     for rpc_url in peer_urls {
         if let Ok(resp) =
             call_remote_rpc_result(&rpc_url, "cluster.request_vote", params.clone()).await
@@ -36960,26 +37002,63 @@ mod tests {
 
         // Shard s1: candidate `a` wins term 2; a second candidate `b` at term 2 is refused;
         // `a` re-requesting the same term is idempotently granted.
-        assert!(g(
-            &cluster_request_vote(&state, "a", 2, 0, Some("s1")).expect("v")
-        ));
-        assert!(!g(
-            &cluster_request_vote(&state, "b", 2, 0, Some("s1")).expect("v")
-        ));
-        assert!(g(
-            &cluster_request_vote(&state, "a", 2, 0, Some("s1")).expect("v")
-        ));
+        assert!(g(&cluster_request_vote(
+            &state,
+            "a",
+            2,
+            0,
+            0,
+            0,
+            Some("s1")
+        )
+        .expect("v")));
+        assert!(!g(&cluster_request_vote(
+            &state,
+            "b",
+            2,
+            0,
+            0,
+            0,
+            Some("s1")
+        )
+        .expect("v")));
+        assert!(g(&cluster_request_vote(
+            &state,
+            "a",
+            2,
+            0,
+            0,
+            0,
+            Some("s1")
+        )
+        .expect("v")));
         // Shard s2 is a SEPARATE election: `b` can win term 2 on s2 even though `a` won it on s1.
-        assert!(g(
-            &cluster_request_vote(&state, "b", 2, 0, Some("s2")).expect("v")
-        ));
+        assert!(g(&cluster_request_vote(
+            &state,
+            "b",
+            2,
+            0,
+            0,
+            0,
+            Some("s2")
+        )
+        .expect("v")));
         // A term not newer than the shard's leader epoch (or an already-voted term) is refused.
-        assert!(!g(
-            &cluster_request_vote(&state, "a", 1, 0, Some("s1")).expect("v")
-        ));
+        assert!(!g(&cluster_request_vote(
+            &state,
+            "a",
+            1,
+            0,
+            0,
+            0,
+            Some("s1")
+        )
+        .expect("v")));
         // Unknown shard errors; a whole-cluster vote is independent of shard votes.
-        assert!(cluster_request_vote(&state, "a", 3, 0, Some("ghost")).is_err());
-        assert!(g(&cluster_request_vote(&state, "a", 5, 0, None).expect("v")));
+        assert!(cluster_request_vote(&state, "a", 3, 0, 0, 0, Some("ghost")).is_err());
+        assert!(g(
+            &cluster_request_vote(&state, "a", 5, 0, 0, 0, None).expect("v")
+        ));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -37100,6 +37179,74 @@ mod tests {
     }
 
     #[test]
+    fn election_prefers_higher_log_term_over_count() {
+        let now = 100_000u64;
+        let timeout = 15_000u64;
+        // r1 has a far higher applied_ops COUNT but is on an OLDER log term; r2 is on a NEWER term.
+        // The true `(term, seq)` position wins — r2 — because a later term always supersedes an
+        // earlier one, regardless of the raw count (which is only a legacy tie-breaker).
+        let mut r1 = cnode("r1", "replica", "online", now - 500);
+        r1.applied_ops = 100;
+        r1.applied_term = 1;
+        r1.applied_seq = 100;
+        let mut r2 = cnode("r2", "replica", "online", now - 500);
+        r2.applied_ops = 3;
+        r2.applied_term = 2;
+        r2.applied_seq = 3;
+        let nodes = vec![cnode("p", "primary", "online", now - 60_000), r1, r2];
+        assert_eq!(
+            elect_failover_candidate(&nodes, "p", "obs", now, timeout)
+                .expect("failover")
+                .candidate_node_id,
+            "r2"
+        );
+        let shard = cshard("s1", "p", &["r1", "r2"]);
+        assert_eq!(
+            shard_failover_candidate(&shard, &nodes, "obs", now, timeout),
+            Some("r2".to_string())
+        );
+    }
+
+    #[test]
+    fn request_vote_uses_log_position_over_count() -> anyhow::Result<()> {
+        let dir = temp_dir("vote_log_position");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut cluster = state
+                .cluster
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cluster.enabled = true;
+            cluster.local_node_id = "voter".to_string();
+            cluster.primary_node_id = "old".to_string();
+            cluster.nodes = vec![
+                cnode("voter", "replica", "online", now_unix_ms_u64()),
+                cnode("a", "replica", "online", now_unix_ms_u64()),
+                cnode("old", "primary", "online", 0),
+            ];
+            // Voter is at log position (term 2, seq 5) and has applied a large op count.
+            cluster.replication.applied_ops = 100;
+            cluster.replication.last_applied_term = 2;
+            cluster.replication.last_applied_seq = 5;
+        }
+        let granted = |v: &Value| v["granted"].as_bool().unwrap();
+
+        // A candidate with a HIGHER op count (200) and higher seq but on an OLDER term (1) is
+        // REFUSED — its log is less up-to-date despite the bigger numbers, because term dominates.
+        assert!(!granted(
+            &cluster_request_vote(&state, "a", 5, 200, 1, 999, None).expect("v")
+        ));
+        // A candidate on a NEWER term (3) with a tiny count and seq is GRANTED — a later term wins.
+        assert!(granted(
+            &cluster_request_vote(&state, "a", 5, 1, 3, 1, None).expect("v")
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn request_vote_applies_log_matching() -> anyhow::Result<()> {
         let dir = temp_dir("vote_log_matching");
         let engine = Engine::open(&dir)?;
@@ -37126,19 +37273,19 @@ mod tests {
         // Whole-cluster: a candidate BEHIND the voter (applied 5 < 10) is refused even for a fresh
         // term — promoting it could lose a write the voter already holds.
         assert!(!granted(
-            &cluster_request_vote(&state, "a", 5, 5, None).expect("v")
+            &cluster_request_vote(&state, "a", 5, 5, 0, 0, None).expect("v")
         ));
         // A candidate at least as caught up (applied 10 >= 10) is granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 5, 10, None).expect("v")
+            &cluster_request_vote(&state, "a", 5, 10, 0, 0, None).expect("v")
         ));
 
         // Per-shard votes apply the same log-matching rule.
         assert!(!granted(
-            &cluster_request_vote(&state, "a", 5, 5, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "a", 5, 5, 0, 0, Some("s1")).expect("v")
         ));
         assert!(granted(
-            &cluster_request_vote(&state, "a", 6, 10, Some("s1")).expect("v")
+            &cluster_request_vote(&state, "a", 6, 10, 0, 0, Some("s1")).expect("v")
         ));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -37543,19 +37690,19 @@ mod tests {
 
         // Fresh term (4 > leader epoch 3): candidate "a" is granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4, 0, None).expect("vote")
+            &cluster_request_vote(&state, "a", 4, 0, 0, 0, None).expect("vote")
         ));
         // Idempotent re-request from the same candidate/term is still granted.
         assert!(granted(
-            &cluster_request_vote(&state, "a", 4, 0, None).expect("vote")
+            &cluster_request_vote(&state, "a", 4, 0, 0, 0, None).expect("vote")
         ));
         // A SECOND candidate "b" in the same term is refused (one vote per term = safety).
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 4, 0, None).expect("vote")
+            &cluster_request_vote(&state, "b", 4, 0, 0, 0, None).expect("vote")
         ));
         // A lower/equal term than one already voted is refused.
         assert!(!granted(
-            &cluster_request_vote(&state, "b", 3, 0, None).expect("vote")
+            &cluster_request_vote(&state, "b", 3, 0, 0, 0, None).expect("vote")
         ));
         // A term that does not exceed the recognized leader epoch is refused even if unvoted.
         //   (bump leader epoch to 5; a term of 5 must not unseat it)
@@ -37567,15 +37714,15 @@ mod tests {
             cluster.leadership_epoch = 5;
         }
         assert!(!granted(
-            &cluster_request_vote(&state, "a", 5, 0, None).expect("vote")
+            &cluster_request_vote(&state, "a", 5, 0, 0, 0, None).expect("vote")
         ));
         // But a term newer than both the vote and the leader is granted again.
         assert!(granted(
-            &cluster_request_vote(&state, "b", 6, 0, None).expect("vote")
+            &cluster_request_vote(&state, "b", 6, 0, 0, 0, None).expect("vote")
         ));
 
         // An unknown candidate is rejected outright, and no vote changes leadership.
-        assert!(cluster_request_vote(&state, "ghost", 7, 0, None).is_err());
+        assert!(cluster_request_vote(&state, "ghost", 7, 0, 0, 0, None).is_err());
         {
             let cluster = state
                 .cluster

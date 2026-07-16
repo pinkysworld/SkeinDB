@@ -210,6 +210,7 @@
       <li><span class="tid">SEC</span><span class="status s-done">done</span>RBAC on the RPC path — role + per-token database scope + per-user database grants</li>
       <li><span class="tid">HA</span><span class="status s-done">done</span>Automated fenced failover (whole-cluster + per-shard) — heartbeat detection, quorum fencing, leadership epoch, Raft-style vote round with log matching (data-safe election)</li>
       <li><span class="tid">REPL</span><span class="status s-done">done</span>Self-healing replication — op-log <code>(term, seq)</code>, idempotent/gap-aware apply, leader-driven catch-up (a lagging replica pulls what it missed)</li>
+      <li><span class="tid">CONS</span><span class="status s-done">done</span>Consensus core — commit index (majority-ack) + failover election on true <code>(term, index)</code> log positions, so the elected primary provably holds every committed write</li>
     </ul>
   </div>
 
