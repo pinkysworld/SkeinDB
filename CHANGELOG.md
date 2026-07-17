@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.36 - 2026-07-17
+
+Prometheus metrics for cluster/replication/consensus health — the HA story is now monitorable with the standard toolchain, not only via the `cluster.*` JSON RPCs.
+
+- **Observability — cluster/replication metrics on `/metrics`.** The Prometheus endpoint now emits a cluster section: `skeindb_cluster_enabled`, `skeindb_cluster_is_primary`, `skeindb_cluster_nodes_total`, `skeindb_cluster_nodes_online`, `skeindb_cluster_shards_total`, `skeindb_cluster_leadership_epoch`, `skeindb_replication_op_seq` (the primary's log head), `skeindb_replication_applied_seq` (this node's applied position), `skeindb_replication_commit_seq` (the commit index), `skeindb_replication_commit_lag` (committed sequences this node has not yet applied — 0 on the primary), and the counters `skeindb_replication_shipped_ops_total`, `skeindb_replication_applied_ops_total`, and `skeindb_replication_failed_ops_total`. Alert on rising `commit_lag`, non-zero `failed_ops`, or `nodes_online` below quorum. Additive and read-only.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a new end-to-end test that scrapes `/metrics` and asserts the cluster series are present. Docs (`OBSERVABILITY.md`) and the docs site updated.
+
 ## v0.3.35 - 2026-07-17
 
 Opt-in read-committed replica reads — the final piece of the replication/consensus story. Behavior-preserving by default (reads stay fresh unless `read_committed` is requested).
