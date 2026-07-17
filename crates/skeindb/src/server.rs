@@ -20220,9 +20220,10 @@ pub(crate) async fn handle_rpc(
                         wire: Option<WireHints>,
                         #[serde(default)]
                         as_of: Option<Lit>,
-                        /// Serve a **read-committed** view: on a replica, exclude writes a majority
-                        /// has not yet acknowledged (which a failover could still supersede). Ignored
-                        /// if an explicit `as_of` is given; a no-op on the primary / non-clustered.
+                        /// Serve a **read-committed** view: exclude writes a majority has not yet
+                        /// acknowledged (which a failover could still supersede) — on the primary or
+                        /// any replica. Ignored if an explicit `as_of` is given; a fresh read on a
+                        /// non-clustered node or a node with no uncommitted tail.
                         #[serde(default)]
                         read_committed: bool,
                     }
@@ -21858,6 +21859,19 @@ fn record_replication_op(state: &AppState, method: &str, params: &Value) -> Opti
             log.pop_front();
         }
     }
+    // Record this op's apply time so a `read_committed` query on the primary can also find the
+    // commit boundary (the primary's writes are uncommitted until a majority acks them). Mirrors
+    // the replica-side recording in `note_applied_replication`.
+    {
+        let mut times = state
+            .applied_op_times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        times.push_back((op_term, op_seq, now_unix_ms_u64()));
+        while times.len() > REPLICATION_APPLIED_TIMES_CAP {
+            times.pop_front();
+        }
+    }
     Some((op_term, op_seq))
 }
 
@@ -22122,27 +22136,37 @@ fn note_applied_replication(
 /// *before* the first uncommitted op, so `row_visible_at` includes every committed row and excludes
 /// every uncommitted one — a read never returns a write a majority has not yet acknowledged.
 fn read_committed_as_of(state: &AppState) -> Option<u64> {
-    let (commit_pos, applied_pos, is_replica, enabled) = {
+    let (commit_pos, applied_pos, enabled) = {
         let cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (
-            (
-                cluster.replication.commit_term,
-                cluster.replication.commit_seq,
-            ),
+        let is_primary = cluster.local_node_id == cluster.primary_node_id;
+        // This node's own log position: the primary holds its whole log up to `op_seq`; a replica
+        // holds its contiguous applied position. Either can be ahead of the commit index.
+        let applied_pos = if is_primary {
+            (cluster.leadership_epoch, cluster.replication.op_seq)
+        } else {
             (
                 cluster.replication.last_applied_term,
                 cluster.replication.last_applied_seq,
-            ),
-            cluster.local_node_id != cluster.primary_node_id,
-            cluster.enabled,
-        )
+            )
+        };
+        // The primary computes the commit index fresh (its stored copy only refreshes on the
+        // heartbeat tick); a replica uses the value it last adopted from the primary.
+        let commit_pos = if is_primary {
+            cluster_commit_position(&cluster)
+        } else {
+            (
+                cluster.replication.commit_term,
+                cluster.replication.commit_seq,
+            )
+        };
+        (commit_pos, applied_pos, cluster.enabled)
     };
-    // Fresh read: the primary and non-clustered nodes serve the authoritative latest state, and a
-    // replica whose applied position is at/behind the commit index has no uncommitted tail.
-    if !enabled || !is_replica || applied_pos <= commit_pos {
+    // Fresh read: a non-clustered node has no separate committed view, and any node whose log
+    // position is at/behind the commit index has no uncommitted tail to hide.
+    if !enabled || applied_pos <= commit_pos {
         return None;
     }
     let times = state

@@ -2425,7 +2425,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skeindb"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "anyhow",
  "anza-quinn",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-core"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "aes-gcm-siv",
  "blake3",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-ir"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "serde",
  "serde_json",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-skeinql"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "serde",
  "serde_json",

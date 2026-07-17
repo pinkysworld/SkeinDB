@@ -1519,6 +1519,100 @@ async fn read_committed_query_excludes_uncommitted_tail() -> anyhow::Result<()> 
     Ok(())
 }
 
+/// `read_committed` also works on the **primary**: its own not-yet-majority-acknowledged writes are
+/// excluded, while a normal read serves them.
+#[tokio::test]
+async fn read_committed_on_primary_excludes_uncommitted() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start("readcommitted_primary")?;
+    let pc = RpcHttpClient::new(primary.base_url());
+
+    // Enable clustering with a second (unreachable) node so a majority requires that node.
+    let token = pc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("token"))?;
+    assert!(
+        pc.rpc(
+            "cluster.node.join",
+            json!({"token": token, "node_id": "r", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        pc.rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        pc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app", "table": "users",
+                "columns": [{"name": "id", "type": {"kind": "u64"}, "nullable": false}],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    // Three inserts (log seqs 3,4,5), spaced so their commit_ts_ms differ.
+    for id in [1u64, 2, 3] {
+        assert!(
+            pc.rpc(
+                "data.insert",
+                json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": id}}]}),
+            )
+            .await?
+            .ok
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // The other node reports it has applied up to seq 4, so the commit index is seq 4 (majority =
+    // primary + r): seqs ≤ 4 are committed (id 1,2), seq 5 (id 3) is not.
+    assert!(
+        pc.rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": "r", "applied_term": 0, "applied_seq": 4}),
+        )
+        .await?
+        .ok
+    );
+
+    let count = |resp: &RpcResponse| -> usize {
+        resp.result
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|d| d.get("rows"))
+            .and_then(|r| r.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+    let all = pc
+        .rpc(
+            "query.select",
+            json!({"query": select_query("app", "users", &["id"])}),
+        )
+        .await?;
+    assert_eq!(count(&all), 3, "normal read on the primary sees all writes");
+    let committed = pc
+        .rpc(
+            "query.select",
+            json!({"query": select_query("app", "users", &["id"]), "read_committed": true}),
+        )
+        .await?;
+    assert_eq!(
+        count(&committed),
+        2,
+        "read_committed on the primary excludes its uncommitted write (id 3)"
+    );
+    Ok(())
+}
+
 /// The Prometheus `/metrics` endpoint exposes cluster / replication / consensus health so an HA
 /// deployment is scrapeable, not only observable via the `cluster.*` JSON RPCs.
 #[tokio::test]
