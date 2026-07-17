@@ -178,6 +178,7 @@ Currently exported (text `version=0.0.4`):
 - **Latency quantiles:** `skeindb_query_latency_ms{quantile="0.5"|"0.95"|"0.99"}` over recent samples
 - **Storage-engine internals** (cheap, never a full row scan): `skeindb_tables`, `skeindb_streaming_tables`, `skeindb_dirty_tables`, `skeindb_mutations_since_flush` (deferred-flush lag), `skeindb_wal_bytes`, `skeindb_rows_total`
 - **Index advisor:** `skeindb_advisor_suggestions_total`, `skeindb_advisor_applied_total`, `skeindb_advisor_rejected_total`, `skeindb_advisor_estimated_saved_ms_total`
+- **Cluster / replication / consensus health** (so an HA deployment is scrapeable, not only via the `cluster.*` JSON RPCs): `skeindb_cluster_enabled`, `skeindb_cluster_is_primary`, `skeindb_cluster_nodes_total`, `skeindb_cluster_nodes_online`, `skeindb_cluster_shards_total`, `skeindb_cluster_leadership_epoch`, `skeindb_replication_op_seq` (primary log head), `skeindb_replication_applied_seq` (this node's applied position), `skeindb_replication_commit_seq` (commit index), `skeindb_replication_commit_lag` (committed sequences not yet applied here — 0 on the primary), and counters `skeindb_replication_shipped_ops_total` / `skeindb_replication_applied_ops_total` / `skeindb_replication_failed_ops_total`. Alert on rising `commit_lag`, non-zero `failed_ops`, or `nodes_online` below quorum.
 
 Slow-query log: set `SKEINDB_SLOW_QUERY_MS=<ms>` to log every completed query at or above the threshold at WARN (method, duration, rows, status, fingerprint), in addition to the `stats.slow_queries` RPC.
 
