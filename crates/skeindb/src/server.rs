@@ -91,6 +91,9 @@ const REPLICATION_SEQ_HEADER: &str = "x-skeindb-replication-seq";
 const REPLICATION_LOG_BUFFER_CAP: usize = 4096;
 /// Max ops a replica pulls per catch-up round (`cluster.replication.fetch`).
 const REPLICATION_CATCHUP_BATCH: usize = 256;
+/// Bound on the replica-side `(term, seq) → apply_ms` ring used to find the `read_committed`
+/// visibility boundary. Comfortably larger than any realistic uncommitted-tail window.
+const REPLICATION_APPLIED_TIMES_CAP: usize = 8192;
 const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
 const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
 const CDC_SSE_BATCH_LIMIT: u64 = 64;
@@ -257,6 +260,11 @@ pub(crate) struct AppState {
     /// consistent with the state it exports (so post-resync catch-up neither skips nor
     /// duplicate-applies an op). Both paths acquire this before the engine lock — never the reverse.
     seq_barrier: Arc<tokio::sync::RwLock<()>>,
+    /// Replica side: apply wall-clock time (`(term, seq) → apply_ms`) of recently-applied replicated
+    /// ops, newest at the back, bounded. A `read_committed` query serves `as_of` the moment just
+    /// before the first *uncommitted* op (its `commit_ts_ms` boundary), so it never returns a write
+    /// that a majority has not yet acknowledged (and could still be superseded by a failover).
+    applied_op_times: Arc<Mutex<std::collections::VecDeque<(u64, u64, u64)>>>,
     counters: Arc<Mutex<Counters>>,
     txns: Arc<Mutex<HashMap<String, TxSession>>>,
 
@@ -16977,6 +16985,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         replication_causality: Arc::new(Mutex::new(None)),
         replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         seq_barrier: Arc::new(tokio::sync::RwLock::new(())),
+        applied_op_times: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         counters: Arc::new(Mutex::new(Counters::default())),
         txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
@@ -20108,12 +20117,26 @@ pub(crate) async fn handle_rpc(
                         wire: Option<WireHints>,
                         #[serde(default)]
                         as_of: Option<Lit>,
+                        /// Serve a **read-committed** view: on a replica, exclude writes a majority
+                        /// has not yet acknowledged (which a failover could still supersede). Ignored
+                        /// if an explicit `as_of` is given; a no-op on the primary / non-clustered.
+                        #[serde(default)]
+                        read_committed: bool,
                     }
                     let p: P = parse_params(params.clone())?;
-                    let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
-                    let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
+                    let mut want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
+                    let mut if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
                     let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
-                    let as_of_ms = lit_to_epoch_ms(p.as_of.as_ref())?;
+                    let mut as_of_ms = lit_to_epoch_ms(p.as_of.as_ref())?;
+                    if p.read_committed && as_of_ms.is_none() {
+                        if let Some(committed_as_of) = read_committed_as_of(state) {
+                            as_of_ms = Some(committed_as_of);
+                            // The query etag doesn't encode `as_of`, so a read-committed result must
+                            // not share a cache entry with a fresh read — bypass the etag path.
+                            want_etag = false;
+                            if_none_match = None;
+                        }
+                    }
 
                     let mut known: HashSet<String> = HashSet::new();
                     let mut use_skeinpack = false;
@@ -21963,6 +21986,19 @@ fn note_applied_replication(
         cluster.replication.last_updated_ms = now_unix_ms_u64();
     }
 
+    // Record this op's apply wall-clock time so a `read_committed` query can find the `commit_ts_ms`
+    // boundary of the first uncommitted op. Bounded ring; oldest entries drop off.
+    if let Some((term, seq)) = applied_position {
+        let mut times = state
+            .applied_op_times
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        times.push_back((term, seq, now_unix_ms_u64()));
+        while times.len() > REPLICATION_APPLIED_TIMES_CAP {
+            times.pop_front();
+        }
+    }
+
     if let Some(token) = causality {
         let mut current = state
             .replication_causality
@@ -21975,6 +22011,52 @@ fn note_applied_replication(
     }
 
     persist_cluster_state(state).ok();
+}
+
+/// The `as_of` timestamp for a `read_committed` query on this node, or `None` to serve a fresh read.
+/// Returns `None` on the primary, on a non-clustered node, or when the replica has no uncommitted
+/// tail (it has already committed everything it applied). Otherwise it is the `commit_ts_ms` just
+/// *before* the first uncommitted op, so `row_visible_at` includes every committed row and excludes
+/// every uncommitted one — a read never returns a write a majority has not yet acknowledged.
+fn read_committed_as_of(state: &AppState) -> Option<u64> {
+    let (commit_pos, applied_pos, is_replica, enabled) = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            (
+                cluster.replication.commit_term,
+                cluster.replication.commit_seq,
+            ),
+            (
+                cluster.replication.last_applied_term,
+                cluster.replication.last_applied_seq,
+            ),
+            cluster.local_node_id != cluster.primary_node_id,
+            cluster.enabled,
+        )
+    };
+    // Fresh read: the primary and non-clustered nodes serve the authoritative latest state, and a
+    // replica whose applied position is at/behind the commit index has no uncommitted tail.
+    if !enabled || !is_replica || applied_pos <= commit_pos {
+        return None;
+    }
+    let times = state
+        .applied_op_times
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Use the apply time of the newest *committed* op (position ≤ commit). We record an op's apply
+    // time *after* its row's `commit_ts_ms` is set, and ops apply strictly in order, so this
+    // timestamp is ≥ every committed row's `commit_ts_ms` and < the first uncommitted row's — the
+    // exact `as_of` that includes all committed rows and excludes all uncommitted ones.
+    if let Some((_, _, ms)) = times.iter().rev().find(|(t, s, _)| (*t, *s) <= commit_pos) {
+        return Some(*ms);
+    }
+    // No committed op remains in the ring (its window predates what we retain — rare, since the ring
+    // dwarfs any realistic uncommitted tail): fall back to just before the oldest retained apply,
+    // which is conservatively safe (everything older is committed).
+    times.front().map(|(_, _, ms)| ms.saturating_sub(1))
 }
 
 /// The **commit index**: the highest log position `(term, seq)` that a quorum (majority) of nodes
@@ -38492,6 +38574,7 @@ mod tests {
             replication_causality: Arc::new(Mutex::new(None)),
             replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             seq_barrier: Arc::new(tokio::sync::RwLock::new(())),
+            applied_op_times: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             counters: Arc::new(Mutex::new(Counters::default())),
             txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
