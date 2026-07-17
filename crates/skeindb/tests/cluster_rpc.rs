@@ -1383,6 +1383,142 @@ async fn replica_resync_converges_under_concurrent_writes() -> anyhow::Result<()
     Ok(())
 }
 
+/// A `read_committed` query on a replica excludes writes a majority has not yet acknowledged
+/// (the uncommitted tail), while a normal query still serves the latest applied state.
+#[tokio::test]
+async fn read_committed_query_excludes_uncommitted_tail() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let replica = HttpHarness::start("readcommitted_replica")?;
+    let rc = RpcHttpClient::new(replica.base_url());
+
+    // Apply a replicated op to the replica at a specific log position (as the primary's fan-out
+    // would), via a raw POST carrying the replication + sequence headers.
+    async fn apply_at(base: &str, method: &str, params: serde_json::Value, seq: u64) -> bool {
+        let body =
+            json!({"id": "t", "skeinql": SKEINQL_VERSION, "method": method, "params": params});
+        reqwest::Client::new()
+            .post(format!("{}/api/v1/rpc", base.trim_end_matches('/')))
+            .header("x-skeindb-replication", "1")
+            .header("x-skeindb-replication-seq", format!("0:{seq}"))
+            .json(&body)
+            .send()
+            .await
+            .ok()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
+    // The replica must know a primary (so it counts as a replica with a commit index).
+    let rtok = rc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("token"))?;
+    assert!(
+        rc.rpc(
+            "cluster.node.join",
+            json!({"token": rtok, "node_id": "P", "rpc_url": "http://127.0.0.1:9/", "role": "primary"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        rc.rpc(
+            "cluster.leader.announce",
+            json!({"node_id": "P", "epoch": 1})
+        )
+        .await?
+        .ok
+    );
+
+    let base = replica.base_url();
+    assert!(apply_at(&base, "schema.create_database", json!({"db": "app"}), 1).await);
+    assert!(
+        apply_at(
+            &base,
+            "schema.create_table",
+            json!({
+                "db": "app", "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+            2,
+        )
+        .await
+    );
+    // Inserts at seqs 3..6, with a gap between each so their commit_ts_ms are distinct milliseconds.
+    for (seq, id, name) in [
+        (3u64, 1u64, "committed_a"),
+        (4, 2, "committed_b"),
+        (5, 3, "uncommitted_c"),
+        (6, 4, "uncommitted_d"),
+    ] {
+        assert!(
+            apply_at(
+                &base,
+                "data.insert",
+                json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": id}, "name": {"t": "str", "v": name}}]}),
+                seq,
+            )
+            .await
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // The primary advertises the commit index: seqs ≤ 4 are committed (ids 1,2); 5,6 are not.
+    assert!(
+        rc.rpc(
+            "cluster.node.heartbeat",
+            json!({"node_id": "P", "applied_term": 0, "applied_seq": 6, "commit_term": 0, "commit_seq": 4}),
+        )
+        .await?
+        .ok
+    );
+
+    let row_count = |resp: &RpcResponse| -> usize {
+        resp.result
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|d| d.get("rows"))
+            .and_then(|r| r.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+
+    // A normal read sees all four applied rows.
+    let all = rc
+        .rpc(
+            "query.select",
+            json!({"query": select_query("app", "users", &["id", "name"])}),
+        )
+        .await?;
+    assert!(all.ok);
+    assert_eq!(
+        row_count(&all),
+        4,
+        "normal read should see the latest applied state"
+    );
+
+    // A read-committed read excludes the two uncommitted rows.
+    let committed = rc
+        .rpc(
+            "query.select",
+            json!({"query": select_query("app", "users", &["id", "name"]), "read_committed": true}),
+        )
+        .await?;
+    assert!(committed.ok);
+    assert_eq!(
+        row_count(&committed),
+        2,
+        "read_committed should exclude the uncommitted tail (ids 3,4)"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
