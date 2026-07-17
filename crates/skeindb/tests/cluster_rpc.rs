@@ -1519,6 +1519,76 @@ async fn read_committed_query_excludes_uncommitted_tail() -> anyhow::Result<()> 
     Ok(())
 }
 
+/// The Prometheus `/metrics` endpoint exposes cluster / replication / consensus health so an HA
+/// deployment is scrapeable, not only observable via the `cluster.*` JSON RPCs.
+#[tokio::test]
+async fn metrics_endpoint_exposes_replication_health() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let node = HttpHarness::start("metrics_replication")?;
+    let client = RpcHttpClient::new(node.base_url());
+
+    // Enable clustering (dummy join) and make a couple of writes so the log sequence advances.
+    let token = client
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("token"))?;
+    assert!(
+        client
+            .rpc(
+                "cluster.node.join",
+                json!({"token": token, "node_id": "dummy", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+            )
+            .await?
+            .ok
+    );
+    assert!(
+        client
+            .rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+
+    let body = reqwest::Client::new()
+        .get(format!("{}/metrics", node.base_url().trim_end_matches('/')))
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    for metric in [
+        "skeindb_cluster_enabled",
+        "skeindb_cluster_nodes_total",
+        "skeindb_cluster_leadership_epoch",
+        "skeindb_replication_op_seq",
+        "skeindb_replication_applied_seq",
+        "skeindb_replication_commit_seq",
+        "skeindb_replication_commit_lag",
+        "skeindb_replication_shipped_ops_total",
+    ] {
+        assert!(
+            body.contains(metric),
+            "/metrics should expose {metric}\n---\n{body}"
+        );
+    }
+    // Clustering is enabled and at least one op (create_database) was logged.
+    assert!(
+        body.contains("skeindb_cluster_enabled 1"),
+        "clustering should report enabled"
+    );
+    let op_seq = body
+        .lines()
+        .find_map(|l| l.strip_prefix("skeindb_replication_op_seq "))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(
+        op_seq >= 1,
+        "op_seq should have advanced past 0, got {op_seq}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;

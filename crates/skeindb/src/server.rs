@@ -18156,6 +18156,109 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         ));
     }
 
+    // Cluster / replication / consensus health — so an HA deployment is monitorable via Prometheus,
+    // not only the `cluster.*` JSON RPCs.
+    {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = now_unix_ms_u64();
+        let timeout = cluster_node_timeout_ms();
+        let is_primary = cluster.local_node_id == cluster.primary_node_id;
+        let commit = cluster_commit_position(&cluster);
+        let local_seq = if is_primary {
+            cluster.replication.op_seq
+        } else {
+            cluster.replication.last_applied_seq
+        };
+        let online = reachable_member_count(&cluster.nodes, &cluster.local_node_id, now, timeout);
+        for (name, help, kind, value) in [
+            (
+                "skeindb_cluster_enabled",
+                "Clustering enabled (1) or not (0)",
+                "gauge",
+                cluster.enabled as u64,
+            ),
+            (
+                "skeindb_cluster_is_primary",
+                "This node is the whole-cluster primary (1/0)",
+                "gauge",
+                is_primary as u64,
+            ),
+            (
+                "skeindb_cluster_nodes_total",
+                "Number of nodes known to the cluster",
+                "gauge",
+                cluster.nodes.len() as u64,
+            ),
+            (
+                "skeindb_cluster_nodes_online",
+                "Nodes this node observes as online by heartbeat",
+                "gauge",
+                online as u64,
+            ),
+            (
+                "skeindb_cluster_shards_total",
+                "Number of shards",
+                "gauge",
+                cluster.shards.len() as u64,
+            ),
+            (
+                "skeindb_cluster_leadership_epoch",
+                "Current whole-cluster leadership epoch (fencing token)",
+                "gauge",
+                cluster.leadership_epoch,
+            ),
+            (
+                "skeindb_replication_op_seq",
+                "Highest replication log sequence assigned by the primary",
+                "gauge",
+                cluster.replication.op_seq,
+            ),
+            (
+                "skeindb_replication_applied_seq",
+                "This node's contiguous applied replication log sequence",
+                "gauge",
+                cluster.replication.last_applied_seq,
+            ),
+            (
+                "skeindb_replication_commit_seq",
+                "Commit index sequence — the position a majority has durably replicated",
+                "gauge",
+                commit.1,
+            ),
+            (
+                "skeindb_replication_commit_lag",
+                "Committed sequences this node has not yet applied (0 on the primary)",
+                "gauge",
+                commit.1.saturating_sub(local_seq),
+            ),
+            (
+                "skeindb_replication_shipped_ops_total",
+                "Replicated writes shipped to peers",
+                "counter",
+                cluster.replication.shipped_ops,
+            ),
+            (
+                "skeindb_replication_applied_ops_total",
+                "Replicated writes applied from the primary",
+                "counter",
+                cluster.replication.applied_ops,
+            ),
+            (
+                "skeindb_replication_failed_ops_total",
+                "Replication ship failures",
+                "counter",
+                cluster.replication.failed_ops,
+            ),
+        ] {
+            body.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+            ));
+        }
+    }
+
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 
