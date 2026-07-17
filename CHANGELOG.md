@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.37 - 2026-07-17
+
+Read-committed reads now work on the primary too, and the remaining large item (per-database write-lock sharding) is scoped with a concrete design. Behavior-preserving by default.
+
+- **Clustering — read-committed reads on the primary.** `query.select` with `"read_committed": true` previously applied only to replicas; it now also works on the **primary**, excluding the primary's own writes that a majority has not yet acknowledged (which a failover could still supersede). The primary records the apply time of each write it originates and computes its commit index fresh, then serves the read `as_of` the commit boundary via MVCC time-travel — so the guarantee ("never return an uncommitted write") is uniform across every node. Still a normal fresh read on a non-clustered node, on a node with no uncommitted tail, or when an explicit `as_of` is given.
+- **Docs — per-database lock-sharding design + snapshot-streaming scope.** `docs/PERFORMANCE.md` §4b now carries a concrete, benchmark-backed plan for the one remaining production-readiness item (write-concurrency lock-sharding): the two candidate architectures and their costs, why it does not decompose into small mergeable slices, the per-database-WAL prerequisite, and the recommended sequencing. Memory-bounded snapshot streaming for very large tables is likewise scoped as a bounded scale follow-on. Both are optimizations, not correctness gaps.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a new end-to-end test that a read-committed query on the primary excludes its uncommitted write. Docs (`CLUSTERING.md`, `CONFIGURATION.md`, `PERFORMANCE.md`) and the docs site updated.
+
 ## v0.3.36 - 2026-07-17
 
 Prometheus metrics for cluster/replication/consensus health — the HA story is now monitorable with the standard toolchain, not only via the `cluster.*` JSON RPCs.
