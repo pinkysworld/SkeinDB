@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.34 - 2026-07-16
+
+Automated snapshot re-sync: a replica that has fallen further behind than the op-log retains (or has diverged) now rebuilds itself from a consistent snapshot on its own, completing the self-healing story. Behavior-preserving for single-node deployments.
+
+- **Clustering — automated snapshot re-sync.** Previously a replica that reported `resync_required` (further behind than the primary's op-log buffer retains) had to be re-synced by hand. Now its background loop does it automatically: it pulls a full logical snapshot (`cluster.replication.snapshot`), **wipes** its local databases, **applies** the snapshot, and **adopts the snapshot's log position**, from which normal catch-up resumes. It is best-effort — any failure aborts without advancing the applied position, so the next tick retries. The in-memory op-log buffer size (how far a replica can fall behind before a re-sync is needed instead of op-replay) is now tunable via `SKEINDB_REPLICATION_LOG_BUFFER_CAP` (default 4096).
+- **Clustering — snapshot consistency barrier.** The snapshot is now taken at a log position **exactly consistent** with the state it exports, so post-resync catch-up neither skips nor duplicate-applies a write. Because the engine mutation and the log-position (`op_seq`) assignment are under separate locks, this is enforced by a `seq_barrier`: each genuine client write holds it shared across `[mutation → op_seq assignment]`, and the snapshot takes it exclusively to drain in-flight assignments before capturing `op_seq` under the engine read lock (both paths acquire the barrier before the engine lock, so there is no deadlock). Validated by a stress test in which writes stream to the primary *during* a replica's re-sync and the replica still converges to the exact final state.
+- This completes slice 4d of the replication-consensus roadmap; the one remaining enhancement (read-committed replica reads) is not a failover-safety gap and is documented in `docs/CLUSTERING.md` §2.5.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including new end-to-end tests for the automated re-sync and its consistency under concurrent writes. Docs (`CLUSTERING.md`, `CONFIGURATION.md`) and the docs site updated.
+
 ## v0.3.33 - 2026-07-16
 
 Logical snapshot export — the read-only primitive for re-syncing a replica that has fallen further behind than the op-log retains. Behavior-preserving for single-node deployments.
