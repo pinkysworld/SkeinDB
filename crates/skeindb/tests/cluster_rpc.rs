@@ -1094,6 +1094,295 @@ async fn replica_self_heals_missed_writes_via_catchup() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// End-to-end automated snapshot re-sync: a replica that has fallen further behind than the
+/// primary's op-log buffer retains (`resync_required`) automatically pulls a full snapshot, rebuilds
+/// its state, and then resumes normal catch-up for subsequent writes — no manual intervention.
+#[tokio::test]
+async fn replica_auto_resyncs_when_behind_the_op_log_buffer() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    // Tiny op-log buffer on the primary so the earliest writes fall off it and a fresh replica is
+    // forced down the snapshot re-sync path rather than op-replay catch-up.
+    let primary = HttpHarness::start_with_env(
+        "resync_primary",
+        &[
+            ("SKEINDB_CLUSTER_NODE_TIMEOUT_MS", "3000"),
+            ("SKEINDB_REPLICATION_LOG_BUFFER_CAP", "2"),
+        ],
+    )?;
+    let replica = HttpHarness::start_with_env(
+        "resync_replica",
+        &[("SKEINDB_CLUSTER_NODE_TIMEOUT_MS", "3000")],
+    )?;
+    let pc = RpcHttpClient::new(primary.base_url());
+    let rc = RpcHttpClient::new(replica.base_url());
+
+    let primary_id = pc
+        .rpc("cluster.failover.status", json!({}))
+        .await?
+        .result
+        .and_then(|v| {
+            v.get("observer_node_id")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("missing primary node id"))?;
+
+    // Enable replication (dummy unreachable target) and write several ops — more than the buffer
+    // cap — so the earliest (create_database / create_table) fall off the op-log.
+    let ptok = pc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("primary token"))?;
+    assert!(
+        pc.rpc(
+            "cluster.node.join",
+            json!({"token": ptok, "node_id": "dummy", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        pc.rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        pc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app", "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    for (id, name) in [(1u64, "Nora"), (2, "Ivan"), (3, "Mara")] {
+        assert!(
+            pc.rpc(
+                "data.insert",
+                json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": id}, "name": {"t": "str", "v": name}}]}),
+            )
+            .await?
+            .ok
+        );
+    }
+
+    // Point the replica at the primary (as a `--cluster-join` node would). Its background loop will
+    // hit `resync_required` and auto-resync from a snapshot.
+    let rtok = rc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("replica token"))?;
+    assert!(
+        rc.rpc(
+            "cluster.node.join",
+            json!({"token": rtok, "node_id": primary_id, "rpc_url": primary.base_url(), "role": "primary"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        rc.rpc(
+            "cluster.leader.announce",
+            json!({"node_id": primary_id, "epoch": 1})
+        )
+        .await?
+        .ok
+    );
+
+    // Poll the replica for a given row until a deadline.
+    async fn wait_for_row(rc: &RpcHttpClient, id: u64, name: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if let Ok(resp) = rc
+                .rpc(
+                    "data.get",
+                    json!({"table": {"db": "app", "table": "users"}, "pk": [{"t": "u64", "v": id}]}),
+                )
+                .await
+            {
+                if resp
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("row"))
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.get("v"))
+                    .and_then(|v| v.as_str())
+                    == Some(name)
+                {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        false
+    }
+
+    // The replica should rebuild the full snapshot (all three rows) on its own.
+    assert!(
+        wait_for_row(&rc, 2, "Ivan", 25).await,
+        "replica did not auto-resync the snapshot"
+    );
+
+    // After resync, a NEW write on the primary must reach the replica via normal catch-up (proving
+    // the resync handed off the log position correctly — no skip, no duplicate).
+    assert!(
+        pc.rpc(
+            "data.insert",
+            json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": 4}, "name": {"t": "str", "v": "Zed"}}]}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        wait_for_row(&rc, 4, "Zed", 15).await,
+        "post-resync write did not reach the replica via catch-up"
+    );
+    Ok(())
+}
+
+/// Stresses the snapshot **consistency barrier**: writes stream to the primary *while* a replica
+/// re-syncs, so the snapshot is taken concurrently with writes. If the snapshot captured a log
+/// position inconsistent with the exported data, post-resync catch-up would either duplicate-apply
+/// (stuck replica) or skip an op — either way the replica would never converge. It must converge to
+/// exactly the primary's final state.
+#[tokio::test]
+async fn replica_resync_converges_under_concurrent_writes() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let primary = HttpHarness::start_with_env(
+        "resyncstress_primary",
+        &[
+            ("SKEINDB_CLUSTER_NODE_TIMEOUT_MS", "3000"),
+            ("SKEINDB_REPLICATION_LOG_BUFFER_CAP", "2"),
+        ],
+    )?;
+    let replica = HttpHarness::start_with_env(
+        "resyncstress_replica",
+        &[("SKEINDB_CLUSTER_NODE_TIMEOUT_MS", "3000")],
+    )?;
+    let pc = RpcHttpClient::new(primary.base_url());
+    let rc = RpcHttpClient::new(replica.base_url());
+
+    let primary_id = pc
+        .rpc("cluster.failover.status", json!({}))
+        .await?
+        .result
+        .and_then(|v| {
+            v.get("observer_node_id")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("missing primary node id"))?;
+    let ptok = pc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("primary token"))?;
+    assert!(
+        pc.rpc(
+            "cluster.node.join",
+            json!({"token": ptok, "node_id": "dummy", "rpc_url": "http://127.0.0.1:9/", "role": "replica"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        pc.rpc("schema.create_database", json!({"db": "app"}))
+            .await?
+            .ok
+    );
+    assert!(
+        pc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "app", "table": "users",
+                "columns": [{"name": "id", "type": {"kind": "u64"}, "nullable": false}],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+
+    // Stream writes to the primary in the background, concurrent with the replica's resync.
+    const LAST_ID: u64 = 60;
+    let writer_url = primary.base_url();
+    let writer = tokio::spawn(async move {
+        let wc = RpcHttpClient::new(writer_url);
+        for id in 1..=LAST_ID {
+            let _ = wc
+                .rpc(
+                    "data.insert",
+                    json!({"into": {"db": "app", "table": "users"}, "rows": [{"id": {"t": "u64", "v": id}}]}),
+                )
+                .await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    });
+
+    // Point the replica at the primary mid-stream so it resyncs while writes are still flowing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let rtok = rc
+        .rpc("cluster.join_token.create", json!({}))
+        .await?
+        .result
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .ok_or_else(|| anyhow!("replica token"))?;
+    assert!(
+        rc.rpc(
+            "cluster.node.join",
+            json!({"token": rtok, "node_id": primary_id, "rpc_url": primary.base_url(), "role": "primary"}),
+        )
+        .await?
+        .ok
+    );
+    assert!(
+        rc.rpc(
+            "cluster.leader.announce",
+            json!({"node_id": primary_id, "epoch": 1})
+        )
+        .await?
+        .ok
+    );
+
+    // Let all writes finish, then require the replica to converge to the full final state.
+    writer.await.expect("writer task");
+    async fn row_exists(rc: &RpcHttpClient, id: u64) -> bool {
+        rc.rpc(
+            "data.get",
+            json!({"table": {"db": "app", "table": "users"}, "pk": [{"t": "u64", "v": id}]}),
+        )
+        .await
+        .map(|r| r.ok)
+        .unwrap_or(false)
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if row_exists(&rc, LAST_ID).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // The last write present implies contiguous convergence; spot-check earlier ids too.
+    for id in [1u64, LAST_ID / 2, LAST_ID] {
+        assert!(
+            row_exists(&rc, id).await,
+            "replica did not converge — missing id {id} after concurrent-write resync"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;

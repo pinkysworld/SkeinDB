@@ -251,6 +251,12 @@ pub(crate) struct AppState {
     /// persisted: on a primary restart it starts empty, and a replica too far behind falls back to
     /// a snapshot re-sync (reported as `resync_required`).
     replication_log: Arc<Mutex<std::collections::VecDeque<ReplicationLogEntry>>>,
+    /// Serializes replication log-position assignment against a consistent snapshot. Each genuine
+    /// client write holds it **shared** across `[engine mutation → op_seq assignment]`; a snapshot
+    /// takes it **exclusive** to drain in-flight assignments so it can capture an `op_seq` exactly
+    /// consistent with the state it exports (so post-resync catch-up neither skips nor
+    /// duplicate-applies an op). Both paths acquire this before the engine lock — never the reverse.
+    seq_barrier: Arc<tokio::sync::RwLock<()>>,
     counters: Arc<Mutex<Counters>>,
     txns: Arc<Mutex<HashMap<String, TxSession>>>,
 
@@ -16970,6 +16976,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         ))),
         replication_causality: Arc::new(Mutex::new(None)),
         replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        seq_barrier: Arc::new(tokio::sync::RwLock::new(())),
         counters: Arc::new(Mutex::new(Counters::default())),
         txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
@@ -19324,6 +19331,17 @@ pub(crate) async fn handle_rpc(
         };
     }
 
+    // A genuine client write that will be replicated holds the seq barrier (shared) across the
+    // mutation and its log-position assignment, so a concurrent snapshot can capture a consistent
+    // `op_seq`. Reads, and incoming replicated writes, take no barrier.
+    let is_replicable_write =
+        !is_replication_request && should_replicate_method(&method, params.as_ref());
+    let seq_barrier_guard = if is_replicable_write {
+        Some(state.seq_barrier.read().await)
+    } else {
+        None
+    };
+
     let result: Result<Value, RpcError> = if replication_apply_skip {
         // Idempotent no-op: this replicated op is a duplicate or sits above a gap. Acknowledge it
         // (so the primary counts it shipped) without re-executing or advancing our applied position.
@@ -19386,11 +19404,19 @@ pub(crate) async fn handle_rpc(
                 "cluster.replication.snapshot" => {
                     // A read-only logical snapshot of the primary's full state as replayable ops
                     // (schema.create_database / schema.create_table / data.insert), tagged with the
-                    // log position at which it was taken. The basis for re-syncing a replica that has
-                    // fallen further behind than the op-log retains. `snapshot_seq` is captured before
-                    // the export (a lower bound on what the snapshot contains); the automated
-                    // wipe-and-apply flow that consumes this — and the exact consistency barrier —
-                    // is a follow-on (see docs/CLUSTERING.md §2.5 slice 4d).
+                    // exact log position it reflects. The basis for re-syncing a replica that has
+                    // fallen further behind than the op-log retains.
+                    //
+                    // Consistency barrier: take the seq barrier exclusively (draining any in-flight
+                    // log-position assignment), acquire the engine read lock (blocking new
+                    // mutations), then capture `op_seq` — now exactly consistent with the state we are
+                    // about to export. Releasing the barrier while still holding the engine read lock
+                    // keeps writers queued at the engine lock, so `op_seq` cannot advance during the
+                    // export. Hence post-resync catch-up from `snapshot_seq` neither skips nor
+                    // duplicate-applies an op. (Both this and the write path acquire the barrier
+                    // before the engine lock, so there is no lock-ordering deadlock.)
+                    let barrier = state.seq_barrier.write().await;
+                    let engine = state.engine.read().await;
                     let (snapshot_term, snapshot_seq) = {
                         let cluster = state
                             .cluster
@@ -19398,12 +19424,10 @@ pub(crate) async fn handle_rpc(
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         (cluster.leadership_epoch, cluster.replication.op_seq)
                     };
-                    let ops = {
-                        let engine = state.engine.read().await;
-                        engine
-                            .snapshot_export()
-                            .map_err(|e| RpcError::new("internal", e.to_string()))?
-                    };
+                    drop(barrier);
+                    let ops = engine
+                        .snapshot_export()
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?;
                     Ok(serde_json::json!({
                         "snapshot_term": snapshot_term,
                         "snapshot_seq": snapshot_seq,
@@ -21424,14 +21448,20 @@ pub(crate) async fn handle_rpc(
         .await
     };
 
-    if result.is_ok()
-        && should_replicate_method(&method, params.as_ref())
-        && !is_replication_request
-    {
-        if let Some(params_obj) = params.clone() {
-            if let Err(err) = replicate_write_to_cluster(state, &method, params_obj).await {
-                tracing::warn!(method = %method, error = %err, "cluster replication fanout failed");
-            }
+    // Assign the write its log position + buffer it while still holding the seq barrier (so the
+    // snapshot's `op_seq` stays consistent), then release the barrier and fan out over HTTP.
+    let replication_op = if result.is_ok() && is_replicable_write {
+        params
+            .as_ref()
+            .and_then(|p| record_replication_op(state, &method, p).map(|pos| (pos, p.clone())))
+    } else {
+        None
+    };
+    drop(seq_barrier_guard);
+    if let Some(((op_term, op_seq), params_obj)) = replication_op {
+        if let Err(err) = fanout_replication_op(state, &method, &params_obj, op_term, op_seq).await
+        {
+            tracing::warn!(method = %method, error = %err, "cluster replication fanout failed");
         }
     }
 
@@ -21656,40 +21686,36 @@ fn enforce_cluster_write_guard(
     ))
 }
 
-async fn replicate_write_to_cluster(
-    state: &AppState,
-    method: &str,
-    params: Value,
-) -> anyhow::Result<()> {
-    let now = now_unix_ms_u64();
-    let (db, table) = write_target_from_params(method, Some(&params));
-    let (targets, enabled, op_term, op_seq) = {
+/// Bound on the primary's in-memory op-log ring buffer, overridable via
+/// `SKEINDB_REPLICATION_LOG_BUFFER_CAP` (default `REPLICATION_LOG_BUFFER_CAP`). A replica that has
+/// fallen further behind than this must be re-synced from a snapshot.
+fn replication_log_buffer_cap() -> usize {
+    std::env::var("SKEINDB_REPLICATION_LOG_BUFFER_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(REPLICATION_LOG_BUFFER_CAP)
+}
+
+/// Assign a genuine client write its replication log position `(term, seq)` and append it to the
+/// primary's op-log buffer. Returns the assigned position, or `None` when clustering is disabled.
+/// Synchronous, and MUST be called while holding `seq_barrier` (shared) so a concurrent snapshot
+/// captures an `op_seq` that is exactly consistent with the engine state (no in-flight assignment).
+fn record_replication_op(state: &AppState, method: &str, params: &Value) -> Option<(u64, u64)> {
+    let (op_term, op_seq) = {
         let mut cluster = state
             .cluster
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let enabled = cluster.enabled;
-        cluster.replication.last_updated_ms = now;
-        // Assign this write its log position `(term, seq)` in the current leadership term. Done
-        // under the cluster lock so every replicated write gets a distinct, monotonic sequence.
-        let (op_term, op_seq) = if enabled {
-            cluster.replication.op_seq = cluster.replication.op_seq.saturating_add(1);
-            (cluster.leadership_epoch, cluster.replication.op_seq)
-        } else {
-            (0, 0)
-        };
-        (
-            cluster.nodes_for_replication(db.as_deref(), table.as_deref()),
-            enabled,
-            op_term,
-            op_seq,
-        )
+        if !cluster.enabled {
+            return None;
+        }
+        cluster.replication.last_updated_ms = now_unix_ms_u64();
+        cluster.replication.op_seq = cluster.replication.op_seq.saturating_add(1);
+        (cluster.leadership_epoch, cluster.replication.op_seq)
     };
-    if !enabled {
-        return Ok(());
-    }
-    // Append to the primary's op-log ring buffer (the catch-up source) even when there are no
-    // current targets, so a replica that joins or reconnects later can pull this op and self-heal.
+    // Append to the op-log ring buffer (the catch-up source) even with no current targets, so a
+    // replica that joins or reconnects later can pull this op and self-heal.
     {
         let mut log = state
             .replication_log
@@ -21701,15 +21727,36 @@ async fn replicate_write_to_cluster(
             method: method.to_string(),
             params: params.clone(),
         });
-        while log.len() > REPLICATION_LOG_BUFFER_CAP {
+        let cap = replication_log_buffer_cap();
+        while log.len() > cap {
             log.pop_front();
         }
     }
+    Some((op_term, op_seq))
+}
+
+/// Fan an already-recorded write out to the current replication targets over HTTP. Runs OUTSIDE the
+/// `seq_barrier` (after the position is assigned) so a snapshot is never blocked by a slow peer.
+async fn fanout_replication_op(
+    state: &AppState,
+    method: &str,
+    params: &Value,
+    op_term: u64,
+    op_seq: u64,
+) -> anyhow::Result<()> {
+    let (db, table) = write_target_from_params(method, Some(params));
+    let targets = {
+        let cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cluster.nodes_for_replication(db.as_deref(), table.as_deref())
+    };
     if targets.is_empty() {
         return Ok(());
     }
 
-    let causality_header = replication_causality_for_write(state, method, &params)
+    let causality_header = replication_causality_for_write(state, method, params)
         .await
         .and_then(|token| encode_replication_causality_header(&token));
     let seq_header = format!("{}:{}", op_term, op_seq);
@@ -35486,11 +35533,14 @@ async fn run_replication_catchup_once(state: &AppState) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
+        // The op-log buffer no longer covers this replica's position. Pull a full snapshot and
+        // rebuild from it, then normal catch-up resumes from the snapshot's position.
         tracing::warn!(
             after_term,
             after_seq,
-            "replica has fallen behind the primary's op-log buffer — snapshot re-sync required"
+            "replica behind the primary's op-log buffer — running snapshot re-sync"
         );
+        run_replication_resync(state, &primary_url).await;
         return;
     }
     let ops = resp
@@ -35518,26 +35568,168 @@ async fn run_replication_catchup_once(state: &AppState) {
             continue;
         };
         let params = op.get("params").cloned().unwrap_or(Value::Null);
-        let payload = serde_json::json!({
-            "skeinql": SKEINQL_VERSION,
-            "method": method,
-            "params": params,
-        });
-        let mut req = client
-            .post(&self_url)
-            .header(header::CONTENT_TYPE.as_str(), "application/json")
-            .header(REPLICATION_HEADER, "1")
-            .header(REPLICATION_SEQ_HEADER, format!("{}:{}", term, seq))
-            .json(&payload);
-        if let Some(tok) = auth_token.as_ref() {
-            req = req.bearer_auth(tok);
-        }
-        // Apply in order; stop the round on the first transport failure and resume next tick.
-        if let Err(err) = req.send().await {
+        let seq_header = format!("{}:{}", term, seq);
+        // Apply in order; stop the round on the first failure and resume next tick.
+        if let Err(err) = apply_op_loopback(
+            &client,
+            &self_url,
+            auth_token.as_deref(),
+            method,
+            &params,
+            Some(&seq_header),
+        )
+        .await
+        {
             tracing::debug!(error = %err, "replication catch-up apply failed");
             break;
         }
     }
+}
+
+/// POST a single op to ourselves over loopback with the replication header — bypasses the write
+/// guard, applies locally, and does not re-fan-out. `seq_header` (`"term:seq"`) tags it for the
+/// contiguous-apply dedup; `None` applies it directly (snapshot re-sync ops, applied wholesale).
+/// Returns an error if the transport fails or the op is rejected at the RPC level.
+async fn apply_op_loopback(
+    client: &reqwest::Client,
+    self_url: &str,
+    auth_token: Option<&str>,
+    method: &str,
+    params: &Value,
+    seq_header: Option<&str>,
+) -> anyhow::Result<()> {
+    let payload = serde_json::json!({
+        // An id makes this a request (not a notification), so we get a body to check for rejection.
+        "id": "loopback",
+        "skeinql": SKEINQL_VERSION,
+        "method": method,
+        "params": params,
+    });
+    let mut req = client
+        .post(self_url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
+        .header(REPLICATION_HEADER, "1")
+        .json(&payload);
+    if let Some(sh) = seq_header {
+        req = req.header(REPLICATION_SEQ_HEADER, sh);
+    }
+    if let Some(tok) = auth_token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("loopback apply {} => http {}", method, resp.status());
+    }
+    let body: Value = resp.json().await?;
+    if body.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let msg = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+        anyhow::bail!("loopback apply {} rejected: {}", method, msg);
+    }
+    Ok(())
+}
+
+/// Re-sync a replica that has fallen further behind than the primary's op-log retains: pull a full
+/// logical snapshot, wipe local state, apply the snapshot, and adopt the snapshot's log position —
+/// from which normal catch-up resumes. Best-effort: on any failure it aborts *without* advancing the
+/// applied position, so the next tick retries (the fetch will still report `resync_required`).
+async fn run_replication_resync(state: &AppState, primary_url: &str) {
+    let snap = match call_remote_rpc_result(
+        primary_url,
+        "cluster.replication.snapshot",
+        serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(primary = %primary_url, error = ?err, "replication resync: snapshot fetch failed");
+            return;
+        }
+    };
+    let snapshot_term = snap
+        .get("snapshot_term")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let snapshot_seq = snap
+        .get("snapshot_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ops = snap
+        .get("ops")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+    let auth_token = std::env::var("SKEINDB_TOKEN").ok();
+    let self_url = format!("{}/api/v1/rpc", state.local_rpc_url.trim_end_matches('/'));
+
+    // Wipe: drop every database currently on this replica so the snapshot rebuilds a clean state.
+    let local_dbs = { state.engine.read().await.list_databases() };
+    for db in local_dbs {
+        let params = serde_json::json!({ "db": db });
+        if let Err(err) = apply_op_loopback(
+            &client,
+            &self_url,
+            auth_token.as_deref(),
+            "schema.drop_database",
+            &params,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, db = %db, "replication resync: wipe failed — aborting");
+            return;
+        }
+    }
+
+    // Apply the snapshot ops in order to rebuild state.
+    for op in &ops {
+        let Some(method) = op.get("method").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let params = op.get("params").cloned().unwrap_or(Value::Null);
+        if let Err(err) = apply_op_loopback(
+            &client,
+            &self_url,
+            auth_token.as_deref(),
+            method,
+            &params,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, method = %method, "replication resync: apply failed — aborting");
+            return;
+        }
+    }
+
+    // Adopt the snapshot's log position; normal catch-up resumes from here next tick.
+    {
+        let mut cluster = state
+            .cluster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cluster.replication.last_applied_term = snapshot_term;
+        cluster.replication.last_applied_seq = snapshot_seq;
+        cluster.replication.last_updated_ms = now_unix_ms_u64();
+    }
+    persist_cluster_state(state).ok();
+    tracing::info!(
+        snapshot_term,
+        snapshot_seq,
+        op_count = ops.len(),
+        "replication resync complete"
+    );
 }
 
 /// One automated-failover evaluation. No-op unless `SKEINDB_CLUSTER_AUTO_FAILOVER` is enabled and
@@ -38299,6 +38491,7 @@ mod tests {
             ))),
             replication_causality: Arc::new(Mutex::new(None)),
             replication_log: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            seq_barrier: Arc::new(tokio::sync::RwLock::new(())),
             counters: Arc::new(Mutex::new(Counters::default())),
             txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
