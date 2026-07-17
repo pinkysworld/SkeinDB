@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.35 - 2026-07-17
+
+Opt-in read-committed replica reads — the final piece of the replication/consensus story. Behavior-preserving by default (reads stay fresh unless `read_committed` is requested).
+
+- **Clustering — read-committed replica reads (opt-in).** A `query.select` with `"read_committed": true` served by a replica returns only writes a **majority has acknowledged** — a read never surfaces an uncommitted write that a subsequent failover could supersede. Rather than change the default apply model (which would make *all* replica reads wait for a majority and go stale), it is opt-in per query and non-invasive: the replica records the apply time of each replicated op and serves the read `as_of` the commit-index boundary via the engine's MVCC time-travel, so the result includes every committed row and excludes the uncommitted tail. It is a normal fresh read on the primary, on a non-clustered node, or on a replica with no uncommitted tail; an explicit `as_of` takes precedence. (Freshness caveat: the boundary is a millisecond timestamp, so during a burst where many writes share a millisecond a read-committed view may conservatively exclude a just-committed write until the next — it never includes an uncommitted one.)
+- This completes the replication/consensus roadmap (`docs/CLUSTERING.md` §2.5, CL10): self-healing replication, the commit index, the `(term, index)` failover election, automated snapshot re-sync with a consistency barrier, and now read-committed reads. What remains is optimization/scale (streaming very large snapshots, a primary-side read-index, per-database lock-sharding), not a correctness gap.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (all targets) including a new end-to-end test that a read-committed query on a replica excludes an uncommitted tail while a normal query serves it. Docs (`CLUSTERING.md`, `CONFIGURATION.md`), the website, and the docs site updated.
+
 ## v0.3.34 - 2026-07-16
 
 Automated snapshot re-sync: a replica that has fallen further behind than the op-log retains (or has diverged) now rebuilds itself from a consistent snapshot on its own, completing the self-healing story. Behavior-preserving for single-node deployments.
