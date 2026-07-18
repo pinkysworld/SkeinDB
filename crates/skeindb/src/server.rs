@@ -91,6 +91,14 @@ const REPLICATION_SEQ_HEADER: &str = "x-skeindb-replication-seq";
 const REPLICATION_LOG_BUFFER_CAP: usize = 4096;
 /// Max ops a replica pulls per catch-up round (`cluster.replication.fetch`).
 const REPLICATION_CATCHUP_BATCH: usize = 256;
+/// Default ops a replica pulls per streamed-snapshot chunk (`cluster.replication.snapshot`
+/// `mode:"chunk"`), and the hard ceiling. Bounds the per-chunk response so a re-sync of a
+/// database far larger than RAM never buffers the whole snapshot on either node.
+const REPLICATION_SNAPSHOT_CHUNK_OPS: usize = 512;
+const REPLICATION_SNAPSHOT_CHUNK_OPS_MAX: usize = 4096;
+/// A spilled re-sync snapshot file older than this is swept as abandoned (its replica died
+/// mid-resync). Comfortably longer than any real re-sync transfer.
+const REPLICATION_SNAPSHOT_TMP_TTL_MS: u64 = 30 * 60 * 1000;
 /// Bound on the replica-side `(term, seq) → apply_ms` ring used to find the `read_committed`
 /// visibility boundary. Comfortably larger than any realistic uncommitted-tail window.
 const REPLICATION_APPLIED_TIMES_CAP: usize = 8192;
@@ -19519,33 +19527,111 @@ pub(crate) async fn handle_rpc(
                     // exact log position it reflects. The basis for re-syncing a replica that has
                     // fallen further behind than the op-log retains.
                     //
-                    // Consistency barrier: take the seq barrier exclusively (draining any in-flight
-                    // log-position assignment), acquire the engine read lock (blocking new
-                    // mutations), then capture `op_seq` — now exactly consistent with the state we are
-                    // about to export. Releasing the barrier while still holding the engine read lock
-                    // keeps writers queued at the engine lock, so `op_seq` cannot advance during the
-                    // export. Hence post-resync catch-up from `snapshot_seq` neither skips nor
-                    // duplicate-applies an op. (Both this and the write path acquire the barrier
-                    // before the engine lock, so there is no lock-ordering deadlock.)
-                    let barrier = state.seq_barrier.write().await;
-                    let engine = state.engine.read().await;
-                    let (snapshot_term, snapshot_seq) = {
-                        let cluster = state
-                            .cluster
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        (cluster.leadership_epoch, cluster.replication.op_seq)
+                    // Three modes share this one method for rolling-upgrade compatibility (an old
+                    // replica sends no `mode` and gets the legacy single-response full snapshot):
+                    //   - "begin": spill the whole snapshot to a temp file with the streaming,
+                    //     memory-bounded export, and return its `(term, seq)` + op/byte counts —
+                    //     so a database far larger than RAM produces no memory spike on the primary.
+                    //   - "chunk": read one bounded page of ops from the spilled file, lock-free.
+                    //   - none (legacy): build and return every op in one response.
+                    #[derive(serde::Deserialize, Default)]
+                    struct P {
+                        #[serde(default)]
+                        mode: Option<String>,
+                        #[serde(default)]
+                        snapshot_term: u64,
+                        #[serde(default)]
+                        snapshot_seq: u64,
+                        #[serde(default)]
+                        byte_offset: u64,
+                        #[serde(default)]
+                        limit: Option<usize>,
+                    }
+                    let p: P = match params.clone() {
+                        Some(v) => serde_json::from_value(v)
+                            .map_err(|e| RpcError::new("invalid_request", e.to_string()))?,
+                        None => P::default(),
                     };
-                    drop(barrier);
-                    let ops = engine
-                        .snapshot_export()
-                        .map_err(|e| RpcError::new("internal", e.to_string()))?;
-                    Ok(serde_json::json!({
-                        "snapshot_term": snapshot_term,
-                        "snapshot_seq": snapshot_seq,
-                        "op_count": ops.len(),
-                        "ops": ops,
-                    }))
+
+                    // Consistency barrier (used by "begin" and the legacy full path): take the seq
+                    // barrier exclusively (draining any in-flight log-position assignment), acquire
+                    // the engine read lock (blocking new mutations), then capture `op_seq` — now
+                    // exactly consistent with the state we are about to export. Releasing the
+                    // barrier while still holding the engine read lock keeps writers queued at the
+                    // engine lock, so `op_seq` cannot advance during the export. Hence post-resync
+                    // catch-up from `snapshot_seq` neither skips nor duplicate-applies an op. (Both
+                    // this and the write path acquire the barrier before the engine lock, so there
+                    // is no lock-ordering deadlock.)
+                    match p.mode.as_deref() {
+                        Some("chunk") => {
+                            // Lock-free: the spilled file is immutable once written, so no barrier
+                            // or engine lock is needed — a slow/stuck replica cannot stall the
+                            // primary's writes mid-transfer.
+                            let path = replication_snapshot_tmp_path(
+                                &state.data_dir,
+                                p.snapshot_term,
+                                p.snapshot_seq,
+                            );
+                            let limit = p
+                                .limit
+                                .unwrap_or(REPLICATION_SNAPSHOT_CHUNK_OPS)
+                                .clamp(1, REPLICATION_SNAPSHOT_CHUNK_OPS_MAX);
+                            read_replication_snapshot_chunk(&path, p.byte_offset, limit)
+                                .map_err(|e| RpcError::new("internal", e.to_string()))
+                        }
+                        Some("begin") => {
+                            let barrier = state.seq_barrier.write().await;
+                            let engine = state.engine.read().await;
+                            let (snapshot_term, snapshot_seq) = {
+                                let cluster = state
+                                    .cluster
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                (cluster.leadership_epoch, cluster.replication.op_seq)
+                            };
+                            drop(barrier);
+                            let path = replication_snapshot_tmp_path(
+                                &state.data_dir,
+                                snapshot_term,
+                                snapshot_seq,
+                            );
+                            // Spill while still holding the engine read lock, so the file is a
+                            // consistent capture at `snapshot_seq`.
+                            let (op_count, byte_len) =
+                                spill_replication_snapshot(&engine, &path)
+                                    .map_err(|e| RpcError::new("internal", e.to_string()))?;
+                            drop(engine);
+                            sweep_stale_replication_snapshots(&state.data_dir);
+                            Ok(serde_json::json!({
+                                "mode": "begin",
+                                "snapshot_term": snapshot_term,
+                                "snapshot_seq": snapshot_seq,
+                                "op_count": op_count,
+                                "byte_len": byte_len,
+                            }))
+                        }
+                        _ => {
+                            let barrier = state.seq_barrier.write().await;
+                            let engine = state.engine.read().await;
+                            let (snapshot_term, snapshot_seq) = {
+                                let cluster = state
+                                    .cluster
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                (cluster.leadership_epoch, cluster.replication.op_seq)
+                            };
+                            drop(barrier);
+                            let ops = engine
+                                .snapshot_export()
+                                .map_err(|e| RpcError::new("internal", e.to_string()))?;
+                            Ok(serde_json::json!({
+                                "snapshot_term": snapshot_term,
+                                "snapshot_seq": snapshot_seq,
+                                "op_count": ops.len(),
+                                "ops": ops,
+                            }))
+                        }
+                    }
                 }
                 "cluster.replication.fetch" => {
                     #[derive(serde::Deserialize)]
@@ -22313,6 +22399,106 @@ fn cluster_replication_fetch(
         "head_term": head.0,
         "head_seq": head.1,
     })
+}
+
+/// Path of the spilled re-sync snapshot for a given log position. Named by `(term, seq)` so the
+/// file itself is the session key — no in-memory registry to leak — and a stale file left by a
+/// replica that died mid-resync is swept by mtime (see [`sweep_stale_replication_snapshots`]).
+fn replication_snapshot_tmp_path(data_dir: &std::path::Path, term: u64, seq: u64) -> PathBuf {
+    data_dir
+        .join("tmp")
+        .join(format!("resync-snapshot-{term}-{seq}.ndjson"))
+}
+
+/// Spill the engine's full logical snapshot to `path` as newline-delimited JSON ops (one op per
+/// line) using the memory-bounded streaming export. The caller MUST hold the engine read lock
+/// across this call so the spilled file reflects exactly one log position. Returns
+/// `(op_count, byte_len)`. This is what lets a re-sync snapshot of a database far larger than RAM
+/// be produced without buffering the whole snapshot in memory on the primary.
+fn spill_replication_snapshot(
+    engine: &Engine,
+    path: &std::path::Path,
+) -> anyhow::Result<(u64, u64)> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut op_count: u64 = 0;
+    engine.snapshot_export_stream(|op| {
+        serde_json::to_writer(&mut writer, &op)?;
+        writer.write_all(b"\n")?;
+        op_count += 1;
+        Ok(())
+    })?;
+    writer.flush()?;
+    let byte_len = std::fs::metadata(path)?.len();
+    Ok((op_count, byte_len))
+}
+
+/// Read up to `limit` ops from a spilled snapshot file starting at byte offset `byte_offset`
+/// (always a line boundary — `begin` returns 0 and each chunk returns the next boundary).
+/// Returns `{ops, next_byte_offset, done}`. Lock-free: the file is immutable once spilled.
+fn read_replication_snapshot_chunk(
+    path: &std::path::Path,
+    byte_offset: u64,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    use std::io::{BufRead as _, Seek as _};
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    reader.seek(std::io::SeekFrom::Start(byte_offset))?;
+    let mut ops: Vec<Value> = Vec::new();
+    let mut consumed: u64 = 0;
+    let mut line = String::new();
+    while ops.len() < limit {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break; // EOF
+        }
+        consumed += n as u64;
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        ops.push(serde_json::from_str(trimmed)?);
+    }
+    // `done` when this read reached EOF (fewer than `limit` ops). A file whose op count is an
+    // exact multiple of `limit` costs one extra round trip that returns zero ops and `done`.
+    let done = ops.len() < limit;
+    Ok(serde_json::json!({
+        "ops": ops,
+        "next_byte_offset": byte_offset + consumed,
+        "done": done,
+    }))
+}
+
+/// Best-effort sweep of spilled re-sync snapshot files older than the TTL — cleans up after a
+/// replica that began a re-sync but died before finishing. Cheap; runs when a new re-sync begins.
+fn sweep_stale_replication_snapshots(data_dir: &std::path::Path) {
+    let now = now_unix_ms_u64();
+    let Ok(entries) = std::fs::read_dir(data_dir.join("tmp")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("resync-snapshot-") || !name.ends_with(".ndjson") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| now.saturating_sub(d.as_millis() as u64) > REPLICATION_SNAPSHOT_TMP_TTL_MS)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
@@ -35846,32 +36032,31 @@ async fn apply_op_loopback(
 /// from which normal catch-up resumes. Best-effort: on any failure it aborts *without* advancing the
 /// applied position, so the next tick retries (the fetch will still report `resync_required`).
 async fn run_replication_resync(state: &AppState, primary_url: &str) {
-    let snap = match call_remote_rpc_result(
+    // Ask for a memory-bounded streamed snapshot. A primary that predates streaming ignores the
+    // `mode` and returns the full ops inline (legacy fallback, `ops` present); a streaming-capable
+    // primary spills the snapshot to a temp file and returns only its `(term, seq)` for us to pull
+    // in bounded chunks — so re-syncing a database far larger than RAM never buffers it whole.
+    let begin = match call_remote_rpc_result(
         primary_url,
         "cluster.replication.snapshot",
-        serde_json::json!({}),
+        serde_json::json!({ "mode": "begin" }),
     )
     .await
     {
         Ok(v) => v,
         Err(err) => {
-            tracing::warn!(primary = %primary_url, error = ?err, "replication resync: snapshot fetch failed");
+            tracing::warn!(primary = %primary_url, error = ?err, "replication resync: snapshot begin failed");
             return;
         }
     };
-    let snapshot_term = snap
+    let snapshot_term = begin
         .get("snapshot_term")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let snapshot_seq = snap
+    let snapshot_seq = begin
         .get("snapshot_seq")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let ops = snap
-        .get("ops")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
 
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -35881,6 +36066,27 @@ async fn run_replication_resync(state: &AppState, primary_url: &str) {
     };
     let auth_token = std::env::var("SKEINDB_TOKEN").ok();
     let self_url = format!("{}/api/v1/rpc", state.local_rpc_url.trim_end_matches('/'));
+
+    // Apply a batch of snapshot ops via loopback in order. Returns false on the first failure.
+    async fn apply_ops(
+        client: &reqwest::Client,
+        self_url: &str,
+        auth: Option<&str>,
+        ops: &[Value],
+    ) -> bool {
+        for op in ops {
+            let Some(method) = op.get("method").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let params = op.get("params").cloned().unwrap_or(Value::Null);
+            if let Err(err) = apply_op_loopback(client, self_url, auth, method, &params, None).await
+            {
+                tracing::warn!(error = %err, method = %method, "replication resync: apply failed — aborting");
+                return false;
+            }
+        }
+        true
+    }
 
     // Wipe: drop every database currently on this replica so the snapshot rebuilds a clean state.
     let local_dbs = { state.engine.read().await.list_databases() };
@@ -35901,24 +36107,52 @@ async fn run_replication_resync(state: &AppState, primary_url: &str) {
         }
     }
 
-    // Apply the snapshot ops in order to rebuild state.
-    for op in &ops {
-        let Some(method) = op.get("method").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let params = op.get("params").cloned().unwrap_or(Value::Null);
-        if let Err(err) = apply_op_loopback(
-            &client,
-            &self_url,
-            auth_token.as_deref(),
-            method,
-            &params,
-            None,
-        )
-        .await
-        {
-            tracing::warn!(error = %err, method = %method, "replication resync: apply failed — aborting");
+    let mut applied: u64 = 0;
+    if let Some(ops) = begin.get("ops").and_then(|v| v.as_array()) {
+        // Legacy primary: the full snapshot came back inline in one response.
+        if !apply_ops(&client, &self_url, auth_token.as_deref(), ops).await {
             return;
+        }
+        applied = ops.len() as u64;
+    } else {
+        // Streaming primary: pull bounded chunks from the spilled file until done. Each chunk is
+        // applied and dropped before the next is fetched, so peak memory is one chunk.
+        let mut byte_offset: u64 = 0;
+        loop {
+            let chunk = match call_remote_rpc_result(
+                primary_url,
+                "cluster.replication.snapshot",
+                serde_json::json!({
+                    "mode": "chunk",
+                    "snapshot_term": snapshot_term,
+                    "snapshot_seq": snapshot_seq,
+                    "byte_offset": byte_offset,
+                }),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(error = ?err, "replication resync: snapshot chunk failed — aborting");
+                    return;
+                }
+            };
+            let ops = chunk
+                .get("ops")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if !apply_ops(&client, &self_url, auth_token.as_deref(), &ops).await {
+                return;
+            }
+            applied += ops.len() as u64;
+            byte_offset = chunk
+                .get("next_byte_offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(byte_offset);
+            if chunk.get("done").and_then(|v| v.as_bool()).unwrap_or(true) {
+                break;
+            }
         }
     }
 
@@ -35936,7 +36170,7 @@ async fn run_replication_resync(state: &AppState, primary_url: &str) {
     tracing::info!(
         snapshot_term,
         snapshot_seq,
-        op_count = ops.len(),
+        op_count = applied,
         "replication resync complete"
     );
 }

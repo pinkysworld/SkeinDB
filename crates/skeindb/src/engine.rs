@@ -2717,23 +2717,46 @@ impl Engine {
     /// Rows are chunked into bounded `data.insert` batches. The `create_table` op carries the
     /// table's auto-increment counters (`auto_inc_next`) so a re-synced node that is later promoted
     /// keeps generating non-colliding ids. Databases and tables are emitted in sorted order so the
-    /// export is deterministic. (Memory-bounded streaming of very large tables is a follow-on; today
-    /// each table's rows are gathered before chunking.)
+    /// export is deterministic.
+    ///
+    /// This collects every op into a `Vec`; for a very large database prefer
+    /// [`Engine::snapshot_export_stream`], which emits ops one at a time so the caller can spill
+    /// them to disk / a bounded buffer without ever holding the whole logical database in memory.
     pub fn snapshot_export(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        const ROWS_PER_INSERT: usize = 1024;
         let mut ops = Vec::new();
+        self.snapshot_export_stream(|op| {
+            ops.push(op);
+            Ok(())
+        })?;
+        Ok(ops)
+    }
+
+    /// Streaming form of [`Engine::snapshot_export`]: emits each replayable op to `sink` instead
+    /// of collecting them. Rows are emitted in bounded `data.insert` batches (`ROWS_PER_INSERT`),
+    /// and a `Streaming` table's rows are read one at a time off its on-disk segment, so peak
+    /// memory is O(batch) — independent of any single table's size. This is what lets a re-sync
+    /// snapshot of a table far larger than RAM be produced without a memory spike on the primary.
+    ///
+    /// Read-only. The caller is responsible for capturing a consistent log position around the
+    /// whole call (hold the engine read lock for its duration) so the emitted ops reflect one
+    /// point in time — see the `cluster.replication.snapshot.*` handlers.
+    pub(crate) fn snapshot_export_stream(
+        &self,
+        mut sink: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        const ROWS_PER_INSERT: usize = 1024;
         let mut databases = self.list_databases();
         databases.sort();
         for db in databases {
-            ops.push(serde_json::json!({
+            sink(serde_json::json!({
                 "method": "schema.create_database",
                 "params": { "db": db },
-            }));
+            }))?;
             let mut tables = self.list_tables(&db)?;
             tables.sort();
             for table in tables {
                 let schema = self.get_schema(&db, &table)?;
-                ops.push(serde_json::json!({
+                sink(serde_json::json!({
                     "method": "schema.create_table",
                     "params": {
                         "db": db,
@@ -2742,32 +2765,46 @@ impl Engine {
                         "primary_key": schema.primary_key.clone(),
                         "auto_inc_next": schema.auto_inc_next.clone(),
                     },
-                }));
+                }))?;
                 let base = BaseTableRef {
                     db: db.clone(),
                     table: table.clone(),
                     r#as: None,
                 };
                 let (_schema, tdata) = self.get_table(&base)?;
-                let mut rows: Vec<serde_json::Value> = Vec::new();
-                self.for_each_table_row(&db, &table, tdata, |entry| {
-                    if !entry.deleted {
-                        rows.push(serde_json::to_value(&entry.row)?);
+                // Accumulate at most ROWS_PER_INSERT rows, emit a `data.insert` op, and clear —
+                // so a table of any size is exported with O(ROWS_PER_INSERT) peak memory. The
+                // emit closure and the row buffer are disjoint captures, so both can be borrowed
+                // by the row-visit closure below.
+                let mut batch: Vec<serde_json::Value> = Vec::with_capacity(ROWS_PER_INSERT);
+                let emit_batch = |batch: &mut Vec<serde_json::Value>,
+                                  sink: &mut dyn FnMut(serde_json::Value) -> anyhow::Result<()>|
+                 -> anyhow::Result<()> {
+                    if batch.is_empty() {
+                        return Ok(());
                     }
-                    Ok(())
-                })?;
-                for chunk in rows.chunks(ROWS_PER_INSERT) {
-                    ops.push(serde_json::json!({
+                    let rows = std::mem::take(batch);
+                    sink(serde_json::json!({
                         "method": "data.insert",
                         "params": {
                             "into": { "db": db, "table": table },
-                            "rows": chunk.to_vec(),
+                            "rows": rows,
                         },
-                    }));
-                }
+                    }))
+                };
+                self.for_each_table_row(&db, &table, tdata, |entry| {
+                    if !entry.deleted {
+                        batch.push(serde_json::to_value(&entry.row)?);
+                        if batch.len() >= ROWS_PER_INSERT {
+                            emit_batch(&mut batch, &mut sink)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+                emit_batch(&mut batch, &mut sink)?;
             }
         }
-        Ok(ops)
+        Ok(())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

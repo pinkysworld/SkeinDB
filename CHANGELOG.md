@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.39 - 2026-07-18
+
+Memory-bounded streaming re-sync snapshots — a replica can now be re-synced from a database far larger than RAM without a memory spike on either node. Behavior-preserving; correctness identical to the previous single-shot snapshot.
+
+- **Clustering — streamed snapshot re-sync.** `cluster.replication.snapshot` (the basis for automated re-sync when a replica falls further behind than the op-log retains) previously built the primary's **entire** logical state into one op array and returned it in a single response — a memory spike on both the primary and the re-syncing replica proportional to the database size. It now streams: `mode:"begin"` captures the log position under the existing consistency barrier and **spills** the state to a temp file (`<data_dir>/tmp/resync-snapshot-<term>-<seq>.ndjson`) with a new memory-bounded export (`Engine::snapshot_export_stream` emits ops one at a time — rows in bounded batches, a streaming table's rows read one at a time off its segment); `mode:"chunk"` serves bounded pages of that immutable file **lock-free** via a byte-offset cursor, which the replica applies and drops one page at a time. Peak memory is one chunk, not the whole database.
+- **Correctness + safety.** The spilled file is one consistent capture at `snapshot_seq` (spilled while holding the engine read lock, position captured under the `seq_barrier`), just read in pages — so post-resync catch-up from `snapshot_seq` still neither skips nor duplicate-applies. Spilling under the lock (bounded RAM, primary-paced) rather than streaming to the client under the lock means a slow or stuck replica can never stall the primary's writes mid-transfer; an abandoned temp file (a replica that died mid-resync) is swept by mtime on the next re-sync. Rolling-upgrade safe: a primary that predates streaming ignores `mode` and returns the ops inline, and the replica falls back to applying them.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (618 unit + 151 cluster_rpc) including a new test that the streamed snapshot pages in bounded chunks and round-trips the full state, plus the existing end-to-end auto-resync and concurrent-write convergence tests — which now exercise the streamed path against a live replica. Docs (`PERFORMANCE.md`, `CLUSTERING.md` §2.5) and the docs site updated.
+
 ## v0.3.38 - 2026-07-18
 
 Per-database write-ahead logs — the first shipped slice of per-database write-lock sharding (`docs/PERFORMANCE.md` §4b, step i). Behavior-preserving; a durability-path refactor with automatic migration.
