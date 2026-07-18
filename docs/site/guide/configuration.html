@@ -214,7 +214,7 @@ OPTIONS:
 <tr>
 <td><code>SKEINDB_WAL_SYNC_BATCH</code></td>
 <td><code>1</code></td>
-<td>WAL group commit: <code>fsync</code> the write-ahead log once every N committed transactions instead of every one. <code>1</code> = fsync every commit (strongest durability). A larger value amortizes the fsync-under-lock cost; it can lose at most <code>N-1</code> most-recent commits on a <em>power-loss</em> crash (a clean restart still recovers everything), and recovery always yields a consistent committed prefix.</td>
+<td>WAL group commit: <code>fsync</code> a database's write-ahead log once every N committed transactions instead of every one. <code>1</code> = fsync every commit (strongest durability). A larger value amortizes the fsync-under-lock cost; it can lose at most <code>N-1</code> most-recent commits <em>per database</em> on a <em>power-loss</em> crash (a clean restart still recovers everything), and recovery always yields a consistent committed prefix. The WAL is partitioned per database (<code>&lt;data_dir&gt;/wal/&lt;db&gt;/</code>), so the batch counter is tracked independently for each database.</td>
 </tr>
 <tr>
 <td><code>SKEINDB_STREAMING_MIN_BYTES</code></td>

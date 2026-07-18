@@ -42,7 +42,7 @@ mod migration_intent;
 use migration_intent::*;
 
 mod wal;
-use wal::WalRowRecord;
+use wal::{DbWal, WalRowRecord};
 
 mod auth;
 
@@ -50,7 +50,6 @@ use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
 };
-use skeindb_core::wal::WalWriter;
 use skeindb_core::wasm_catalog::{
     WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
     WASM_UDF_ABI_V1,
@@ -434,21 +433,22 @@ pub struct Engine {
     /// for recovery rather than silently overwritten with an empty table.
     corrupt_tables: HashSet<TableKey>,
 
-    /// Global write-ahead log writer for row-level redo (crash recovery of table data),
-    /// opened lazily on the first mutation and truncated at each checkpoint. See
-    /// `engine/wal.rs`.
-    wal: Option<WalWriter>,
-    /// Monotonic transaction id stamped on WAL records.
+    /// Per-database write-ahead log writers for row-level redo (crash recovery of table
+    /// data). Each database logs to its own WAL under `<data_dir>/wal/<db>/`, opened lazily
+    /// on that database's first mutation and truncated at each checkpoint. Partitioning the
+    /// WAL per database keeps one database's append+fsync independent of another's — the
+    /// durability-side prerequisite for per-database write-lock sharding. See `engine/wal.rs`.
+    wals: HashMap<String, DbWal>,
+    /// Monotonic transaction id stamped on WAL records. Shared across databases; each
+    /// per-database WAL only ever sees a subset and pairs begin/commit by id within its file.
     wal_next_txn: u64,
-    /// Group-commit batch size: fsync the WAL once every this many committed transactions
-    /// (read once from `SKEINDB_WAL_SYNC_BATCH` at open; default 1 = fsync every commit =
-    /// strongest durability). A larger value amortizes the fsync — fewer fsync-under-lock
-    /// stalls, higher write throughput — at the cost of losing at most `batch-1` most-recent
-    /// commits on a power-loss crash (recovery stays a consistent prefix either way).
+    /// Group-commit batch size: fsync a database's WAL once every this many committed
+    /// transactions (read once from `SKEINDB_WAL_SYNC_BATCH` at open; default 1 = fsync every
+    /// commit = strongest durability). A larger value amortizes the fsync — fewer
+    /// fsync-under-lock stalls, higher write throughput — at the cost of losing at most
+    /// `batch-1` most-recent commits per database on a power-loss crash (recovery stays a
+    /// consistent prefix either way).
     wal_sync_batch: u64,
-    /// Committed transactions appended to the WAL but not yet fsynced (bounded by
-    /// `wal_sync_batch`; reset at each fsync and at WAL truncation).
-    wal_unsynced_commits: u64,
 
     /// Tables mutated since the last snapshot flush. With the WAL providing per-commit
     /// durability, row mutations defer their full-table snapshot rewrite: the table is
@@ -2108,14 +2108,13 @@ impl Engine {
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
             corrupt_tables: HashSet::new(),
-            wal: None,
+            wals: HashMap::new(),
             wal_next_txn: 0,
             wal_sync_batch: std::env::var("SKEINDB_WAL_SYNC_BATCH")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(1),
-            wal_unsynced_commits: 0,
             dirty_tables: HashSet::new(),
             mutations_since_flush: 0,
         };
@@ -32597,11 +32596,12 @@ mod tests {
             // simulating a crash before a clean shutdown.
         }
         assert!(
-            dir.join("wal-000001.log").exists(),
-            "committed mutations must be durably logged in the WAL"
+            dir.join("wal").join("app").join("wal-000001.log").exists(),
+            "committed mutations must be durably logged in the per-database WAL"
         );
         // Simulate the table snapshot writes being lost in the crash while the catalog
-        // and the WAL survive.
+        // and the WAL survive. The WAL lives under `wal/`, a separate tree from `tables/`,
+        // so removing the snapshots leaves the redo log intact — as a real crash would.
         fs::remove_dir_all(dir.join("tables")).ok();
 
         // Reopen: recovery must replay the WAL and restore both rows.
@@ -32611,7 +32611,7 @@ mod tests {
         assert_eq!(live, 2, "both inserted rows must be recovered from the WAL");
         // A successful recovery truncates the WAL back to a clean checkpoint.
         assert!(
-            !dir.join("wal-000001.log").exists(),
+            !dir.join("wal").join("app").join("wal-000001.log").exists(),
             "WAL must be truncated after a successful recovery"
         );
         Ok(())
@@ -32666,7 +32666,7 @@ mod tests {
                 engine.data_insert(&table_ref, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
             }
         }
-        let full_wal = fs::read(base.join("wal-000001.log"))?;
+        let full_wal = fs::read(base.join("wal").join("app").join("wal-000001.log"))?;
         assert!(!full_wal.is_empty(), "inserts must be logged in the WAL");
 
         let steps = 24usize;
@@ -32677,7 +32677,10 @@ mod tests {
             copy_dir_all(&base, &dir)?;
             // Force WAL-only recovery so the truncation length alone controls recovered rows.
             fs::remove_dir_all(dir.join("tables")).ok();
-            fs::write(dir.join("wal-000001.log"), &full_wal[..trunc])?;
+            fs::write(
+                dir.join("wal").join("app").join("wal-000001.log"),
+                &full_wal[..trunc],
+            )?;
 
             // Reopening a torn WAL must never panic or error out.
             let engine = Engine::open(&dir)?;
@@ -32727,14 +32730,15 @@ mod tests {
             )?;
             // Opt into group commit: fsync only every 16 commits.
             engine.wal_sync_batch = 16;
-            engine.wal_unsynced_commits = 0;
             for i in 1..=5u64 {
                 engine.data_insert(&table_ref, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
             }
             // The 5 commits are below the batch, so no fsync fired — they were appended only
-            // (durable to the OS page cache, recoverable on a clean restart).
+            // (durable to the OS page cache, recoverable on a clean restart). The unsynced
+            // counter is tracked per database, so read the "app" database's WAL.
             assert_eq!(
-                engine.wal_unsynced_commits, 5,
+                engine.wals.get("app").map(|w| w.unsynced_commits),
+                Some(5),
                 "group commit must defer the fsync below the batch size"
             );
             // Drop without a checkpoint.
@@ -32748,6 +32752,154 @@ mod tests {
         assert_eq!(
             live, 5,
             "group-committed WAL must recover all commits on a clean restart"
+        );
+        Ok(())
+    }
+
+    // Each database logs to its own WAL under `wal/<db>/`, and a crash before any checkpoint
+    // recovers every database from its own log independently. This is the per-database WAL
+    // partitioning that underpins per-database write-lock sharding.
+    #[test]
+    fn wal_partitions_per_database_and_recovers_each_independently() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_multidb");
+        let t_app = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let t_logs = BaseTableRef {
+            db: "logs".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        let id_col = || {
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }]
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                id_col(),
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.create_table(
+                "logs",
+                "events",
+                id_col(),
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(
+                &t_app,
+                vec![
+                    row(&[("id", Lit::U64 { v: 1 })]),
+                    row(&[("id", Lit::U64 { v: 2 })]),
+                ],
+                None,
+            )?;
+            engine.data_insert(&t_logs, vec![row(&[("id", Lit::U64 { v: 10 })])], None)?;
+            // Each database logged to its own WAL directory; there is no shared global WAL.
+            assert!(
+                dir.join("wal").join("app").join("wal-000001.log").exists(),
+                "the app database must have its own WAL"
+            );
+            assert!(
+                dir.join("wal").join("logs").join("wal-000001.log").exists(),
+                "the logs database must have its own WAL"
+            );
+            assert!(
+                !dir.join("wal-000001.log").exists(),
+                "there must be no shared global WAL"
+            );
+            // Drop without a checkpoint: both databases' mutations stay in their WALs.
+        }
+        // Lose every table snapshot; each database must recover from its own WAL.
+        fs::remove_dir_all(dir.join("tables")).ok();
+
+        let engine = Engine::open(&dir)?;
+        let (_, app_tdata) = engine.get_table(&t_app)?;
+        let (_, logs_tdata) = engine.get_table(&t_logs)?;
+        assert_eq!(
+            app_tdata.rows.iter().filter(|r| !r.deleted).count(),
+            2,
+            "the app database must be recovered from its own WAL"
+        );
+        assert_eq!(
+            logs_tdata.rows.iter().filter(|r| !r.deleted).count(),
+            1,
+            "the logs database must be recovered from its own WAL"
+        );
+        assert!(
+            !dir.join("wal").exists(),
+            "a successful recovery truncates every per-database WAL"
+        );
+        Ok(())
+    }
+
+    // A database created by an earlier version wrote one shared global WAL
+    // (`<data_dir>/wal-000001.log`). On the first open after upgrade that legacy log must be
+    // drained onto the snapshots and removed, migrating to the per-database layout.
+    #[test]
+    fn wal_recovery_drains_and_removes_a_legacy_global_wal() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_legacy_migration");
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(
+                &table_ref,
+                vec![
+                    row(&[("id", Lit::U64 { v: 1 })]),
+                    row(&[("id", Lit::U64 { v: 2 })]),
+                ],
+                None,
+            )?;
+        }
+        // The WAL record format is identical to the pre-partitioning one, so relocating the
+        // per-database WAL to the old global path faithfully reproduces a legacy on-disk WAL.
+        let per_db = dir.join("wal").join("app").join("wal-000001.log");
+        let legacy = dir.join("wal-000001.log");
+        fs::rename(&per_db, &legacy)?;
+        fs::remove_dir_all(dir.join("wal")).ok();
+        // Lose the snapshots so recovery must come from the legacy WAL alone.
+        fs::remove_dir_all(dir.join("tables")).ok();
+        assert!(legacy.exists(), "legacy global WAL is staged for migration");
+
+        let engine = Engine::open(&dir)?;
+        let (_, tdata) = engine.get_table(&table_ref)?;
+        assert_eq!(
+            tdata.rows.iter().filter(|r| !r.deleted).count(),
+            2,
+            "both rows must be recovered from the legacy global WAL"
+        );
+        assert!(
+            !legacy.exists(),
+            "the legacy global WAL must be drained and removed after migration"
         );
         Ok(())
     }
@@ -32941,7 +33093,7 @@ mod tests {
         // there is no redo log to recover from — the corruption stands alone.
         let corrupt = b"this is not a valid .rseg file".to_vec();
         fs::write(&seg_path, &corrupt)?;
-        fs::remove_file(dir.join("wal-000001.log")).ok();
+        fs::remove_dir_all(dir.join("wal")).ok();
 
         let mut engine = Engine::open(&dir)?;
         {
@@ -33074,7 +33226,7 @@ mod tests {
             );
             assert_eq!(engine.mutations_since_flush, 2);
             assert!(
-                dir.join("wal-000001.log").exists(),
+                dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "WAL must hold the deferred mutations"
             );
             // Dropped without checkpoint: the snapshot never captured the rows.
@@ -33103,7 +33255,7 @@ mod tests {
             );
             assert_eq!(engine.mutations_since_flush, 0);
             assert!(
-                !dir.join("wal-000001.log").exists(),
+                !dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "threshold flush should truncate the WAL"
             );
         }
@@ -52206,7 +52358,7 @@ mod tests {
         // This test fabricates a legacy on-disk table that predates the WAL, so drop any
         // WAL the setup inserts produced; otherwise recovery would (correctly) replay the
         // originally committed rows over the hand-written legacy snapshot.
-        remove_file_if_exists(&dir.join("wal-000001.log"))?;
+        fs::remove_dir_all(dir.join("wal")).ok();
 
         let reopened = Engine::open(&dir)?;
         let (_, tdata) = reopened.get_table(&table)?;

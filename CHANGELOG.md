@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.38 - 2026-07-18
+
+Per-database write-ahead logs — the first shipped slice of per-database write-lock sharding (`docs/PERFORMANCE.md` §4b, step i). Behavior-preserving; a durability-path refactor with automatic migration.
+
+- **Storage — per-database row-redo WAL.** The crash-recovery WAL is now partitioned per database at `<data_dir>/wal/<db>/wal-000001.log` (was a single global `<data_dir>/wal-000001.log`). Each database has its own writer, transaction stream, and group-commit fsync counter, opened lazily on that database's first mutation, so one database's append + `fsync` no longer serializes behind another's — the durability-side prerequisite for sharding the global write lock per database. Because a single DML statement only ever touches one database, a WAL transaction never spans databases: this is a pure refactor of *where* redo lands, with no cross-database atomicity change. `SKEINDB_WAL_SYNC_BATCH` group commit now applies per database.
+- **Migration.** A legacy single global WAL written by an earlier version is drained onto the snapshots and removed on the first `Engine::open` after upgrade — automatic and one-time; no operator action.
+- Validated with clean `cargo fmt --all -- --check`, clean `cargo clippy --workspace --all-targets --all-features -- -D warnings` (Rust 1.97), and a green full test suite (618 unit + 150 cluster_rpc + integration). The complete WAL crash-recovery harness (torn-tail-at-every-offset, group-commit durability, lost-snapshot recovery, PK-update phantom-row) still passes, plus two new tests: per-database WAL partitioning with independent recovery, and legacy-global-WAL drain-and-migrate. Docs (`ON_DISK_FORMAT.md` §11.11, `PERFORMANCE.md` §4b, `CONFIGURATION.md`) and the docs site updated.
+
 ## v0.3.37 - 2026-07-17
 
 Read-committed reads now work on the primary too, and the remaining large item (per-database write-lock sharding) is scoped with a concrete design. Behavior-preserving by default.
