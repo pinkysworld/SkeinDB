@@ -42,7 +42,7 @@ data/
     <db>/<table>.rseg         (prototype row segment container, format v1)
     <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
   wal/
-    wal-000001.log
+    <db>/wal-000001.log       (per-database row-redo WAL, core WAL framing)
   rows/
     rows-000001.rseg
   vals/
@@ -761,12 +761,20 @@ Rules:
 - `keys` map the JSON-encoded composite key to row indexes inside the current table snapshot.
 - Missing files or unknown `format_version` values are ignored and fall back to rebuilding from row data.
 
-### 11.11 Row-redo WAL (`wal-000001.log`)
+### 11.11 Row-redo WAL (`wal/<db>/wal-000001.log`)
 
-A single engine-level write-ahead log at `<data_dir>/wal-000001.log` provides crash
-recovery for committed table data. It uses the core WAL file framing from §9 (64-byte
+A **per-database** engine-level write-ahead log at `<data_dir>/wal/<db>/wal-000001.log`
+provides crash recovery for committed table data — each database has its own WAL, opened
+lazily on that database's first mutation. It uses the core WAL file framing from §9 (64-byte
 file header + length-prefixed records, grouped into `begin` / `mutation` / `commit`
-transactions), one transaction per committed DML statement.
+transactions), one transaction per committed DML statement. A single DML statement only ever
+touches one database, so a WAL transaction never spans databases; partitioning the log per
+database keeps one database's append + group-commit fsync independent of another's (the
+durability-side prerequisite for per-database write-lock sharding — see PERFORMANCE.md §4b).
+
+A **legacy single global WAL** at `<data_dir>/wal-000001.log`, written by a version predating
+the per-database split, is drained onto the snapshots and removed on the first `Engine::open`
+after upgrade — an automatic, one-time migration to the per-database layout.
 
 Each `mutation` record's payload is a JSON-encoded **row redo record** — the full final
 state of one changed row:
@@ -790,16 +798,17 @@ Semantics:
   affected rows' redo records are appended and **fsynced before** the table snapshot
   (`.rseg`/`.json`) is written. A crash at any point therefore leaves a state the next
   open can reconstruct.
-- **Replay.** On `Engine::open`, after snapshots are loaded, committed records are
-  replayed. Redo is **idempotent**: a record is applied only when its `version` exceeds
-  the row already present (by primary key), so records the snapshot already reflects are
-  skipped and a mutation lost between its WAL commit and the snapshot write is restored.
-  Deletes replay as tombstones (`deleted: true`).
+- **Replay.** On `Engine::open`, after snapshots are loaded, every database's committed
+  records (plus any legacy global WAL) are replayed. Redo is **idempotent**: a record is
+  applied only when its `version` exceeds the row already present (by primary key), so
+  records the snapshot already reflects are skipped and a mutation lost between its WAL
+  commit and the snapshot write is restored. Deletes replay as tombstones (`deleted: true`).
 - **Truncation.** After a successful replay — and at every checkpoint, once all table
-  snapshots are durable — the WAL is deleted and reopened lazily on the next mutation, so
-  it only ever holds mutations since the last checkpoint.
+  snapshots are durable — the WALs are deleted and reopened lazily on the next mutation, so
+  each only ever holds mutations since the last checkpoint.
 
-No existing on-disk record format changes; this is an additional, self-contained file.
+No existing on-disk record format changes; the record layout is identical to the previous
+single-WAL version — only the file's location moved under `wal/<db>/`.
 
 ---
 

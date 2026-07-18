@@ -1,14 +1,22 @@
 //! Row-level redo write-ahead log for crash recovery of table data.
 //!
 //! Each committed DML mutation (insert/update/delete) appends the full final image of
-//! every changed row to a single global WAL (`<data_dir>/wal-000001.log`) and fsyncs it
-//! *before* the table snapshot is written. On the next [`Engine::open`] the committed
-//! records are replayed onto the loaded snapshots. Redo is idempotent: each record
-//! carries the row's full final image plus its monotonic `version` and `commit_ts_ms`,
-//! so re-applying a record the snapshot already holds is a no-op (the version check
-//! skips it), while a mutation lost between its WAL commit and the snapshot write is
-//! recovered. After replay — and at every checkpoint — the recovered tables are
-//! re-persisted and the WAL is truncated to a clean state.
+//! every changed row to its database's own WAL (`<data_dir>/wal/<db>/wal-000001.log`) and
+//! fsyncs it *before* the table snapshot is written. On the next [`Engine::open`] every
+//! database's committed records are replayed onto the loaded snapshots. Redo is idempotent:
+//! each record carries the row's full final image plus its monotonic `version` and
+//! `commit_ts_ms`, so re-applying a record the snapshot already holds is a no-op (the
+//! version check skips it), while a mutation lost between its WAL commit and the snapshot
+//! write is recovered. After replay — and at every checkpoint — the recovered tables are
+//! re-persisted and the WALs are truncated to a clean state.
+//!
+//! Partitioning the WAL per database (rather than one shared log) keeps one database's
+//! append + group-commit fsync independent of another's; that independence is the
+//! durability-side prerequisite for per-database write-lock sharding (see
+//! `docs/PERFORMANCE.md` §4b). A single DML statement only ever touches one database, so a
+//! WAL transaction never spans databases and the partition introduces no cross-database
+//! atomicity change. A legacy single global WAL (`<data_dir>/wal-000001.log`) written by an
+//! earlier version is drained and removed on the first open after upgrade.
 //!
 //! This closes the "crash safety between persists is best-effort" gap: the table
 //! snapshot and the WAL are written in a fixed order (WAL fsync, then snapshot), so a
@@ -53,44 +61,111 @@ impl WalRowRecord {
     }
 }
 
+/// One database's write-ahead log: its append-only writer plus the count of committed
+/// transactions appended but not yet fsynced (bounded by `Engine::wal_sync_batch`; reset at
+/// each fsync and when the database's WAL is truncated). Held in `Engine::wals`, keyed by
+/// database name, and opened lazily on that database's first mutation.
+#[derive(Debug)]
+pub(crate) struct DbWal {
+    pub(crate) writer: WalWriter,
+    pub(crate) unsynced_commits: u64,
+}
+
 impl Engine {
-    pub(crate) fn wal_path(&self) -> PathBuf {
+    /// Root directory holding every database's WAL sidecar directory.
+    pub(crate) fn wal_dir(&self) -> PathBuf {
+        self.data_dir.join("wal")
+    }
+
+    /// Path to one database's WAL segment (`<data_dir>/wal/<db>/wal-000001.log`).
+    pub(crate) fn wal_db_path(&self, db: &str) -> PathBuf {
+        self.wal_dir().join(db).join("wal-000001.log")
+    }
+
+    /// Path to the pre-partitioning single global WAL. Present only until the first open
+    /// after upgrading from a version that wrote one shared log; drained then removed.
+    pub(crate) fn legacy_wal_path(&self) -> PathBuf {
         self.data_dir.join("wal-000001.log")
     }
 
-    /// Append a batch of row redo records as one committed WAL transaction. Called by the DML
-    /// handlers *before* they persist the table snapshot, so a crash after this returns can
-    /// always recover the mutation on the next open().
+    /// Database names that currently have a WAL segment on disk under `wal/`.
+    fn wal_dbs_on_disk(&self) -> Vec<String> {
+        let mut dbs = Vec::new();
+        if let Ok(entries) = fs::read_dir(self.wal_dir()) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if self.wal_db_path(name).exists() {
+                            dbs.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        dbs
+    }
+
+    /// Append a batch of row redo records as committed WAL transactions (one per database).
+    /// Called by the DML handlers *before* they persist the table snapshot, so a crash after
+    /// this returns can always recover the mutation on the next open().
     ///
     /// The record is always appended (durable to the OS page cache, so it survives a process
     /// crash and is recovered on a clean restart). The `fsync` — which is what forces it to
     /// stable storage and survives a power-loss crash — is issued every `wal_sync_batch`
-    /// commits (group commit). With the default batch of 1 that is every commit (unchanged,
-    /// strongest durability); a larger batch amortizes the fsync-under-lock cost. Recovery is
-    /// a consistent committed prefix regardless of where an fsync fell (see
+    /// commits (group commit) per database. With the default batch of 1 that is every commit
+    /// (unchanged, strongest durability); a larger batch amortizes the fsync-under-lock cost.
+    /// Recovery is a consistent committed prefix regardless of where an fsync fell (see
     /// `wal_recovery_is_robust_to_torn_tail_at_every_offset`), and the deferred snapshot flush
     /// makes everything durable at each checkpoint.
     pub(crate) fn wal_log_rows(&mut self, records: &[WalRowRecord]) -> anyhow::Result<()> {
         if records.is_empty() {
             return Ok(());
         }
-        if self.wal.is_none() {
-            self.wal = Some(WalWriter::open(self.wal_path())?);
+        // Group by database so each database's redo lands in its own WAL. Every current
+        // caller (`data_insert`/`data_update`/`data_delete`) passes a single database's rows,
+        // so this is normally one group; grouping keeps the invariant explicit and correct
+        // even if a future caller batches across databases.
+        let mut by_db: BTreeMap<&str, Vec<&WalRowRecord>> = BTreeMap::new();
+        for rec in records {
+            by_db.entry(rec.db.as_str()).or_default().push(rec);
         }
+        for (db, recs) in by_db {
+            self.wal_log_rows_for_db(db, &recs)?;
+        }
+        Ok(())
+    }
+
+    /// Append one database's redo records as a single committed transaction to that
+    /// database's WAL, opening the writer lazily and fsyncing per the group-commit batch.
+    /// See [`Engine::wal_log_rows`] for the durability contract.
+    fn wal_log_rows_for_db(&mut self, db: &str, records: &[&WalRowRecord]) -> anyhow::Result<()> {
         let txn = self.wal_next_txn;
         self.wal_next_txn = self.wal_next_txn.wrapping_add(1);
-        {
-            let writer = self.wal.as_mut().expect("wal writer opened above");
-            writer.begin_txn(txn)?;
-            for rec in records {
-                writer.append_mutation(txn, serde_json::to_vec(rec)?)?;
-            }
-            writer.commit_txn(txn)?;
+        if !self.wals.contains_key(db) {
+            let dir = self.wal_dir().join(db);
+            fs::create_dir_all(&dir)?;
+            let writer = WalWriter::open(self.wal_db_path(db))?;
+            self.wals.insert(
+                db.to_string(),
+                DbWal {
+                    writer,
+                    unsynced_commits: 0,
+                },
+            );
         }
-        self.wal_unsynced_commits = self.wal_unsynced_commits.saturating_add(1);
-        if self.wal_unsynced_commits >= self.wal_sync_batch {
-            self.wal.as_ref().expect("wal writer opened above").sync()?;
-            self.wal_unsynced_commits = 0;
+        let batch = self.wal_sync_batch;
+        let dbwal = self.wals.get_mut(db).expect("wal writer opened above");
+        dbwal.writer.begin_txn(txn)?;
+        for rec in records {
+            dbwal
+                .writer
+                .append_mutation(txn, serde_json::to_vec(rec)?)?;
+        }
+        dbwal.writer.commit_txn(txn)?;
+        dbwal.unsynced_commits = dbwal.unsynced_commits.saturating_add(1);
+        if dbwal.unsynced_commits >= batch {
+            dbwal.writer.sync()?;
+            dbwal.unsynced_commits = 0;
         }
         Ok(())
     }
@@ -99,24 +174,37 @@ impl Engine {
     /// recovers any mutation that did not reach its table snapshot before a crash, then
     /// re-persists the affected tables and truncates the WAL to a clean checkpoint.
     pub(crate) fn wal_recover(&mut self) {
-        let path = self.wal_path();
-        if !path.exists() {
+        // Sources: a legacy single global WAL (present only right after upgrading from a
+        // version that wrote one shared log), then every per-database WAL. Replay is
+        // idempotent, so the order between them does not matter.
+        let mut sources: Vec<PathBuf> = Vec::new();
+        let legacy = self.legacy_wal_path();
+        if legacy.exists() {
+            sources.push(legacy);
+        }
+        for db in self.wal_dbs_on_disk() {
+            sources.push(self.wal_db_path(&db));
+        }
+        if sources.is_empty() {
             return;
         }
-        let Ok(reader) = WalReader::open(&path) else {
-            return;
-        };
-        let Ok(recovery) = reader.recover() else {
-            return;
-        };
+
         let mut touched: BTreeSet<(String, String)> = BTreeSet::new();
-        for txn in &recovery.txns {
-            for mutation in &txn.mutations {
-                let Ok(rec) = serde_json::from_slice::<WalRowRecord>(&mutation.payload) else {
-                    continue;
-                };
-                if self.wal_apply_record(&rec) {
-                    touched.insert((rec.db, rec.table));
+        for path in &sources {
+            let Ok(reader) = WalReader::open(path) else {
+                continue;
+            };
+            let Ok(recovery) = reader.recover() else {
+                continue;
+            };
+            for txn in &recovery.txns {
+                for mutation in &txn.mutations {
+                    let Ok(rec) = serde_json::from_slice::<WalRowRecord>(&mutation.payload) else {
+                        continue;
+                    };
+                    if self.wal_apply_record(&rec) {
+                        touched.insert((rec.db, rec.table));
+                    }
                 }
             }
         }
@@ -181,14 +269,19 @@ impl Engine {
         true
     }
 
-    /// Drop and delete the WAL file, discarding all records. Called after a full
-    /// checkpoint (or after replay) has made every table snapshot durable.
+    /// Drop and delete every database's WAL (and any legacy global WAL), discarding all
+    /// records. Called after a full checkpoint (or after replay) has made every table
+    /// snapshot durable.
     pub(crate) fn wal_truncate(&mut self) {
-        self.wal = None;
-        // The log is gone, so nothing is pending an fsync. (The snapshots that superseded it
-        // were persisted durably before truncation.)
-        self.wal_unsynced_commits = 0;
-        let _ = fs::remove_file(self.wal_path());
+        // Drop the writers first so their files can be removed, and because nothing is left
+        // pending an fsync (the snapshots that superseded them were persisted durably before
+        // truncation). Clearing the map resets every database's unsynced-commit counter.
+        self.wals.clear();
+        // Remove the whole per-database WAL tree and the legacy global WAL. Best-effort: a
+        // missing path is already the desired end state. This also covers WALs that were only
+        // read during recovery (no in-memory writer was ever opened for them).
+        let _ = fs::remove_dir_all(self.wal_dir());
+        let _ = fs::remove_file(self.legacy_wal_path());
     }
 
     /// Record a committed row mutation's snapshot write as deferred: the WAL already made
