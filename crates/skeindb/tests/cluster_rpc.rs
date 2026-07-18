@@ -662,6 +662,160 @@ async fn replication_snapshot_export_round_trips_full_state() -> anyhow::Result<
     Ok(())
 }
 
+/// The streamed snapshot protocol (`mode:"begin"` + `mode:"chunk"`) pages the full snapshot in
+/// bounded chunks so a re-sync of a database far larger than RAM never buffers it whole. `begin`
+/// spills the snapshot and returns only its position + counts (no inline ops); `chunk` returns
+/// bounded pages that, concatenated, equal the full op set and round-trip the state.
+#[tokio::test]
+async fn replication_snapshot_streams_in_bounded_chunks() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let source = HttpHarness::start("snapshot_stream_source")?;
+    let sc = RpcHttpClient::new(source.base_url());
+
+    assert!(
+        sc.rpc("schema.create_database", json!({"db": "shop"}))
+            .await?
+            .ok
+    );
+    assert!(
+        sc.rpc(
+            "schema.create_table",
+            json!({
+                "db": "shop", "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?
+        .ok
+    );
+    for (id, name) in [(1u64, "Ada"), (2, "Bo"), (3, "Cy"), (4, "Di"), (5, "El")] {
+        assert!(
+            sc.rpc(
+                "data.insert",
+                json!({
+                    "into": {"db": "shop", "table": "users"},
+                    "rows": [{"id": {"t": "u64", "v": id}, "name": {"t": "str", "v": name}}]
+                }),
+            )
+            .await?
+            .ok
+        );
+    }
+
+    // begin: spills the snapshot and returns its position + counts, with NO inline ops.
+    let begin = sc
+        .rpc("cluster.replication.snapshot", json!({"mode": "begin"}))
+        .await?;
+    assert!(begin.ok);
+    let begin_res = begin.result.as_ref().expect("begin result");
+    assert_eq!(
+        begin_res.get("mode").and_then(|v| v.as_str()),
+        Some("begin")
+    );
+    assert!(
+        begin_res.get("ops").is_none(),
+        "begin must not inline the ops (that is the whole point of streaming)"
+    );
+    let snapshot_term = begin_res
+        .get("snapshot_term")
+        .and_then(|v| v.as_u64())
+        .expect("snapshot_term");
+    let snapshot_seq = begin_res
+        .get("snapshot_seq")
+        .and_then(|v| v.as_u64())
+        .expect("snapshot_seq");
+    let op_count = begin_res
+        .get("op_count")
+        .and_then(|v| v.as_u64())
+        .expect("op_count");
+    assert!(
+        op_count >= 3,
+        "expected at least create_database + create_table + an insert"
+    );
+
+    // chunk: a tiny limit forces several bounded pages; collect all ops in order.
+    let mut ops: Vec<serde_json::Value> = Vec::new();
+    let mut byte_offset = 0u64;
+    let mut pages = 0;
+    loop {
+        let chunk = sc
+            .rpc(
+                "cluster.replication.snapshot",
+                json!({
+                    "mode": "chunk",
+                    "snapshot_term": snapshot_term,
+                    "snapshot_seq": snapshot_seq,
+                    "byte_offset": byte_offset,
+                    "limit": 2
+                }),
+            )
+            .await?;
+        assert!(chunk.ok);
+        let cr = chunk.result.as_ref().expect("chunk result");
+        let page = cr
+            .get("ops")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(page.len() <= 2, "chunk must respect the ops limit");
+        ops.extend(page);
+        byte_offset = cr
+            .get("next_byte_offset")
+            .and_then(|v| v.as_u64())
+            .expect("next_byte_offset");
+        pages += 1;
+        assert!(pages < 1000, "pagination did not terminate");
+        if cr.get("done").and_then(|v| v.as_bool()).unwrap_or(true) {
+            break;
+        }
+    }
+    assert_eq!(
+        ops.len() as u64,
+        op_count,
+        "the streamed pages must concatenate to exactly the begin op_count"
+    );
+    assert!(
+        pages >= 2,
+        "a limit of 2 over {op_count} ops must span multiple chunks"
+    );
+
+    // Applying the streamed ops to a fresh node round-trips the full state.
+    let target = HttpHarness::start("snapshot_stream_target")?;
+    let tc = RpcHttpClient::new(target.base_url());
+    for op in &ops {
+        let method = op
+            .get("method")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("streamed op missing method"))?;
+        let params = op.get("params").cloned().unwrap_or_else(|| json!({}));
+        assert!(
+            tc.rpc(method, params).await?.ok,
+            "applying streamed op '{method}' failed"
+        );
+    }
+    let got = tc
+        .rpc(
+            "data.get",
+            json!({"table": {"db": "shop", "table": "users"}, "pk": [{"t": "u64", "v": 4}]}),
+        )
+        .await?;
+    assert_eq!(
+        got.result
+            .as_ref()
+            .and_then(|v| v.get("row"))
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.get("v"))
+            .and_then(|v| v.as_str()),
+        Some("Di"),
+        "a streamed-and-paged snapshot must round-trip every row"
+    );
+    Ok(())
+}
+
 /// The primary's op-log buffer serves a lagging replica's catch-up pull: `cluster.replication.fetch`
 /// returns the ops after a given position, in order, and nothing once caught up.
 #[tokio::test]
