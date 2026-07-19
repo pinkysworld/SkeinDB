@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -395,8 +395,10 @@ pub struct Engine {
     /// Research: edge bundle coverage tracking (R14).
     edge_coverage: HashMap<TableKey, Vec<EdgeCoverage>>,
 
-    /// Research: HNSW vector indexes for approximate nearest neighbor (R10).
-    hnsw_indexes: HashMap<HnswIndexKey, HnswIndex>,
+    /// Research: HNSW vector indexes for approximate nearest neighbor (R10). Behind a `RwLock`
+    /// (interior mutability) so the write path can invalidate/rebuild indexes through `&self` —
+    /// a step toward per-database write-lock sharding (search reads share the lock).
+    hnsw_indexes: RwLock<HashMap<HnswIndexKey, HnswIndex>>,
 
     /// Research: schema evolution tracking (R15).
     schema_versions: HashMap<TableKey, u64>,
@@ -2095,7 +2097,7 @@ impl Engine {
             merge_wasm_registry: HashMap::new(),
             views: HashMap::new(),
             edge_coverage: HashMap::new(),
-            hnsw_indexes: HashMap::new(),
+            hnsw_indexes: RwLock::new(HashMap::new()),
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
@@ -6062,7 +6064,14 @@ impl Engine {
             column: params.column.clone(),
         };
         if params.filter.is_none() && !use_lsh {
-            if let Some(hnsw) = self.hnsw_indexes.get(&hnsw_key) {
+            // Hold the read guard across the whole search: the block only reads the index and
+            // `tdata.rows`, never re-locking `hnsw_indexes`, so this cannot self-deadlock. The
+            // guard drops at the end of this block before any non-index fallback runs.
+            let hnsw_guard = self
+                .hnsw_indexes
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(hnsw) = hnsw_guard.get(&hnsw_key) {
                 if hnsw.count > 0 && hnsw.dims == dims && hnsw.built_version == schema.table_version
                 {
                     let column = params.column.clone();
@@ -6415,7 +6424,10 @@ impl Engine {
             },
             column: column.to_string(),
         };
-        self.hnsw_indexes.insert(key, hnsw);
+        self.hnsw_indexes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, hnsw);
     }
 
     fn invalidate_hnsw_indexes_for_table(&mut self, table: &BaseTableRef) {
@@ -6424,6 +6436,8 @@ impl Engine {
             table: table.table.clone(),
         };
         self.hnsw_indexes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|index_key, _| index_key.table != key);
     }
 
@@ -44810,7 +44824,7 @@ mod tests {
             ],
             upsert: true,
         })?;
-        assert_eq!(engine.hnsw_indexes.len(), 1);
+        assert_eq!(engine.hnsw_indexes.read().unwrap().len(), 1);
 
         let query_embedding = Lit::Embedding {
             dims: 3,
@@ -44884,7 +44898,7 @@ mod tests {
             None,
             &[],
         )?;
-        assert!(engine.hnsw_indexes.is_empty());
+        assert!(engine.hnsw_indexes.read().unwrap().is_empty());
 
         let changed =
             engine.vector_search(search_params(Some(skeindb_skeinql::types::QueryCache {
