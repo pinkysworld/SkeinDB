@@ -303,9 +303,18 @@ impl Engine {
         if self.encrypted_locked_tables.contains(&key) || self.corrupt_tables.contains(&key) {
             return self.persist_table(db, table);
         }
-        self.dirty_tables.insert(key);
-        self.mutations_since_flush = self.mutations_since_flush.saturating_add(1);
-        if self.mutations_since_flush >= WAL_FLUSH_THRESHOLD {
+        // Release the flush_state lock before the threshold flush — `flush_dirty_tables` locks
+        // it again, and the engine's `Mutex` is not reentrant.
+        let should_flush = {
+            let mut flush = self
+                .flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flush.dirty.insert(key);
+            flush.mutations_since_flush = flush.mutations_since_flush.saturating_add(1);
+            flush.mutations_since_flush >= WAL_FLUSH_THRESHOLD
+        };
+        if should_flush {
             self.flush_dirty_tables()?;
         }
         Ok(())
@@ -316,19 +325,38 @@ impl Engine {
     /// fails the error propagates with the still-dirty tables retained and the WAL left
     /// intact, so nothing is lost (the next flush or `open()` replay recovers it).
     pub(crate) fn flush_dirty_tables(&mut self) -> anyhow::Result<()> {
-        if self.dirty_tables.is_empty() {
-            self.mutations_since_flush = 0;
+        let targets: Vec<TableKey> = {
+            let flush = self
+                .flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flush.dirty.iter().cloned().collect()
+        };
+        if targets.is_empty() {
+            self.flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mutations_since_flush = 0;
             return Ok(());
         }
-        let targets: Vec<TableKey> = self.dirty_tables.iter().cloned().collect();
+        // Persist each dirty table, removing it only on success — so an error leaves the
+        // still-dirty tables (and the WAL) intact for the next flush / open() replay. The
+        // lock is released around `persist_table` (I/O) rather than held across it.
         for key in &targets {
             self.persist_table(&key.db, &key.table)?;
-            self.dirty_tables.remove(key);
+            self.flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .dirty
+                .remove(key);
         }
         // Compact the append-only CDC + forensic sidecars into their snapshots and truncate
         // them, bounding sidecar size + recovery replay to one flush interval.
         self.compact_change_forensic_logs();
-        self.mutations_since_flush = 0;
+        self.flush_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mutations_since_flush = 0;
         self.wal_truncate();
         Ok(())
     }

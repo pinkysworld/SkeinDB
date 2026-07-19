@@ -456,13 +456,22 @@ pub struct Engine {
     /// consistent prefix either way).
     wal_sync_batch: u64,
 
-    /// Tables mutated since the last snapshot flush. With the WAL providing per-commit
-    /// durability, row mutations defer their full-table snapshot rewrite: the table is
-    /// marked dirty here and flushed in a batch (see `flush_dirty_tables`), removing the
-    /// O(rows) write amplification of persisting on every single mutation.
-    dirty_tables: HashSet<TableKey>,
-    /// Row mutations since the last flush; when it reaches `WAL_FLUSH_THRESHOLD` the dirty
-    /// tables are flushed and the WAL is truncated, bounding WAL size and replay time.
+    /// Deferred-flush bookkeeping (dirty table set + mutation counter), behind a `Mutex` so
+    /// the write path can update it through `&self` — a step toward per-database write-lock
+    /// sharding. With the WAL providing per-commit durability, row mutations defer their
+    /// full-table snapshot rewrite: the table is marked dirty and flushed in a batch (see
+    /// `flush_dirty_tables`), removing the O(rows) write amplification of persisting on every
+    /// single mutation.
+    flush_state: Mutex<FlushState>,
+}
+
+/// Deferred-flush bookkeeping held behind `Engine::flush_state`.
+#[derive(Debug, Default)]
+struct FlushState {
+    /// Tables mutated since the last snapshot flush (their snapshot rewrite is deferred).
+    dirty: HashSet<TableKey>,
+    /// Row mutations since the last flush; at `WAL_FLUSH_THRESHOLD` the dirty tables flush
+    /// and the WAL is truncated, bounding WAL size and replay time.
     mutations_since_flush: u64,
 }
 
@@ -2121,8 +2130,7 @@ impl Engine {
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(1),
-            dirty_tables: HashSet::new(),
-            mutations_since_flush: 0,
+            flush_state: Mutex::new(FlushState::default()),
         };
 
         engine.load_encryption_state_best_effort();
@@ -2243,11 +2251,18 @@ impl Engine {
                 }
             }
         }
+        let (dirty_len, muts_since_flush) = {
+            let flush = self
+                .flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (flush.dirty.len() as u64, flush.mutations_since_flush)
+        };
         RuntimeStorageMetrics {
             tables: self.tables.len() as u64,
             streaming_tables,
-            dirty_tables: self.dirty_tables.len() as u64,
-            mutations_since_flush: self.mutations_since_flush,
+            dirty_tables: dirty_len,
+            mutations_since_flush: muts_since_flush,
             wal_bytes: self.change_log_bytes(),
             total_rows,
         }
@@ -11707,8 +11722,14 @@ impl Engine {
         let _ = fs::remove_file(self.forensic_flog_path());
         // Every table snapshot is now durable (the loop above persisted them all), so the
         // deferred-flush dirty set is fully covered and the WAL is redundant: reset both.
-        self.dirty_tables.clear();
-        self.mutations_since_flush = 0;
+        {
+            let mut flush = self
+                .flush_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flush.dirty.clear();
+            flush.mutations_since_flush = 0;
+        }
         self.wal_truncate();
         Ok(())
     }
@@ -33281,10 +33302,10 @@ mod tests {
             engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
             engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None)?;
             assert!(
-                engine.dirty_tables.contains(&key),
+                engine.flush_state.lock().unwrap().dirty.contains(&key),
                 "snapshot should be deferred (table left dirty, not persisted per-mutation)"
             );
-            assert_eq!(engine.mutations_since_flush, 2);
+            assert_eq!(engine.flush_state.lock().unwrap().mutations_since_flush, 2);
             assert!(
                 dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "WAL must hold the deferred mutations"
@@ -33310,10 +33331,10 @@ mod tests {
                 engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
             }
             assert!(
-                !engine.dirty_tables.contains(&key),
+                !engine.flush_state.lock().unwrap().dirty.contains(&key),
                 "crossing the threshold should flush dirty tables"
             );
-            assert_eq!(engine.mutations_since_flush, 0);
+            assert_eq!(engine.flush_state.lock().unwrap().mutations_since_flush, 0);
             assert!(
                 !dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "threshold flush should truncate the WAL"
