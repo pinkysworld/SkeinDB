@@ -138,14 +138,18 @@ impl Engine {
     /// Append one database's redo records as a single committed transaction to that
     /// database's WAL, opening the writer lazily and fsyncing per the group-commit batch.
     /// See [`Engine::wal_log_rows`] for the durability contract.
-    fn wal_log_rows_for_db(&mut self, db: &str, records: &[&WalRowRecord]) -> anyhow::Result<()> {
-        let txn = self.wal_next_txn;
-        self.wal_next_txn = self.wal_next_txn.wrapping_add(1);
-        if !self.wals.contains_key(db) {
+    fn wal_log_rows_for_db(&self, db: &str, records: &[&WalRowRecord]) -> anyhow::Result<()> {
+        let txn = self.wal_next_txn.fetch_add(1, Ordering::Relaxed);
+        let batch = self.wal_sync_batch;
+        let mut wals = self
+            .wals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !wals.contains_key(db) {
             let dir = self.wal_dir().join(db);
             fs::create_dir_all(&dir)?;
             let writer = WalWriter::open(self.wal_db_path(db))?;
-            self.wals.insert(
+            wals.insert(
                 db.to_string(),
                 DbWal {
                     writer,
@@ -153,8 +157,7 @@ impl Engine {
                 },
             );
         }
-        let batch = self.wal_sync_batch;
-        let dbwal = self.wals.get_mut(db).expect("wal writer opened above");
+        let dbwal = wals.get_mut(db).expect("wal writer opened above");
         dbwal.writer.begin_txn(txn)?;
         for rec in records {
             dbwal
@@ -276,7 +279,10 @@ impl Engine {
         // Drop the writers first so their files can be removed, and because nothing is left
         // pending an fsync (the snapshots that superseded them were persisted durably before
         // truncation). Clearing the map resets every database's unsynced-commit counter.
-        self.wals.clear();
+        self.wals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         // Remove the whole per-database WAL tree and the legacy global WAL. Best-effort: a
         // missing path is already the desired end state. This also covers WALs that were only
         // read during recovery (no in-memory writer was ever opened for them).

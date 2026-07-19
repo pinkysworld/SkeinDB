@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -440,10 +441,13 @@ pub struct Engine {
     /// on that database's first mutation and truncated at each checkpoint. Partitioning the
     /// WAL per database keeps one database's append+fsync independent of another's — the
     /// durability-side prerequisite for per-database write-lock sharding. See `engine/wal.rs`.
-    wals: HashMap<String, DbWal>,
+    /// Behind a `Mutex` (interior mutability) so the write path can log through `&self` — a
+    /// step toward per-database write-lock sharding.
+    wals: Mutex<HashMap<String, DbWal>>,
     /// Monotonic transaction id stamped on WAL records. Shared across databases; each
     /// per-database WAL only ever sees a subset and pairs begin/commit by id within its file.
-    wal_next_txn: u64,
+    /// Atomic so it can be advanced through `&self`.
+    wal_next_txn: AtomicU64,
     /// Group-commit batch size: fsync a database's WAL once every this many committed
     /// transactions (read once from `SKEINDB_WAL_SYNC_BATCH` at open; default 1 = fsync every
     /// commit = strongest durability). A larger value amortizes the fsync — fewer
@@ -2110,8 +2114,8 @@ impl Engine {
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
             corrupt_tables: HashSet::new(),
-            wals: HashMap::new(),
-            wal_next_txn: 0,
+            wals: Mutex::new(HashMap::new()),
+            wal_next_txn: AtomicU64::new(0),
             wal_sync_batch: std::env::var("SKEINDB_WAL_SYNC_BATCH")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -32788,7 +32792,12 @@ mod tests {
             // (durable to the OS page cache, recoverable on a clean restart). The unsynced
             // counter is tracked per database, so read the "app" database's WAL.
             assert_eq!(
-                engine.wals.get("app").map(|w| w.unsynced_commits),
+                engine
+                    .wals
+                    .lock()
+                    .unwrap()
+                    .get("app")
+                    .map(|w| w.unsynced_commits),
                 Some(5),
                 "group commit must defer the fsync below the batch size"
             );
