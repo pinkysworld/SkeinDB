@@ -377,9 +377,11 @@ pub struct Engine {
     /// Research: oblivious execution policies.
     oblivious_policies: HashMap<TableKey, ObliviousPolicy>,
 
-    /// Research: forensic hash chain (prototype).
-    forensic_chain: Vec<ForensicRecord>,
-    forensic_next_id: u64,
+    /// Research: forensic hash chain (prototype). Behind a `RwLock` (interior mutability) so the
+    /// write path can append audit records through `&self` — a step toward per-database
+    /// write-lock sharding. Appends serialize (the chain is a linked hash chain); queries share
+    /// the read lock.
+    forensic: RwLock<ForensicState>,
     /// Research: checkpoint anchors for audit verification (T091).
     checkpoint_anchors: Vec<CheckpointAnchor>,
     audit_last_verified_ms: u64,
@@ -473,6 +475,15 @@ struct FlushState {
     /// Row mutations since the last flush; at `WAL_FLUSH_THRESHOLD` the dirty tables flush
     /// and the WAL is truncated, bounding WAL size and replay time.
     mutations_since_flush: u64,
+}
+
+/// Forensic hash-chain state held behind `Engine::forensic`.
+#[derive(Debug, Default)]
+struct ForensicState {
+    /// The linked hash chain of audit records (each record's `prev_hash` is the prior hash).
+    chain: Vec<ForensicRecord>,
+    /// Next forensic record id (monotonic).
+    next_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2102,8 +2113,10 @@ impl Engine {
             dp_audit: Vec::new(),
             dp_audit_next_id: 1,
             oblivious_policies: HashMap::new(),
-            forensic_chain: Vec::new(),
-            forensic_next_id: 1,
+            forensic: RwLock::new(ForensicState {
+                chain: Vec::new(),
+                next_id: 1,
+            }),
             checkpoint_anchors: Vec::new(),
             audit_last_verified_ms: 0,
             merge_policies: HashMap::new(),
@@ -7829,8 +7842,12 @@ impl Engine {
         let to_id = params.to_id.unwrap_or(u64::MAX);
         let limit = params.limit.unwrap_or(200).min(1000) as usize;
 
+        let forensic = self
+            .forensic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut records = Vec::new();
-        for rec in self.forensic_chain.iter() {
+        for rec in forensic.chain.iter() {
             if rec.id < from_id || rec.id > to_id {
                 continue;
             }
@@ -7855,7 +7872,7 @@ impl Engine {
             }
         }
 
-        let chain_head = self.forensic_chain.last().map(|r| r.hash.clone());
+        let chain_head = forensic.chain.last().map(|r| r.hash.clone());
         let start_hash = records.first().map(|r| r.hash.clone());
         let end_hash = records.last().map(|r| r.hash.clone());
         let contiguous = records.windows(2).all(|w| w[1].id == w[0].id + 1)
@@ -7865,12 +7882,12 @@ impl Engine {
         let preceding_hash = if contiguous {
             records
                 .first()
-                .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+                .and_then(|r| forensic_index_by_id(&forensic.chain, r.id))
                 .and_then(|idx| {
                     if idx == 0 {
                         Some(forensic_genesis_hash())
                     } else {
-                        self.forensic_chain.get(idx - 1).map(|r| r.hash.clone())
+                        forensic.chain.get(idx - 1).map(|r| r.hash.clone())
                     }
                 })
         } else {
@@ -7880,18 +7897,18 @@ impl Engine {
         let following_hash = if contiguous {
             records
                 .last()
-                .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
-                .and_then(|idx| self.forensic_chain.get(idx + 1).map(|r| r.hash.clone()))
+                .and_then(|r| forensic_index_by_id(&forensic.chain, r.id))
+                .and_then(|idx| forensic.chain.get(idx + 1).map(|r| r.hash.clone()))
         } else {
             None
         };
         let first_chain_index = records
             .first()
-            .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+            .and_then(|r| forensic_index_by_id(&forensic.chain, r.id))
             .map(|idx| idx as u64);
         let last_chain_index = records
             .last()
-            .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+            .and_then(|r| forensic_index_by_id(&forensic.chain, r.id))
             .map(|idx| idx as u64);
         let checkpoint_anchor = first_chain_index
             .and_then(|idx| {
@@ -7914,8 +7931,8 @@ impl Engine {
                 .find(|anchor| anchor.chain_len > idx + 1)
                 .cloned()
         });
-        let inclusion_proofs = forensic_inclusion_proofs(&self.forensic_chain, &records);
-        let index_summary = forensic_index_summary(&self.forensic_chain, &records);
+        let inclusion_proofs = forensic_inclusion_proofs(&forensic.chain, &records);
+        let index_summary = forensic_index_summary(&forensic.chain, &records);
 
         let proof = serde_json::json!({
             "format": "skein.forensic.proof.v1",
@@ -7937,7 +7954,7 @@ impl Engine {
             "chain_head": chain_head,
             "record_count": records.len(),
             "merkle_root": forensic_merkle_root(&records),
-            "chain_merkle_root": forensic_merkle_root(&self.forensic_chain),
+            "chain_merkle_root": forensic_merkle_root(&forensic.chain),
             "inclusion_proofs": inclusion_proofs,
             "index_summary": index_summary,
         });
@@ -8075,14 +8092,18 @@ impl Engine {
     // -----------------------------
 
     pub fn maintenance_audit_status(&self) -> serde_json::Value {
-        let chain_head_hash = self
-            .forensic_chain
+        let forensic = self
+            .forensic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let chain_head_hash = forensic
+            .chain
             .last()
             .map(|r| r.hash.as_str())
             .unwrap_or("genesis");
         let last_anchor = self.checkpoint_anchors.last();
         serde_json::json!({
-            "chain_length": self.forensic_chain.len(),
+            "chain_length": forensic.chain.len(),
             "chain_head_hash": chain_head_hash,
             "last_verified_ms": self.audit_last_verified_ms,
             "anchor_count": self.checkpoint_anchors.len(),
@@ -8098,7 +8119,15 @@ impl Engine {
 
     pub fn maintenance_audit_verify(&mut self) -> serde_json::Value {
         let start = std::time::Instant::now();
-        let chain = &self.forensic_chain;
+        // Clone the chain out from under the read lock so the rest of the method (which sets
+        // `audit_last_verified_ms` on `&mut self`) is not encumbered by the guard's borrow.
+        let chain = self
+            .forensic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .chain
+            .clone();
+        let chain = &chain;
         let mut ok = true;
         let mut bad_index: Option<u64> = None;
         let mut reason: Option<String> = None;
@@ -10534,19 +10563,28 @@ impl Engine {
     }
 
     fn append_forensic_record(
-        &mut self,
+        &self,
         db: &str,
         table: &str,
         op: &str,
         change_seq: u64,
         pk: Option<Vec<Lit>>,
     ) {
-        let prev_hash = self
-            .forensic_chain
+        let forensic_flog = self.forensic_flog_path();
+        // Hold the write guard across the whole append: reading the prior hash + id, computing
+        // the record, and pushing must be atomic (the chain is a linked hash chain, so appends
+        // are inherently serial). append_log_record is disk I/O under the guard — acceptable
+        // while uncontended; Stage 3 moves the flog I/O off this critical section.
+        let mut forensic = self
+            .forensic
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev_hash = forensic
+            .chain
             .last()
             .map(|r| r.hash.clone())
             .unwrap_or_else(forensic_genesis_hash);
-        let id = self.forensic_next_id;
+        let id = forensic.next_id;
         let ts_ms = now_millis();
         let hash = forensic_record_hash(
             &prev_hash,
@@ -10569,10 +10607,9 @@ impl Engine {
             prev_hash,
             hash,
         };
-        self.forensic_next_id = self.forensic_next_id.saturating_add(1);
-        self.forensic_chain.push(record);
-        let forensic_flog = self.forensic_flog_path();
-        if let Some(rec) = self.forensic_chain.last() {
+        forensic.next_id = forensic.next_id.saturating_add(1);
+        forensic.chain.push(record);
+        if let Some(rec) = forensic.chain.last() {
             append_log_record(&forensic_flog, rec);
         }
     }
@@ -11688,15 +11725,24 @@ impl Engine {
         }
 
         // Write a checkpoint anchor capturing the forensic chain head (T091).
-        let chain_head_hash = self
-            .forensic_chain
-            .last()
-            .map(|r| r.hash.clone())
-            .unwrap_or_else(forensic_genesis_hash);
+        let (chain_head_hash, chain_len) = {
+            let forensic = self
+                .forensic
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                forensic
+                    .chain
+                    .last()
+                    .map(|r| r.hash.clone())
+                    .unwrap_or_else(forensic_genesis_hash),
+                forensic.chain.len() as u64,
+            )
+        };
         let anchor = CheckpointAnchor {
             checkpoint_id: format!("ckpt_{:x}", now_millis()),
             ts_ms: now_millis(),
-            chain_len: self.forensic_chain.len() as u64,
+            chain_len,
             chain_head_hash,
             change_seq: self.change_seq,
         };
@@ -12441,10 +12487,18 @@ impl Engine {
     }
 
     fn load_forensic_best_effort(&mut self) {
-        if let Some(disk) = load_json::<ForensicChainDisk>(&self.forensic_chain_path()) {
+        let forensic_chain_path = self.forensic_chain_path();
+        let forensic_flog_path = self.forensic_flog_path();
+        if let Some(disk) = load_json::<ForensicChainDisk>(&forensic_chain_path) {
             if disk.format_version <= FORENSIC_CHAIN_FORMAT_VERSION {
-                self.forensic_next_id = disk.next_id.max(1);
-                self.forensic_chain = disk.records;
+                {
+                    let mut forensic = self
+                        .forensic
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    forensic.next_id = disk.next_id.max(1);
+                    forensic.chain = disk.records;
+                }
                 self.checkpoint_anchors = disk.checkpoint_anchors;
                 self.audit_last_verified_ms = disk.last_verified_ms;
             }
@@ -12452,25 +12506,37 @@ impl Engine {
         // Replay the append-only sidecar (hash-chain records committed since the last snapshot
         // compaction), keeping only records newer than the snapshot so a crash between
         // snapshot-write and sidecar-truncate never double-appends and breaks chain continuity.
-        let tail = read_log_records::<ForensicRecord>(&self.forensic_flog_path());
+        let tail = read_log_records::<ForensicRecord>(&forensic_flog_path);
         if !tail.is_empty() {
-            let snapshot_max_id = self.forensic_chain.last().map(|r| r.id).unwrap_or(0);
+            let mut forensic = self
+                .forensic
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let snapshot_max_id = forensic.chain.last().map(|r| r.id).unwrap_or(0);
             for rec in tail {
                 if rec.id > snapshot_max_id {
-                    self.forensic_next_id = self.forensic_next_id.max(rec.id + 1);
-                    self.forensic_chain.push(rec);
+                    forensic.next_id = forensic.next_id.max(rec.id + 1);
+                    forensic.chain.push(rec);
                 }
             }
         }
     }
 
     fn persist_forensic_best_effort(&self) {
+        let forensic_chain_path = self.forensic_chain_path();
+        let (next_id, records) = {
+            let forensic = self
+                .forensic
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (forensic.next_id, forensic.chain.clone())
+        };
         let _ = save_json(
-            &self.forensic_chain_path(),
+            &forensic_chain_path,
             &ForensicChainDisk {
                 format_version: FORENSIC_CHAIN_FORMAT_VERSION,
-                next_id: self.forensic_next_id,
-                records: self.forensic_chain.clone(),
+                next_id,
+                records,
                 checkpoint_anchors: self.checkpoint_anchors.clone(),
                 last_verified_ms: self.audit_last_verified_ms,
             },
