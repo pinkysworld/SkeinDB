@@ -327,9 +327,17 @@ pub struct Engine {
     catalog: Catalog,
     tables: HashMap<TableKey, TableData>,
 
-    /// Global change sequence for CDC.
-    change_seq: u64,
-    changes: Vec<ChangeEvent>,
+    /// CDC change log + its global change sequence, bundled behind a `Mutex` (interior
+    /// mutability) so the write path can append change events through `&self` — a step toward
+    /// per-database write-lock sharding.
+    ///
+    /// **Always read via [`Engine::cdc_change_seq`] / [`Engine::cdc_changes_snapshot`], never by
+    /// inlining `self.cdc.lock()` into a larger expression.** A `MutexGuard` temporary lives
+    /// until the end of the enclosing *statement*, so two inlined locks in one statement (e.g.
+    /// two fields of the same struct literal) would both be alive at once and self-deadlock on
+    /// this non-reentrant mutex. The helpers lock and release inside the callee, so any number
+    /// of them may appear in one expression. Writers use a scoped, named-guard block.
+    cdc: Mutex<CdcState>,
     cdc_retention_events: usize,
 
     /// Prepared queries.
@@ -484,6 +492,15 @@ struct ForensicState {
     chain: Vec<ForensicRecord>,
     /// Next forensic record id (monotonic).
     next_id: u64,
+}
+
+/// CDC change-log state held behind `Engine::cdc`.
+#[derive(Debug, Default)]
+struct CdcState {
+    /// Global monotonic change sequence (the seq/lsn stamped on each change event).
+    change_seq: u64,
+    /// Retained change events (trimmed to `cdc_retention_events`).
+    changes: Vec<ChangeEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2089,8 +2106,7 @@ impl Engine {
             storage_mode,
             catalog,
             tables: HashMap::new(),
-            change_seq: 0,
-            changes: Vec::new(),
+            cdc: Mutex::new(CdcState::default()),
             cdc_retention_events: cdc_retention_events(),
             prepared: HashMap::new(),
             next_prepared_id: 1,
@@ -2305,7 +2321,7 @@ impl Engine {
 
     pub fn cdc_runtime_stats_snapshot(&self, subs: &Subscriptions) -> CdcRuntimeStats {
         let earliest_offset = self.current_cdc_earliest_offset();
-        let latest_offset = self.change_seq;
+        let latest_offset = self.cdc_change_seq();
         let retention_limit = self.cdc_retention_events as u64;
         let warn_lag = cdc_backpressure_warn_lag(retention_limit);
         let throttle_lag = cdc_backpressure_throttle_lag(retention_limit);
@@ -2377,7 +2393,7 @@ impl Engine {
             throttle_recommended_subscriptions,
             earliest_offset,
             latest_offset,
-            retained_events: self.changes.len() as u64,
+            retained_events: self.cdc_changes_len() as u64,
             retention_limit,
             dropped_events_total: earliest_offset.saturating_sub(1),
             warn_lag,
@@ -8435,7 +8451,7 @@ impl Engine {
         }
 
         let changes = self
-            .changes
+            .cdc_changes_snapshot()
             .iter()
             .filter(|event| {
                 selected.contains(&TableKey {
@@ -8586,7 +8602,7 @@ impl Engine {
             observed_tables.push(replay_bundle_table_from_engine(&key, schema, tdata));
         }
         let observed_changes = replay
-            .changes
+            .cdc_changes_snapshot()
             .iter()
             .map(|event| ReplayBundleChangeEvent {
                 seq: event.seq,
@@ -8755,7 +8771,7 @@ impl Engine {
             Self::open_with_storage_mode_name(workspace_dir, &bundle.manifest.storage_mode)?;
         replay.catalog = Catalog::default();
         replay.tables.clear();
-        replay.changes = bundle
+        let replay_events: Vec<ChangeEvent> = bundle
             .changes
             .iter()
             .map(|event| ChangeEvent {
@@ -8772,7 +8788,14 @@ impl Engine {
                 lsn: event.lsn,
             })
             .collect();
-        replay.change_seq = replay.changes.last().map(|event| event.seq).unwrap_or(0);
+        {
+            let mut cdc = replay
+                .cdc
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cdc.change_seq = replay_events.last().map(|event| event.seq).unwrap_or(0);
+            cdc.changes = replay_events;
+        }
 
         for table in bundle.tables.iter() {
             let db = table.table.db.clone();
@@ -8892,7 +8915,7 @@ impl Engine {
             }
 
             let mut events = self
-                .changes
+                .cdc_changes_snapshot()
                 .iter()
                 .filter(|ev| {
                     ev.db == key.db
@@ -10185,7 +10208,7 @@ impl Engine {
         view.source_rows.clear();
         view.pk_index = pk_index;
         view.last_refresh_ms = now_millis();
-        view.last_change_seq = self.change_seq;
+        view.last_change_seq = self.cdc_change_seq();
         view.stale = false;
         view.last_refresh_mode = "full".to_string();
         Ok(view.rows.len() as u64)
@@ -10207,7 +10230,7 @@ impl Engine {
         view.source_rows = source_rows;
         view.pk_index = pk_index;
         view.last_refresh_ms = now_millis();
-        view.last_change_seq = self.change_seq;
+        view.last_change_seq = self.cdc_change_seq();
         view.stale = false;
         view.last_refresh_mode = "full".to_string();
         Ok(view.rows.len() as u64)
@@ -10233,7 +10256,7 @@ impl Engine {
         }
 
         let mut changes = Vec::new();
-        for ev in self.changes.iter() {
+        for ev in self.cdc_changes_snapshot().iter() {
             if ev.seq <= view.last_change_seq {
                 continue;
             }
@@ -10317,7 +10340,7 @@ impl Engine {
         }
 
         let mut changes = Vec::new();
-        for ev in self.changes.iter() {
+        for ev in self.cdc_changes_snapshot().iter() {
             if ev.seq <= view.last_change_seq {
                 continue;
             }
@@ -10403,7 +10426,7 @@ impl Engine {
     fn view_refresh_stats(&self, last_change_seq: u64, base: &BaseTableRef) -> ViewRefreshStats {
         let mut stats = ViewRefreshStats::default();
         let mut touched = HashSet::new();
-        for ev in self.changes.iter() {
+        for ev in self.cdc_changes_snapshot().iter() {
             if ev.seq <= last_change_seq {
                 continue;
             }
@@ -10673,10 +10696,10 @@ impl Engine {
             id.clone(),
             Subscription {
                 id: id.clone(),
-                acked_offset: self.change_seq,
+                acked_offset: self.cdc_change_seq(),
                 paused: false,
                 options,
-                sink_offset: self.change_seq,
+                sink_offset: self.cdc_change_seq(),
                 target: SubscriptionTarget::Table {
                     db: db.to_string(),
                     table: table.to_string(),
@@ -10688,7 +10711,7 @@ impl Engine {
 
         Ok(CdcSubscribeResult {
             sub_id: id,
-            offset: self.change_seq,
+            offset: self.cdc_change_seq(),
         })
     }
 
@@ -10732,10 +10755,10 @@ impl Engine {
             id.clone(),
             Subscription {
                 id: id.clone(),
-                acked_offset: self.change_seq,
+                acked_offset: self.cdc_change_seq(),
                 paused: false,
                 options,
-                sink_offset: self.change_seq,
+                sink_offset: self.cdc_change_seq(),
                 target: SubscriptionTarget::Query {
                     query_id: query_id.to_string(),
                     query: prepared.query,
@@ -10749,7 +10772,7 @@ impl Engine {
 
         Ok(CdcSubscribeResult {
             sub_id: id,
-            offset: self.change_seq,
+            offset: self.cdc_change_seq(),
         })
     }
 
@@ -10767,7 +10790,7 @@ impl Engine {
         let events: Vec<ChangeEvent> = Vec::new();
         let resume_offset = from_offset.max(sub.acked_offset);
         let earliest_offset = self.current_cdc_earliest_offset();
-        let latest_offset = self.change_seq;
+        let latest_offset = self.cdc_change_seq();
         let retention_limit = self.cdc_retention_events as u64;
         let warn_lag = cdc_backpressure_warn_lag(retention_limit);
         let throttle_lag = cdc_backpressure_throttle_lag(retention_limit);
@@ -10839,7 +10862,7 @@ impl Engine {
         let mut next_offset = resume_offset;
         match target {
             SubscriptionTarget::Table { db, table } => {
-                for ev in self.changes.iter() {
+                for ev in self.cdc_changes_snapshot().iter() {
                     if ev.seq <= resume_offset {
                         continue;
                     }
@@ -10874,7 +10897,7 @@ impl Engine {
                     .query_dependency_tables(query)?
                     .into_iter()
                     .collect::<HashSet<_>>();
-                for ev in self.changes.iter() {
+                for ev in self.cdc_changes_snapshot().iter() {
                     if ev.seq <= resume_offset {
                         continue;
                     }
@@ -11064,7 +11087,7 @@ impl Engine {
         let retention_limit = self.cdc_retention_events as u64;
         let backpressure = cdc_backpressure_status(
             snapshot_sub,
-            self.change_seq,
+            self.cdc_change_seq(),
             self.current_cdc_earliest_offset(),
             retention_limit,
             cdc_backpressure_warn_lag(retention_limit),
@@ -11744,7 +11767,7 @@ impl Engine {
             ts_ms: now_millis(),
             chain_len,
             chain_head_hash,
-            change_seq: self.change_seq,
+            change_seq: self.cdc_change_seq(),
         };
         self.checkpoint_anchors.push(anchor);
 
@@ -12000,49 +12023,70 @@ impl Engine {
             .map(|disk| disk.events)
             .or_else(|| load_json::<Vec<ChangeEvent>>(&path))
             .unwrap_or_default();
-        self.changes = events;
         // Replay the append-only sidecar (records committed since the last snapshot compaction),
         // keeping only records newer than the snapshot so a crash between snapshot-write and
-        // sidecar-truncate never double-counts.
+        // sidecar-truncate never double-counts. Read the sidecar before taking the lock.
         let tail = read_log_records::<ChangeEvent>(&self.changes_flog_path());
-        if !tail.is_empty() {
-            let snapshot_max_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
-            for ev in tail {
-                if ev.seq > snapshot_max_seq {
-                    self.changes.push(ev);
+        {
+            let mut cdc = self
+                .cdc
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cdc.changes = events;
+            if !tail.is_empty() {
+                let snapshot_max_seq = cdc.changes.last().map(|e| e.seq).unwrap_or(0);
+                for ev in tail {
+                    if ev.seq > snapshot_max_seq {
+                        cdc.changes.push(ev);
+                    }
                 }
             }
+            // The trim below only drains from the front, so the newest seq is already final.
+            cdc.change_seq = cdc.changes.last().map(|e| e.seq).unwrap_or(0);
         }
         self.trim_retained_change_log();
-        self.change_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
     }
 
     fn persist_changes_best_effort(&self) {
+        let changes_path = self.changes_path();
+        let events = self.cdc_changes_snapshot();
         let _ = save_json(
-            &self.changes_path(),
+            &changes_path,
             &ChangeLogDisk {
                 format_version: CHANGE_LOG_FORMAT_VERSION,
-                events: self.changes.clone(),
+                events,
             },
         );
     }
 
-    fn trim_retained_change_log(&mut self) {
-        if self.changes.len() <= self.cdc_retention_events {
+    fn trim_retained_change_log(&self) {
+        let retention = self.cdc_retention_events;
+        let mut cdc = self
+            .cdc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cdc.changes.len() <= retention {
             return;
         }
-        let drop_count = self.changes.len() - self.cdc_retention_events;
-        self.changes.drain(0..drop_count);
+        let drop_count = cdc.changes.len() - retention;
+        cdc.changes.drain(0..drop_count);
     }
 
     fn current_cdc_earliest_offset(&self) -> u64 {
-        self.changes.first().map(|event| event.seq).unwrap_or(0)
+        self.cdc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changes
+            .first()
+            .map(|event| event.seq)
+            .unwrap_or(0)
     }
 
     fn change_log_bytes(&self) -> u64 {
+        let events = self.cdc_changes_snapshot();
         serde_json::to_vec(&ChangeLogDisk {
             format_version: CHANGE_LOG_FORMAT_VERSION,
-            events: self.changes.clone(),
+            events,
         })
         .map(|bytes| bytes.len() as u64)
         .unwrap_or(0)
@@ -13000,32 +13044,74 @@ impl Engine {
         before: Option<RowObject>,
         after: Option<RowObject>,
     ) {
-        self.change_seq += 1;
-        let pk_for_forensic = pk.clone();
-        self.changes.push(ChangeEvent {
-            seq: self.change_seq,
-            db: db.to_string(),
-            table: table.to_string(),
-            op: op.to_string(),
-            pk,
-            before,
-            after,
-            query_id: None,
-            etag: None,
-            commit_ts_ms: now_millis(),
-            lsn: Some(self.change_seq),
-        });
         let changes_flog = self.changes_flog_path();
-        if let Some(ev) = self.changes.last() {
-            append_log_record(&changes_flog, ev);
-        }
+        let pk_for_forensic = pk.clone();
+        // Scoped named guard: assigning the sequence and appending the event must be atomic.
+        // The guard is dropped at the end of this block, before the calls below (which lock
+        // `cdc` again) — this mutex is not reentrant.
+        let change_seq = {
+            let mut cdc = self
+                .cdc
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cdc.change_seq += 1;
+            let seq = cdc.change_seq;
+            cdc.changes.push(ChangeEvent {
+                seq,
+                db: db.to_string(),
+                table: table.to_string(),
+                op: op.to_string(),
+                pk,
+                before,
+                after,
+                query_id: None,
+                etag: None,
+                commit_ts_ms: now_millis(),
+                lsn: Some(seq),
+            });
+            if let Some(ev) = cdc.changes.last() {
+                append_log_record(&changes_flog, ev);
+            }
+            seq
+        };
         self.trim_retained_change_log();
-        self.append_forensic_record(db, table, op, self.change_seq, pk_for_forensic);
+        self.append_forensic_record(db, table, op, change_seq, pk_for_forensic);
         self.mark_views_stale(db, table);
     }
 
+    /// The current global CDC change sequence. Locks and releases *inside this function*, so
+    /// callers may use it freely inside larger expressions (even several times in one
+    /// statement) without keeping a `MutexGuard` temporary alive — see the `Engine::cdc` docs.
+    fn cdc_change_seq(&self) -> u64 {
+        self.cdc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .change_seq
+    }
+
+    /// Snapshot (clone) of the retained CDC change log, taken under a short lock that is
+    /// released before returning. Callers iterate the owned `Vec` with no guard held, so the
+    /// loop body may lock `cdc` again (directly or via another method) without deadlocking.
+    /// Cheap: the log is bounded by `cdc_retention_events`.
+    fn cdc_changes_snapshot(&self) -> Vec<ChangeEvent> {
+        self.cdc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changes
+            .clone()
+    }
+
+    /// Number of retained CDC change events (lock taken and released inside).
+    fn cdc_changes_len(&self) -> usize {
+        self.cdc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changes
+            .len()
+    }
+
     fn last_change_seq_for_table(&self, key: &TableKey) -> u64 {
-        self.changes
+        self.cdc_changes_snapshot()
             .iter()
             .rev()
             .find(|ev| ev.db == key.db && ev.table == key.table)
@@ -13034,7 +13120,7 @@ impl Engine {
     }
 
     fn first_change_seq_for_table(&self, key: &TableKey) -> Option<u64> {
-        self.changes
+        self.cdc_changes_snapshot()
             .iter()
             .filter(|ev| ev.db == key.db && ev.table == key.table)
             .map(|ev| ev.seq)
@@ -51114,20 +51200,24 @@ mod tests {
             .cloned()
             .expect("view should exist before failed refresh");
 
-        engine.change_seq += 1;
-        engine.changes.push(ChangeEvent {
-            seq: engine.change_seq,
-            db: "app".to_string(),
-            table: "users".to_string(),
-            op: "unsupported".to_string(),
-            pk: Some(vec![Lit::U64 { v: 1 }]),
-            before: None,
-            after: None,
-            query_id: None,
-            etag: None,
-            commit_ts_ms: now_millis(),
-            lsn: Some(engine.change_seq),
-        });
+        {
+            let mut cdc = engine.cdc.lock().unwrap();
+            cdc.change_seq += 1;
+            let seq = cdc.change_seq;
+            cdc.changes.push(ChangeEvent {
+                seq,
+                db: "app".to_string(),
+                table: "users".to_string(),
+                op: "unsupported".to_string(),
+                pk: Some(vec![Lit::U64 { v: 1 }]),
+                before: None,
+                after: None,
+                query_id: None,
+                etag: None,
+                commit_ts_ms: now_millis(),
+                lsn: Some(seq),
+            });
+        }
 
         let err = engine
             .view_refresh(ViewRefreshParams {
