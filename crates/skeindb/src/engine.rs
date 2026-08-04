@@ -14,14 +14,14 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
-use parking_lot::RwLock as PlRwLock;
+use parking_lot::{Mutex as PlMutex, RwLock as PlRwLock};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -338,7 +338,7 @@ pub struct Engine {
     /// two fields of the same struct literal) would both be alive at once and self-deadlock on
     /// this non-reentrant mutex. The helpers lock and release inside the callee, so any number
     /// of them may appear in one expression. Writers use a scoped, named-guard block.
-    cdc: Mutex<CdcState>,
+    cdc: PlMutex<CdcState>,
     cdc_retention_events: usize,
 
     /// Prepared queries.
@@ -390,7 +390,7 @@ pub struct Engine {
     /// write path can append audit records through `&self` — a step toward per-database
     /// write-lock sharding. Appends serialize (the chain is a linked hash chain); queries share
     /// the read lock.
-    forensic: RwLock<ForensicState>,
+    forensic: PlRwLock<ForensicState>,
     /// Research: checkpoint anchors for audit verification (T091).
     checkpoint_anchors: Vec<CheckpointAnchor>,
     audit_last_verified_ms: u64,
@@ -454,7 +454,7 @@ pub struct Engine {
     /// durability-side prerequisite for per-database write-lock sharding. See `engine/wal.rs`.
     /// Behind a `Mutex` (interior mutability) so the write path can log through `&self` — a
     /// step toward per-database write-lock sharding.
-    wals: Mutex<HashMap<String, DbWal>>,
+    wals: PlMutex<HashMap<String, DbWal>>,
     /// Monotonic transaction id stamped on WAL records. Shared across databases; each
     /// per-database WAL only ever sees a subset and pairs begin/commit by id within its file.
     /// Atomic so it can be advanced through `&self`.
@@ -473,7 +473,7 @@ pub struct Engine {
     /// full-table snapshot rewrite: the table is marked dirty and flushed in a batch (see
     /// `flush_dirty_tables`), removing the O(rows) write amplification of persisting on every
     /// single mutation.
-    flush_state: Mutex<FlushState>,
+    flush_state: PlMutex<FlushState>,
 }
 
 /// Deferred-flush bookkeeping held behind `Engine::flush_state`.
@@ -2107,7 +2107,7 @@ impl Engine {
             storage_mode,
             catalog,
             tables: HashMap::new(),
-            cdc: Mutex::new(CdcState::default()),
+            cdc: PlMutex::new(CdcState::default()),
             cdc_retention_events: cdc_retention_events(),
             prepared: HashMap::new(),
             next_prepared_id: 1,
@@ -2130,7 +2130,7 @@ impl Engine {
             dp_audit: Vec::new(),
             dp_audit_next_id: 1,
             oblivious_policies: HashMap::new(),
-            forensic: RwLock::new(ForensicState {
+            forensic: PlRwLock::new(ForensicState {
                 chain: Vec::new(),
                 next_id: 1,
             }),
@@ -2153,14 +2153,14 @@ impl Engine {
             encryption_audit_next_id: 1,
             encrypted_locked_tables: HashSet::new(),
             corrupt_tables: HashSet::new(),
-            wals: Mutex::new(HashMap::new()),
+            wals: PlMutex::new(HashMap::new()),
             wal_next_txn: AtomicU64::new(0),
             wal_sync_batch: std::env::var("SKEINDB_WAL_SYNC_BATCH")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(1),
-            flush_state: Mutex::new(FlushState::default()),
+            flush_state: PlMutex::new(FlushState::default()),
         };
 
         engine.load_encryption_state_best_effort();
@@ -2282,10 +2282,7 @@ impl Engine {
             }
         }
         let (dirty_len, muts_since_flush) = {
-            let flush = self
-                .flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let flush = self.flush_state.lock();
             (flush.dirty.len() as u64, flush.mutations_since_flush)
         };
         RuntimeStorageMetrics {
@@ -7936,10 +7933,7 @@ impl Engine {
         let to_id = params.to_id.unwrap_or(u64::MAX);
         let limit = params.limit.unwrap_or(200).min(1000) as usize;
 
-        let forensic = self
-            .forensic
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let forensic = self.forensic.read();
         let mut records = Vec::new();
         for rec in forensic.chain.iter() {
             if rec.id < from_id || rec.id > to_id {
@@ -8186,10 +8180,7 @@ impl Engine {
     // -----------------------------
 
     pub fn maintenance_audit_status(&self) -> serde_json::Value {
-        let forensic = self
-            .forensic
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let forensic = self.forensic.read();
         let chain_head_hash = forensic
             .chain
             .last()
@@ -8215,12 +8206,7 @@ impl Engine {
         let start = std::time::Instant::now();
         // Clone the chain out from under the read lock so the rest of the method (which sets
         // `audit_last_verified_ms` on `&mut self`) is not encumbered by the guard's borrow.
-        let chain = self
-            .forensic
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .chain
-            .clone();
+        let chain = self.forensic.read().chain.clone();
         let chain = &chain;
         let mut ok = true;
         let mut bad_index: Option<u64> = None;
@@ -8867,10 +8853,7 @@ impl Engine {
             })
             .collect();
         {
-            let mut cdc = replay
-                .cdc
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cdc = replay.cdc.lock();
             cdc.change_seq = replay_events.last().map(|event| event.seq).unwrap_or(0);
             cdc.changes = replay_events;
         }
@@ -10676,10 +10659,7 @@ impl Engine {
         // the record, and pushing must be atomic (the chain is a linked hash chain, so appends
         // are inherently serial). append_log_record is disk I/O under the guard — acceptable
         // while uncontended; Stage 3 moves the flog I/O off this critical section.
-        let mut forensic = self
-            .forensic
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut forensic = self.forensic.write();
         let prev_hash = forensic
             .chain
             .last()
@@ -11813,10 +11793,7 @@ impl Engine {
 
         // Write a checkpoint anchor capturing the forensic chain head (T091).
         let (chain_head_hash, chain_len) = {
-            let forensic = self
-                .forensic
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let forensic = self.forensic.read();
             (
                 forensic
                     .chain
@@ -11856,10 +11833,7 @@ impl Engine {
         // Every table snapshot is now durable (the loop above persisted them all), so the
         // deferred-flush dirty set is fully covered and the WAL is redundant: reset both.
         {
-            let mut flush = self
-                .flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut flush = self.flush_state.lock();
             flush.dirty.clear();
             flush.mutations_since_flush = 0;
         }
@@ -12092,10 +12066,7 @@ impl Engine {
         // sidecar-truncate never double-counts. Read the sidecar before taking the lock.
         let tail = read_log_records::<ChangeEvent>(&self.changes_flog_path());
         {
-            let mut cdc = self
-                .cdc
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cdc = self.cdc.lock();
             cdc.changes = events;
             if !tail.is_empty() {
                 let snapshot_max_seq = cdc.changes.last().map(|e| e.seq).unwrap_or(0);
@@ -12125,10 +12096,7 @@ impl Engine {
 
     fn trim_retained_change_log(&self) {
         let retention = self.cdc_retention_events;
-        let mut cdc = self
-            .cdc
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cdc = self.cdc.lock();
         if cdc.changes.len() <= retention {
             return;
         }
@@ -12139,7 +12107,6 @@ impl Engine {
     fn current_cdc_earliest_offset(&self) -> u64 {
         self.cdc
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .changes
             .first()
             .map(|event| event.seq)
@@ -12600,10 +12567,7 @@ impl Engine {
         if let Some(disk) = load_json::<ForensicChainDisk>(&forensic_chain_path) {
             if disk.format_version <= FORENSIC_CHAIN_FORMAT_VERSION {
                 {
-                    let mut forensic = self
-                        .forensic
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut forensic = self.forensic.write();
                     forensic.next_id = disk.next_id.max(1);
                     forensic.chain = disk.records;
                 }
@@ -12616,10 +12580,7 @@ impl Engine {
         // snapshot-write and sidecar-truncate never double-appends and breaks chain continuity.
         let tail = read_log_records::<ForensicRecord>(&forensic_flog_path);
         if !tail.is_empty() {
-            let mut forensic = self
-                .forensic
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut forensic = self.forensic.write();
             let snapshot_max_id = forensic.chain.last().map(|r| r.id).unwrap_or(0);
             for rec in tail {
                 if rec.id > snapshot_max_id {
@@ -12633,10 +12594,7 @@ impl Engine {
     fn persist_forensic_best_effort(&self) {
         let forensic_chain_path = self.forensic_chain_path();
         let (next_id, records) = {
-            let forensic = self
-                .forensic
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let forensic = self.forensic.read();
             (forensic.next_id, forensic.chain.clone())
         };
         let _ = save_json(
@@ -13111,10 +13069,7 @@ impl Engine {
         // The guard is dropped at the end of this block, before the calls below (which lock
         // `cdc` again) — this mutex is not reentrant.
         let change_seq = {
-            let mut cdc = self
-                .cdc
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cdc = self.cdc.lock();
             cdc.change_seq += 1;
             let seq = cdc.change_seq;
             cdc.changes.push(ChangeEvent {
@@ -13144,10 +13099,7 @@ impl Engine {
     /// callers may use it freely inside larger expressions (even several times in one
     /// statement) without keeping a `MutexGuard` temporary alive — see the `Engine::cdc` docs.
     fn cdc_change_seq(&self) -> u64 {
-        self.cdc
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .change_seq
+        self.cdc.lock().change_seq
     }
 
     /// Snapshot (clone) of the retained CDC change log, taken under a short lock that is
@@ -13155,20 +13107,12 @@ impl Engine {
     /// loop body may lock `cdc` again (directly or via another method) without deadlocking.
     /// Cheap: the log is bounded by `cdc_retention_events`.
     fn cdc_changes_snapshot(&self) -> Vec<ChangeEvent> {
-        self.cdc
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .changes
-            .clone()
+        self.cdc.lock().changes.clone()
     }
 
     /// Number of retained CDC change events (lock taken and released inside).
     fn cdc_changes_len(&self) -> usize {
-        self.cdc
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .changes
-            .len()
+        self.cdc.lock().changes.len()
     }
 
     fn last_change_seq_for_table(&self, key: &TableKey) -> u64 {
@@ -33026,12 +32970,7 @@ mod tests {
             // (durable to the OS page cache, recoverable on a clean restart). The unsynced
             // counter is tracked per database, so read the "app" database's WAL.
             assert_eq!(
-                engine
-                    .wals
-                    .lock()
-                    .unwrap()
-                    .get("app")
-                    .map(|w| w.unsynced_commits),
+                engine.wals.lock().get("app").map(|w| w.unsynced_commits),
                 Some(5),
                 "group commit must defer the fsync below the batch size"
             );
@@ -33515,10 +33454,10 @@ mod tests {
             engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
             engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None)?;
             assert!(
-                engine.flush_state.lock().unwrap().dirty.contains(&key),
+                engine.flush_state.lock().dirty.contains(&key),
                 "snapshot should be deferred (table left dirty, not persisted per-mutation)"
             );
-            assert_eq!(engine.flush_state.lock().unwrap().mutations_since_flush, 2);
+            assert_eq!(engine.flush_state.lock().mutations_since_flush, 2);
             assert!(
                 dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "WAL must hold the deferred mutations"
@@ -33544,10 +33483,10 @@ mod tests {
                 engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: i })])], None)?;
             }
             assert!(
-                !engine.flush_state.lock().unwrap().dirty.contains(&key),
+                !engine.flush_state.lock().dirty.contains(&key),
                 "crossing the threshold should flush dirty tables"
             );
-            assert_eq!(engine.flush_state.lock().unwrap().mutations_since_flush, 0);
+            assert_eq!(engine.flush_state.lock().mutations_since_flush, 0);
             assert!(
                 !dir.join("wal").join("app").join("wal-000001.log").exists(),
                 "threshold flush should truncate the WAL"
@@ -51262,7 +51201,7 @@ mod tests {
             .expect("view should exist before failed refresh");
 
         {
-            let mut cdc = engine.cdc.lock().unwrap();
+            let mut cdc = engine.cdc.lock();
             cdc.change_seq += 1;
             let seq = cdc.change_seq;
             cdc.changes.push(ChangeEvent {

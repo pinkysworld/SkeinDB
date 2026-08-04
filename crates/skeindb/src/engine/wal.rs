@@ -141,10 +141,7 @@ impl Engine {
     fn wal_log_rows_for_db(&self, db: &str, records: &[&WalRowRecord]) -> anyhow::Result<()> {
         let txn = self.wal_next_txn.fetch_add(1, Ordering::Relaxed);
         let batch = self.wal_sync_batch;
-        let mut wals = self
-            .wals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut wals = self.wals.lock();
         if !wals.contains_key(db) {
             let dir = self.wal_dir().join(db);
             fs::create_dir_all(&dir)?;
@@ -279,10 +276,7 @@ impl Engine {
         // Drop the writers first so their files can be removed, and because nothing is left
         // pending an fsync (the snapshots that superseded them were persisted durably before
         // truncation). Clearing the map resets every database's unsynced-commit counter.
-        self.wals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        self.wals.lock().clear();
         // Remove the whole per-database WAL tree and the legacy global WAL. Best-effort: a
         // missing path is already the desired end state. This also covers WALs that were only
         // read during recovery (no in-memory writer was ever opened for them).
@@ -306,10 +300,7 @@ impl Engine {
         // Release the flush_state lock before the threshold flush — `flush_dirty_tables` locks
         // it again, and the engine's `Mutex` is not reentrant.
         let should_flush = {
-            let mut flush = self
-                .flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut flush = self.flush_state.lock();
             flush.dirty.insert(key);
             flush.mutations_since_flush = flush.mutations_since_flush.saturating_add(1);
             flush.mutations_since_flush >= WAL_FLUSH_THRESHOLD
@@ -326,17 +317,11 @@ impl Engine {
     /// intact, so nothing is lost (the next flush or `open()` replay recovers it).
     pub(crate) fn flush_dirty_tables(&mut self) -> anyhow::Result<()> {
         let targets: Vec<TableKey> = {
-            let flush = self
-                .flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let flush = self.flush_state.lock();
             flush.dirty.iter().cloned().collect()
         };
         if targets.is_empty() {
-            self.flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .mutations_since_flush = 0;
+            self.flush_state.lock().mutations_since_flush = 0;
             return Ok(());
         }
         // Persist each dirty table, removing it only on success — so an error leaves the
@@ -344,19 +329,12 @@ impl Engine {
         // lock is released around `persist_table` (I/O) rather than held across it.
         for key in &targets {
             self.persist_table(&key.db, &key.table)?;
-            self.flush_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .dirty
-                .remove(key);
+            self.flush_state.lock().dirty.remove(key);
         }
         // Compact the append-only CDC + forensic sidecars into their snapshots and truncate
         // them, bounding sidecar size + recovery replay to one flush interval.
         self.compact_change_forensic_logs();
-        self.flush_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .mutations_since_flush = 0;
+        self.flush_state.lock().mutations_since_flush = 0;
         self.wal_truncate();
         Ok(())
     }
