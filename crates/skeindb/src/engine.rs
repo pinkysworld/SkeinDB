@@ -11172,16 +11172,6 @@ impl Engine {
         Ok(t)
     }
 
-    fn get_schema_mut(&mut self, db: &str, table: &str) -> anyhow::Result<&mut TableSchema> {
-        let Some(d) = self.catalog.databases.get_mut(db) else {
-            anyhow::bail!("database not found: {db}");
-        };
-        let Some(t) = d.tables.get_mut(table) else {
-            anyhow::bail!("table not found: {db}.{table}");
-        };
-        Ok(t)
-    }
-
     fn get_table(&self, table: &BaseTableRef) -> anyhow::Result<(&TableSchema, &TableData)> {
         let schema = self.get_schema(&table.db, &table.table)?;
         let key = TableKey {
@@ -11340,20 +11330,21 @@ impl Engine {
         // acquires its &mut, so materializing here covers all writes.
         self.materialize_streaming_table(&key)?;
 
-        // Borrow dance: fetch schema and tabledata separately.
-        let schema_ptr: *mut TableSchema = {
-            let schema = self.get_schema_mut(&table.db, &table.table)? as *mut TableSchema;
-            schema
+        // The schema lives in `self.catalog`, the rows in `self.tables`. Borrowing both fields
+        // mutably at once is accepted by the borrow checker as long as they are reached by
+        // *direct field access* — going through `self.get_schema_mut(..)` would instead borrow
+        // all of `self` and force the raw-pointer workaround this code used to carry.
+        let Some(database) = self.catalog.databases.get_mut(&table.db) else {
+            anyhow::bail!("database not found: {}", table.db);
         };
-
-        let tdata_ptr: *mut TableData = self
+        let Some(schema) = database.tables.get_mut(&table.table) else {
+            anyhow::bail!("table not found: {}.{}", table.db, table.table);
+        };
+        let tdata = self
             .tables
             .get_mut(&key)
-            .ok_or_else(|| anyhow::anyhow!("table data not loaded"))?
-            as *mut TableData;
-
-        // SAFETY: schema and tdata live in different hashmaps; pointers are stable for this scope.
-        unsafe { Ok((&mut *schema_ptr, &mut *tdata_ptr)) }
+            .ok_or_else(|| anyhow::anyhow!("table data not loaded"))?;
+        Ok((schema, tdata))
     }
 
     /// Bring a `Streaming` table fully into memory and flip it back to `Resident`: stream
