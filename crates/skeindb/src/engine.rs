@@ -2227,7 +2227,7 @@ impl Engine {
             }
         }
 
-        let total_tables = self.tables.len() as u64;
+        let total_tables = self.table_count() as u64;
         let duplicate_bytes = logical_bytes.saturating_sub(unique_bytes);
         let dedup_ratio = if unique_bytes == 0 {
             1.0
@@ -2288,7 +2288,7 @@ impl Engine {
             (flush.dirty.len() as u64, flush.mutations_since_flush)
         };
         RuntimeStorageMetrics {
-            tables: self.tables.len() as u64,
+            tables: self.table_count() as u64,
             streaming_tables,
             dirty_tables: dirty_len,
             mutations_since_flush: muts_since_flush,
@@ -2436,6 +2436,35 @@ impl Engine {
             }
         }
         out
+    }
+
+    // Row-data (`self.tables`) accessors. Same owned-value discipline as the catalog accessors
+    // above: nothing borrows `self.tables` across the call, so these keep compiling once the
+    // row data moves into a per-database partition behind a lock.
+
+    /// Number of loaded tables.
+    fn table_count(&self) -> usize {
+        self.tables.len()
+    }
+
+    /// Whether row data is loaded for `key`.
+    fn table_data_exists(&self, key: &TableKey) -> bool {
+        self.tables.contains_key(key)
+    }
+
+    /// Insert (or replace) the row data for `key`.
+    fn insert_table_data(&mut self, key: TableKey, tdata: TableData) {
+        self.tables.insert(key, tdata);
+    }
+
+    /// Remove and return the row data for `key`, if loaded.
+    fn remove_table_data(&mut self, key: &TableKey) -> Option<TableData> {
+        self.tables.remove(key)
+    }
+
+    /// Keys of every loaded table, as owned values.
+    fn all_table_data_keys(&self) -> Vec<TableKey> {
+        self.tables.keys().cloned().collect()
     }
 
     /// Public read-only accessor for the active row-persistence mode name (`json`, `segment`, `hybrid`).
@@ -2615,7 +2644,7 @@ impl Engine {
             },
         );
 
-        self.tables.insert(
+        self.insert_table_data(
             TableKey {
                 db: db.to_string(),
                 table: table.to_string(),
@@ -2701,7 +2730,7 @@ impl Engine {
             db: target.db.clone(),
             table: target.table.clone(),
         };
-        if !self.tables.contains_key(&source_key) {
+        if !self.table_data_exists(&source_key) {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         }
 
@@ -2713,13 +2742,13 @@ impl Engine {
         else {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         };
-        let Some(tdata) = self.tables.remove(&source_key) else {
+        let Some(tdata) = self.remove_table_data(&source_key) else {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         };
 
         bump_table_version(&mut schema);
         self.insert_table_schema(&target.db, &target.table, schema);
-        self.tables.insert(target_key.clone(), tdata);
+        self.insert_table_data(target_key.clone(), tdata);
 
         let next_version = self.schema_version_for(&source_key).saturating_add(1);
         self.schema_versions.remove(&source_key);
@@ -8263,10 +8292,10 @@ impl Engine {
         let mut oldest_tombstone_commit_ts_ms: Option<u64> = None;
         let mut tables_report = Vec::new();
 
-        let mut keys: Vec<&TableKey> = self.tables.keys().collect();
+        let mut keys: Vec<TableKey> = self.all_table_data_keys();
         keys.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.table.cmp(&b.table)));
 
-        for key in keys {
+        for key in &keys {
             let Some(tdata) = self.tables.get(key) else {
                 continue;
             };
@@ -8336,7 +8365,7 @@ impl Engine {
         &mut self,
         horizon_ms: Option<u64>,
     ) -> anyhow::Result<serde_json::Value> {
-        let keys: Vec<TableKey> = self.tables.keys().cloned().collect();
+        let keys: Vec<TableKey> = self.all_table_data_keys();
         let mut total_scanned: u64 = 0;
         let mut total_purged: u64 = 0;
         let mut tables_report = Vec::new();
@@ -11426,7 +11455,7 @@ impl Engine {
             table: table.to_string(),
         };
 
-        self.tables.remove(&key);
+        self.remove_table_data(&key);
         self.schema_versions.remove(&key);
         self.schema_flags.remove(&key);
         self.oblivious_policies.remove(&key);
@@ -11764,7 +11793,7 @@ impl Engine {
             db: db.to_string(),
             table: table.to_string(),
         };
-        if !self.tables.contains_key(&key) {
+        if !self.table_data_exists(&key) {
             return Ok(false);
         }
         self.persist_table(db, table)?;
@@ -11919,7 +11948,7 @@ impl Engine {
                 if let Some(tdata) = self.try_load_streaming_table(&db, &table, min_bytes) {
                     self.encrypted_locked_tables.remove(&key);
                     self.corrupt_tables.remove(&key);
-                    self.tables.insert(key, tdata);
+                    self.insert_table_data(key, tdata);
                     continue;
                 }
             }
@@ -11954,7 +11983,7 @@ impl Engine {
                 ensure_mysql_compat_secondary_indexes(schema, &tdata);
             }
 
-            self.tables.insert(key, tdata);
+            self.insert_table_data(key, tdata);
         }
     }
 
@@ -11994,7 +12023,7 @@ impl Engine {
                 }
                 ensure_mysql_compat_secondary_indexes(schema, &tdata);
             }
-            self.tables.insert(key, tdata);
+            self.insert_table_data(key, tdata);
         }
     }
 
