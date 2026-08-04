@@ -245,7 +245,7 @@ impl Engine {
         // recovered mutation onto it, so the row lands in memory and the follow-up persist
         // writes the real (non-empty) image rather than being skipped.
         let _ = self.materialize_streaming_table(&key);
-        let Some(tdata) = self.tables.get_mut(&key) else {
+        let Some(tdata) = self.table_data_mut(&key) else {
             return false;
         };
         let entry = RowEntry {

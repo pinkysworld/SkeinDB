@@ -319,17 +319,27 @@ struct TableKey {
 /// The in-memory state of one database — the unit the write-lock sharding partitions on
 /// (docs/PERFORMANCE.md §4b).
 ///
-/// Phase A of the partition holds only the schemas, which used to live in
-/// `Catalog::databases[db].tables`. Phase B moves the row data (`Engine::tables`) in beside
-/// them, and Phase C wraps each `DbState` in a `PlRwLock` so a write to `db1` no longer
+/// Holds everything a write to this database touches: its table schemas (moved here from
+/// `Catalog::databases[db].tables` in Phase A) and its row data (moved here from the flat
+/// `Engine::tables` in Phase B). Both are keyed by table name only — the database is already
+/// the outer key. Phase C wraps each `DbState` in a `PlRwLock` so a write to `db1` no longer
 /// serializes against a write to `db2`.
 ///
-/// This is a purely in-memory shape: `catalog.json` keeps its existing [`Catalog`] format,
+/// Schemas and rows are two separate fields rather than one `HashMap<String, (schema, rows)>`
+/// on purpose: [`Engine::get_table_mut`] hands out `&mut TableSchema` and `&mut TableData`
+/// simultaneously, which the borrow checker accepts as two *disjoint field borrows* of one
+/// `DbState`. The invariant that ties them is loose by design — a schema may exist without
+/// loaded rows (an encryption-locked or corrupt table), which every row-data lookup reports as
+/// "table data not loaded".
+///
+/// This is a purely in-memory shape. `catalog.json` keeps its existing [`Catalog`] format,
 /// which [`Engine::open_with_storage_mode`] fans out into `dbs` on load and
-/// [`Engine::catalog_snapshot`] reassembles on save.
+/// [`Engine::catalog_snapshot`] reassembles on save; row data stays in its own per-table files
+/// (`tables/<db>/<table>.{json,rseg}`), written by [`Engine::persist_table`].
 #[derive(Debug, Default)]
 struct DbState {
     schemas: HashMap<String, TableSchema>,
+    tables: HashMap<String, TableData>,
 }
 
 // -----------------------------
@@ -342,17 +352,20 @@ pub struct Engine {
     storage_mode: TableStorageMode,
 
     /// Per-database state, keyed by database name — the partition the write-lock sharding is
-    /// built on. Holds the table schemas today; the row data in `tables` joins it in Phase B
-    /// and the whole thing goes behind a per-database `PlRwLock` in Phase C.
+    /// built on. Holds both halves of a database's in-memory state (schemas + row data) as of
+    /// Phase B; the whole thing goes behind a per-database `PlRwLock` in Phase C.
     ///
     /// Reach it through the accessors below ([`Engine::database_exists`],
-    /// [`Engine::list_tables`], [`Engine::insert_table_schema`], …) rather than directly:
-    /// they return owned data or take owned parameters, so nothing borrows the partition
-    /// across the call and they keep compiling once a lock guard sits in front of it. The one
-    /// deliberate exception is [`Engine::get_table_mut`], which reaches `dbs` and `tables` by
-    /// direct field access so the borrow checker sees two *disjoint* field borrows.
+    /// [`Engine::list_tables`], [`Engine::insert_table_schema`], [`Engine::insert_table_data`],
+    /// …) rather than directly: they return owned data or take owned parameters, so nothing
+    /// borrows the partition across the call and they keep compiling once a lock guard sits in
+    /// front of it. The deliberate exceptions are the reference-returning choke points
+    /// ([`Engine::get_schema`], [`Engine::get_table`], [`Engine::get_table_mut`],
+    /// [`Engine::table_data`], [`Engine::table_data_mut`]), which Phase C converts to
+    /// `parking_lot`'s `try_map` so they hand back mapped guards that deref exactly as they do
+    /// today. `get_table_mut` additionally reaches `schemas` and `tables` by direct field
+    /// access on one `DbState`, so the borrow checker sees two *disjoint* field borrows.
     dbs: HashMap<String, DbState>,
-    tables: HashMap<TableKey, TableData>,
 
     /// CDC change log + its global change sequence, bundled behind a `Mutex` (interior
     /// mutability) so the write path can append change events through `&self` — a step toward
@@ -2138,6 +2151,7 @@ impl Engine {
                     db,
                     DbState {
                         schemas: database.tables,
+                        tables: HashMap::new(),
                     },
                 )
             })
@@ -2148,7 +2162,6 @@ impl Engine {
             data_dir,
             storage_mode,
             dbs,
-            tables: HashMap::new(),
             cdc: PlMutex::new(CdcState::default()),
             cdc_retention_events: cdc_retention_events(),
             prepared: HashMap::new(),
@@ -2239,7 +2252,7 @@ impl Engine {
         let mut mvcc_versions = 0u64;
         let mut seen_ids = HashSet::<ValueId>::new();
 
-        for tdata in self.tables.values() {
+        self.for_each_table_data(|tdata| {
             // A streaming table's rows live on disk; report an approximate record count from
             // its index (cheap, no segment scan) rather than force a full materialization on
             // every stats poll. The count is an upper bound — it includes tombstones/old
@@ -2248,7 +2261,7 @@ impl Engine {
                 let records = index.row_count() as u64;
                 total_rows = total_rows.saturating_add(records);
                 mvcc_versions = mvcc_versions.saturating_add(records);
-                continue;
+                return;
             }
             for entry in tdata.rows.iter() {
                 mvcc_versions = mvcc_versions.saturating_add(entry.version.max(1));
@@ -2268,7 +2281,7 @@ impl Engine {
                     }
                 }
             }
-        }
+        });
 
         let total_tables = self.table_count() as u64;
         let duplicate_bytes = logical_bytes.saturating_sub(unique_bytes);
@@ -2312,17 +2325,15 @@ impl Engine {
     pub fn runtime_storage_metrics(&self) -> RuntimeStorageMetrics {
         let mut streaming_tables = 0u64;
         let mut total_rows = 0u64;
-        for tdata in self.tables.values() {
-            match &tdata.residency {
-                TableResidency::Resident => {
-                    total_rows = total_rows.saturating_add(tdata.rows.len() as u64);
-                }
-                TableResidency::Streaming { index, .. } => {
-                    streaming_tables += 1;
-                    total_rows = total_rows.saturating_add(index.row_count() as u64);
-                }
+        self.for_each_table_data(|tdata| match &tdata.residency {
+            TableResidency::Resident => {
+                total_rows = total_rows.saturating_add(tdata.rows.len() as u64);
             }
-        }
+            TableResidency::Streaming { index, .. } => {
+                streaming_tables += 1;
+                total_rows = total_rows.saturating_add(index.row_count() as u64);
+            }
+        });
         let (dirty_len, muts_since_flush) = {
             let flush = self.flush_state.lock();
             (flush.dirty.len() as u64, flush.mutations_since_flush)
@@ -2478,33 +2489,87 @@ impl Engine {
         out
     }
 
-    // Row-data (`self.tables`) accessors. Same owned-value discipline as the catalog accessors
-    // above: nothing borrows `self.tables` across the call, so these keep compiling once the
-    // row data moves into a per-database partition behind a lock.
+    // Row-data accessors over `dbs`. Same owned-value discipline as the schema accessors
+    // above: nothing borrows the partition across the call, so these keep compiling once each
+    // `DbState` sits behind a per-database lock. The two reference-returning point accessors
+    // (`table_data`/`table_data_mut`) are the deliberate exceptions, and are exactly the shape
+    // Phase C reimplements on `parking_lot`'s `try_map`.
 
-    /// Number of loaded tables.
+    /// Number of loaded tables, across every database.
     fn table_count(&self) -> usize {
-        self.tables.len()
+        self.dbs.values().map(|state| state.tables.len()).sum()
     }
 
     /// Whether row data is loaded for `key`.
     fn table_data_exists(&self, key: &TableKey) -> bool {
-        self.tables.contains_key(key)
+        self.dbs
+            .get(&key.db)
+            .map(|state| state.tables.contains_key(&key.table))
+            .unwrap_or(false)
     }
 
-    /// Insert (or replace) the row data for `key`.
+    /// The loaded row data for `key`, if any.
+    ///
+    /// One of the reference-returning choke points; see the note on [`Engine::dbs`]. Callers
+    /// that also need the schema go through [`Engine::get_table`] instead.
+    fn table_data(&self, key: &TableKey) -> Option<&TableData> {
+        self.dbs
+            .get(&key.db)
+            .and_then(|state| state.tables.get(&key.table))
+    }
+
+    /// Mutable access to the loaded row data for `key`, if any. Callers that also need the
+    /// schema go through [`Engine::get_table_mut`], which splits the borrow.
+    fn table_data_mut(&mut self, key: &TableKey) -> Option<&mut TableData> {
+        self.dbs
+            .get_mut(&key.db)
+            .and_then(|state| state.tables.get_mut(&key.table))
+    }
+
+    /// Insert (or replace) the row data for `key`, creating the database partition if needed
+    /// (matching the flat map this replaced, which never required one).
     fn insert_table_data(&mut self, key: TableKey, tdata: TableData) {
-        self.tables.insert(key, tdata);
+        self.dbs
+            .entry(key.db)
+            .or_default()
+            .tables
+            .insert(key.table, tdata);
     }
 
     /// Remove and return the row data for `key`, if loaded.
     fn remove_table_data(&mut self, key: &TableKey) -> Option<TableData> {
-        self.tables.remove(key)
+        self.dbs
+            .get_mut(&key.db)
+            .and_then(|state| state.tables.remove(&key.table))
     }
 
     /// Keys of every loaded table, as owned values.
     fn all_table_data_keys(&self) -> Vec<TableKey> {
-        self.tables.keys().cloned().collect()
+        let mut out = Vec::new();
+        for (db, state) in self.dbs.iter() {
+            for table in state.tables.keys() {
+                out.push(TableKey {
+                    db: db.clone(),
+                    table: table.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Visit the row data of every loaded table, in unspecified order — the seam for the
+    /// engine-wide aggregate scans (storage/CDC counters, value-store rebuild).
+    ///
+    /// Closure-shaped rather than iterator-shaped on purpose: once each `DbState` sits behind
+    /// its own lock, a returned iterator would have to keep every database's guard alive at
+    /// once, whereas this can take one database's lock, run `visit` over its tables and
+    /// release it before moving on. `visit` must therefore not call back into the engine.
+    fn for_each_table_data(&self, mut visit: impl FnMut(&TableData)) {
+        for state in self.dbs.values() {
+            for tdata in state.tables.values() {
+                visit(tdata);
+            }
+        }
     }
 
     /// Public read-only accessor for the active row-persistence mode name (`json`, `segment`, `hybrid`).
@@ -2543,7 +2608,7 @@ impl Engine {
                     db: db.to_string(),
                     table: table_name.to_string(),
                 };
-                let Some(tdata) = self.tables.get(&key) else {
+                let Some(tdata) = self.table_data(&key) else {
                     anyhow::bail!("table data not loaded: {db}.{table_name}");
                 };
                 collect_table_object_manifest(tdata, &mut objects);
@@ -2557,7 +2622,7 @@ impl Engine {
                         db: db.to_string(),
                         table: table_name,
                     };
-                    let Some(tdata) = self.tables.get(&key) else {
+                    let Some(tdata) = self.table_data(&key) else {
                         continue;
                     };
                     collect_table_object_manifest(tdata, &mut objects);
@@ -2588,7 +2653,13 @@ impl Engine {
         self.dbs.entry(db.to_string()).or_default();
     }
 
-    /// Remove `db`'s partition (and the schemas it holds). Returns whether it existed.
+    /// Remove `db`'s whole partition — schemas *and* loaded row data. Returns whether it
+    /// existed.
+    ///
+    /// The row data used to live in a separate flat map, so dropping a database also had to
+    /// walk its tables; [`Engine::drop_database`] still does that walk, because
+    /// [`Engine::remove_table_state`] has the rest of a table's teardown (sidecar maps, cached
+    /// snapshots, on-disk files) to do. Its `remove_table_data` call is simply a no-op by then.
     fn remove_database_entry(&mut self, db: &str) -> bool {
         self.dbs.remove(db).is_some()
     }
@@ -8299,7 +8370,7 @@ impl Engine {
         keys.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.table.cmp(&b.table)));
 
         for key in &keys {
-            let Some(tdata) = self.tables.get(key) else {
+            let Some(tdata) = self.table_data(key) else {
                 continue;
             };
             let mut live: u64 = 0;
@@ -8375,7 +8446,7 @@ impl Engine {
         let mut touched: Vec<TableKey> = Vec::new();
 
         for key in keys {
-            let Some(tdata) = self.tables.get_mut(&key) else {
+            let Some(tdata) = self.table_data_mut(&key) else {
                 continue;
             };
             // History GC mutates in-memory rows; a streaming table holds none (its history
@@ -8499,8 +8570,8 @@ impl Engine {
         let redaction = normalize_edge_redaction(params.redaction)?;
 
         let mut keys = self
-            .tables
-            .keys()
+            .all_table_data_keys()
+            .into_iter()
             .filter(|key| {
                 params
                     .db
@@ -8508,7 +8579,6 @@ impl Engine {
                     .map(|db| key.db.eq_ignore_ascii_case(db))
                     .unwrap_or(true)
             })
-            .cloned()
             .collect::<Vec<_>>();
         keys.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.table.cmp(&b.table)));
         if keys.is_empty() {
@@ -8524,7 +8594,7 @@ impl Engine {
 
         for key in keys.iter() {
             let schema = self.get_schema(&key.db, &key.table)?;
-            let tdata = self.tables.get(key).ok_or_else(|| {
+            let tdata = self.table_data(key).ok_or_else(|| {
                 anyhow::anyhow!("not_found: missing table data for {}.{}", key.db, key.table)
             })?;
             let mut table = replay_bundle_table_from_engine(key, schema, tdata);
@@ -8679,7 +8749,7 @@ impl Engine {
         for table in bundle.tables.iter() {
             let key = replay_bundle_table_key(&table.table);
             let schema = replay.get_schema(&key.db, &key.table)?;
-            let tdata = replay.tables.get(&key).ok_or_else(|| {
+            let tdata = replay.table_data(&key).ok_or_else(|| {
                 anyhow::anyhow!(
                     "not_found: replay workspace missing table {}.{}",
                     key.db,
@@ -8856,8 +8926,8 @@ impl Engine {
         fs::create_dir_all(workspace_dir)?;
         let mut replay =
             Self::open_with_storage_mode_name(workspace_dir, &bundle.manifest.storage_mode)?;
+        // Clears the schemas *and* the row data — both halves live in `dbs` as of Phase B.
         replay.dbs.clear();
-        replay.tables.clear();
         let replay_events: Vec<ChangeEvent> = bundle
             .changes
             .iter()
@@ -8936,7 +9006,7 @@ impl Engine {
                     );
                 }
             }
-            replay.tables.insert(
+            replay.insert_table_data(
                 TableKey {
                     db,
                     table: table_name,
@@ -11193,12 +11263,16 @@ impl Engine {
     }
 
     fn get_table(&self, table: &BaseTableRef) -> anyhow::Result<(&TableSchema, &TableData)> {
-        let schema = self.get_schema(&table.db, &table.table)?;
-        let key = TableKey {
-            db: table.db.clone(),
-            table: table.table.clone(),
+        // Both halves now come out of the same `DbState`, reached by direct field access so
+        // they are two disjoint (here: two shared) field borrows rather than two whole-`self`
+        // borrows; see [`Engine::get_table_mut`].
+        let Some(state) = self.dbs.get(&table.db) else {
+            anyhow::bail!("database not found: {}", table.db);
         };
-        let Some(tdata) = self.tables.get(&key) else {
+        let Some(schema) = state.schemas.get(&table.table) else {
+            anyhow::bail!("table not found: {}.{}", table.db, table.table);
+        };
+        let Some(tdata) = state.tables.get(&table.table) else {
             anyhow::bail!("table data not loaded: {}.{}", table.db, table.table);
         };
         Ok((schema, tdata))
@@ -11349,22 +11423,22 @@ impl Engine {
         // acquires its &mut, so materializing here covers all writes.
         self.materialize_streaming_table(&key)?;
 
-        // The schema lives in `self.dbs`, the rows (still) in `self.tables`. Borrowing both
-        // fields mutably at once is accepted by the borrow checker as long as they are reached
-        // by *direct field access* — going through an accessor method would instead borrow all
-        // of `self` and force the raw-pointer workaround this code used to carry. That is also
-        // what lets the two halves live in different structures while the partition migrates:
-        // Phase B moves the rows into `DbState` beside the schema, and this stays a single
-        // split borrow throughout.
+        // Schema and rows are two *different fields* of the same `DbState`, so borrowing both
+        // mutably at once is accepted by the borrow checker as long as they are reached by
+        // direct field access — going through an accessor method would instead borrow all of
+        // `self` (or all of `state`) and force the raw-pointer workaround this code used to
+        // carry. Note this is now a single `dbs` lookup rather than two map lookups, which is
+        // also the shape Phase C needs: one lock acquisition per call, then two projections
+        // out of the one guard.
         let Some(state) = self.dbs.get_mut(&table.db) else {
             anyhow::bail!("database not found: {}", table.db);
         };
         let Some(schema) = state.schemas.get_mut(&table.table) else {
             anyhow::bail!("table not found: {}.{}", table.db, table.table);
         };
-        let tdata = self
+        let tdata = state
             .tables
-            .get_mut(&key)
+            .get_mut(&table.table)
             .ok_or_else(|| anyhow::anyhow!("table data not loaded"))?;
         Ok((schema, tdata))
     }
@@ -11379,7 +11453,7 @@ impl Engine {
     /// exceed memory — an accepted v1 limitation (streaming targets read-mostly large
     /// tables); a true streaming append/merge is a later enhancement.
     fn materialize_streaming_table(&mut self, key: &TableKey) -> anyhow::Result<()> {
-        let segment = match self.tables.get(key) {
+        let segment = match self.table_data(key) {
             Some(tdata) => match &tdata.residency {
                 TableResidency::Streaming { segment, .. } => segment.clone(),
                 TableResidency::Resident => return Ok(()),
@@ -11396,7 +11470,7 @@ impl Engine {
         drop(codec);
 
         let schema = self.get_schema(&key.db, &key.table).ok().cloned();
-        if let Some(tdata) = self.tables.get_mut(key) {
+        if let Some(tdata) = self.table_data_mut(key) {
             tdata.rows = rows;
             tdata.pk_index.clear();
             tdata.residency = TableResidency::Resident;
@@ -11747,7 +11821,7 @@ impl Engine {
                  refusing to overwrite it (back up and remove the corrupt file to recover)"
             );
         }
-        let Some(tdata) = self.tables.get(&key) else {
+        let Some(tdata) = self.table_data(&key) else {
             return Ok(());
         };
         // A streaming table's authoritative rows live in its on-disk segment; it holds no
@@ -12034,14 +12108,14 @@ impl Engine {
 
     fn rebuild_value_store_from_tables_best_effort(&self) {
         let mut intern_items = Vec::new();
-        for tdata in self.tables.values() {
+        self.for_each_table_data(|tdata| {
             for entry in tdata.rows.iter() {
                 if entry.deleted {
                     continue;
                 }
                 collect_value_store_items(&entry.row, &mut intern_items);
             }
-        }
+        });
         if intern_items.is_empty() {
             return;
         }
@@ -12879,9 +12953,11 @@ impl Engine {
 
     fn normalize_loaded_row_schema_versions_best_effort(&mut self) {
         let schema_versions = self.schema_versions.clone();
-        for (key, tdata) in self.tables.iter_mut() {
-            let schema_version = schema_versions.get(key).copied().unwrap_or(1).max(1);
-            stamp_rows_schema_version_if_missing(&mut tdata.rows, schema_version);
+        for key in self.all_table_data_keys() {
+            let schema_version = schema_versions.get(&key).copied().unwrap_or(1).max(1);
+            if let Some(tdata) = self.table_data_mut(&key) {
+                stamp_rows_schema_version_if_missing(&mut tdata.rows, schema_version);
+            }
         }
     }
 
@@ -13835,7 +13911,7 @@ impl Engine {
                 "storage_corrupt: table '{db}.{table}' has an unreadable on-disk file; refusing to overwrite it"
             ));
         }
-        let Some(tdata) = self.tables.get(&key) else {
+        let Some(tdata) = self.table_data(&key) else {
             return Err(format!("table not found: {db}.{table}"));
         };
         let rows = tdata.rows.len() as u64;
@@ -33574,7 +33650,7 @@ mod tests {
             db: "app".to_string(),
             table: "events".to_string(),
         };
-        let resident_rows: Vec<RowEntry> = engine.tables.get(&key).unwrap().rows.clone();
+        let resident_rows: Vec<RowEntry> = engine.table_data(&key).unwrap().rows.clone();
         assert_eq!(resident_rows.len(), 2);
         let resident_json = serde_json::to_vec(&resident_rows)?;
 
@@ -33631,7 +33707,7 @@ mod tests {
             db: "app".to_string(),
             table: "events".to_string(),
         };
-        let resident_rows: Vec<RowEntry> = engine.tables.get(&key).unwrap().rows.clone();
+        let resident_rows: Vec<RowEntry> = engine.table_data(&key).unwrap().rows.clone();
         assert_eq!(resident_rows.len(), 2);
 
         let schema = engine.get_schema("app", "events")?.clone();
@@ -33681,7 +33757,7 @@ mod tests {
         let codec = engine.row_encryption_codec("app", "events");
         let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
         {
-            let tdata = engine.tables.get_mut(&key).unwrap();
+            let tdata = engine.table_data_mut(&key).unwrap();
             tdata.rows.clear();
             tdata.pk_index.clear();
             tdata.residency = TableResidency::Streaming {
@@ -33765,7 +33841,7 @@ mod tests {
         let codec = engine.row_encryption_codec("app", "events");
         let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
         {
-            let tdata = engine.tables.get_mut(&key).unwrap();
+            let tdata = engine.table_data_mut(&key).unwrap();
             tdata.rows.clear();
             tdata.pk_index.clear();
             tdata.residency = TableResidency::Streaming {
@@ -33816,7 +33892,7 @@ mod tests {
         let codec = engine.row_encryption_codec("app", "events");
         let index = build_streaming_index(&seg_path, &schema, Some(&codec))?;
         {
-            let tdata = engine.tables.get_mut(&key).unwrap();
+            let tdata = engine.table_data_mut(&key).unwrap();
             tdata.rows.clear();
             tdata.pk_index.clear();
             tdata.residency = TableResidency::Streaming {
@@ -33824,7 +33900,7 @@ mod tests {
                 index: Box::new(index),
             };
         }
-        assert!(!engine.tables.get(&key).unwrap().is_resident());
+        assert!(!engine.table_data(&key).unwrap().is_resident());
 
         // Insert a new row: get_table_mut must materialize the table first, then apply it.
         engine.data_insert(
@@ -33843,8 +33919,8 @@ mod tests {
 
         // The table is now resident, holds all three rows, and every row reads back — the
         // pre-existing streamed rows survived materialization and the new row is present.
-        assert!(engine.tables.get(&key).unwrap().is_resident());
-        assert_eq!(engine.tables.get(&key).unwrap().rows.len(), 3);
+        assert!(engine.table_data(&key).unwrap().is_resident());
+        assert_eq!(engine.table_data(&key).unwrap().rows.len(), 3);
         let got1 = engine.data_get(&base, vec![Lit::U64 { v: 1 }])?;
         assert_eq!(
             got1.row.get("payload"),
@@ -35633,7 +35709,7 @@ mod tests {
             db: "app".to_string(),
             table: "users".to_string(),
         };
-        if let Some(tdata) = engine.tables.get_mut(&key) {
+        if let Some(tdata) = engine.table_data_mut(&key) {
             if let Some(entry) = tdata
                 .rows
                 .iter_mut()
@@ -40281,8 +40357,7 @@ mod tests {
 
             // In-memory reads transparently decrypt.
             let rows = &engine
-                .tables
-                .get(&TableKey {
+                .table_data(&TableKey {
                     db: "app".to_string(),
                     table: "events".to_string(),
                 })
@@ -40305,7 +40380,7 @@ mod tests {
             };
             assert!(engine.encrypted_locked_tables.contains(&key));
             assert_eq!(
-                engine.tables.get(&key).map(|t| t.rows.len()).unwrap_or(0),
+                engine.table_data(&key).map(|t| t.rows.len()).unwrap_or(0),
                 0
             );
             let err = engine
@@ -40332,7 +40407,7 @@ mod tests {
                 table: "events".to_string(),
             };
             assert!(!engine.encrypted_locked_tables.contains(&key));
-            let rows = &engine.tables.get(&key).expect("events present").rows;
+            let rows = &engine.table_data(&key).expect("events present").rows;
             assert_eq!(rows.len(), 2);
             assert!(rows.iter().any(|entry| matches!(
                 entry.row.get("payload"),
@@ -40394,8 +40469,7 @@ mod tests {
 
         // And the values still decrypt correctly in memory.
         let rows = &engine
-            .tables
-            .get(&TableKey {
+            .table_data(&TableKey {
                 db: "app".to_string(),
                 table: "events".to_string(),
             })
@@ -40514,8 +40588,7 @@ mod tests {
         // Values still decrypt transparently after re-opening with both keys removed but k2
         // registered (proves the new envelopes are independent of k1).
         let rows = &engine
-            .tables
-            .get(&TableKey {
+            .table_data(&TableKey {
                 db: "app".to_string(),
                 table: "events".to_string(),
             })
@@ -53504,7 +53577,7 @@ mod tests {
                 db: "app".to_string(),
                 table: "items".to_string(),
             };
-            let tdata = engine.tables.get_mut(&key).expect("table");
+            let tdata = engine.table_data_mut(&key).expect("table");
             tdata.rows.push(RowEntry {
                 row: row(&[("id", Lit::U64 { v: 99 })]),
                 version: 1,
