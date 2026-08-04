@@ -2414,12 +2414,41 @@ impl Engine {
         v
     }
 
+    /// Whether `db` exists in the catalog.
+    ///
+    /// Returns *owned* data rather than a borrow of the catalog. That matters for the
+    /// per-database lock restructure (docs/PERFORMANCE.md §4b): once the catalog lives behind
+    /// a per-database lock, an accessor that returns a reference into it cannot compile (the
+    /// reference would outlive its guard), while owned-return accessors like this one keep
+    /// working unchanged. New call sites should prefer these over touching `self.catalog`.
+    fn database_exists(&self, db: &str) -> bool {
+        self.catalog.databases.contains_key(db)
+    }
+
+    /// Every `(db, table)` pair in the catalog, as owned strings. Owned-return for the same
+    /// reason as [`Engine::database_exists`]; it also frees the caller from holding a borrow of
+    /// the catalog while it mutates tables (which several callers do).
+    fn all_table_keys(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (db, meta) in self.catalog.databases.iter() {
+            for table in meta.tables.keys() {
+                out.push((db.clone(), table.clone()));
+            }
+        }
+        out
+    }
+
     /// Public read-only accessor for the active row-persistence mode name (`json`, `segment`, `hybrid`).
     pub fn storage_mode_name(&self) -> &'static str {
         self.storage_mode.as_str()
     }
 
     pub fn maintenance_compaction_table_exists(&self, db: &str, table: &str) -> bool {
+        self.table_exists(db, table)
+    }
+
+    /// Whether `db.table` exists in the catalog. Owned-return; see [`Engine::database_exists`].
+    fn table_exists(&self, db: &str, table: &str) -> bool {
         self.catalog
             .databases
             .get(db)
@@ -2604,10 +2633,10 @@ impl Engine {
             return Ok(());
         }
 
-        if !self.catalog.databases.contains_key(&source.db) {
+        if !self.database_exists(&source.db) {
             anyhow::bail!("not_found: database not found: {}", source.db);
         }
-        if !self.catalog.databases.contains_key(&target.db) {
+        if !self.database_exists(&target.db) {
             anyhow::bail!("not_found: database not found: {}", target.db);
         }
         if !self
@@ -8405,7 +8434,7 @@ impl Engine {
             }
         }
         if let Some(db) = params.db.as_deref() {
-            if !self.catalog.databases.contains_key(db) {
+            if !self.database_exists(db) {
                 anyhow::bail!("not_found: unknown database '{db}'");
             }
         }
@@ -11728,12 +11757,7 @@ impl Engine {
     pub fn checkpoint_for_shutdown(&mut self) -> anyhow::Result<()> {
         self.persist_catalog()?;
 
-        let mut table_targets = Vec::new();
-        for (db, meta) in self.catalog.databases.iter() {
-            for table in meta.tables.keys() {
-                table_targets.push((db.clone(), table.clone()));
-            }
-        }
+        let table_targets = self.all_table_keys();
         for (db, table) in table_targets.into_iter() {
             // Skip tables whose encrypted data could not be unlocked at load time; persisting
             // them would attempt to overwrite ciphertext we cannot currently reproduce.
@@ -12802,12 +12826,9 @@ impl Engine {
         }
 
         let mut touched = false;
-        for (db, d) in self.catalog.databases.iter() {
-            for table in d.tables.keys() {
-                let key = TableKey {
-                    db: db.clone(),
-                    table: table.clone(),
-                };
+        {
+            for (db, table) in self.all_table_keys() {
+                let key = TableKey { db, table };
                 if let std::collections::hash_map::Entry::Vacant(e) = versions.entry(key) {
                     e.insert(1);
                     touched = true;
