@@ -2514,19 +2514,51 @@ impl Engine {
     }
 
     pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
-        self.catalog.databases.entry(db.to_string()).or_default();
+        self.ensure_database_entry(db);
         self.persist_catalog()
     }
 
+    /// Create `db`'s catalog entry if it does not exist. Takes no borrow out of the catalog, so
+    /// it survives the per-database lock transition; see [`Engine::database_exists`].
+    fn ensure_database_entry(&mut self, db: &str) {
+        self.catalog.databases.entry(db.to_string()).or_default();
+    }
+
+    /// Remove `db`'s catalog entry (and the schemas it holds). Returns whether it existed.
+    fn remove_database_entry(&mut self, db: &str) -> bool {
+        self.catalog.databases.remove(db).is_some()
+    }
+
+    /// Insert (or replace) the schema for `db.table`, creating the database entry if needed.
+    /// Takes the schema by value and returns nothing, so no borrow of the catalog escapes —
+    /// the shape that survives the per-database lock transition.
+    fn insert_table_schema(&mut self, db: &str, table: &str, schema: TableSchema) {
+        self.catalog
+            .databases
+            .entry(db.to_string())
+            .or_default()
+            .tables
+            .insert(table.to_string(), schema);
+    }
+
+    /// Remove `db.table`'s schema from the catalog. Returns whether it existed.
+    fn remove_table_schema(&mut self, db: &str, table: &str) -> bool {
+        self.catalog
+            .databases
+            .get_mut(db)
+            .and_then(|d| d.tables.remove(table))
+            .is_some()
+    }
+
     pub fn drop_database(&mut self, db: &str, if_exists: bool) -> anyhow::Result<()> {
-        let Some(database) = self.catalog.databases.get(db) else {
+        if !self.database_exists(db) {
             if if_exists {
                 return Ok(());
             }
             anyhow::bail!("database not found: {db}");
-        };
-        let table_names: Vec<String> = database.tables.keys().cloned().collect();
-        self.catalog.databases.remove(db);
+        }
+        let table_names = self.list_tables(db)?;
+        self.remove_database_entry(db);
 
         for table in table_names {
             self.remove_table_state(db, &table)?;
@@ -2556,9 +2588,8 @@ impl Engine {
         compat_mysql: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         self.create_database(db)?;
-        let d = self.catalog.databases.get_mut(db).expect("db just ensured");
 
-        if d.tables.contains_key(table) {
+        if self.table_exists(db, table) {
             if if_not_exists {
                 return Ok(());
             }
@@ -2572,8 +2603,9 @@ impl Engine {
             }
         }
 
-        d.tables.insert(
-            table.to_string(),
+        self.insert_table_schema(
+            db,
+            table,
             TableSchema {
                 columns,
                 primary_key,
@@ -2603,15 +2635,14 @@ impl Engine {
     }
 
     pub fn drop_table(&mut self, db: &str, table: &str, if_exists: bool) -> anyhow::Result<()> {
-        let Some(database) = self.catalog.databases.get_mut(db) else {
+        if !self.database_exists(db) {
             if if_exists {
                 return Ok(());
             }
             anyhow::bail!("database not found: {db}");
-        };
+        }
 
-        let removed = database.tables.remove(table).is_some();
-        if !removed {
+        if !self.remove_table_schema(db, table) {
             if if_exists {
                 return Ok(());
             }
@@ -2687,12 +2718,7 @@ impl Engine {
         };
 
         bump_table_version(&mut schema);
-        self.catalog
-            .databases
-            .get_mut(&target.db)
-            .expect("target db validated above")
-            .tables
-            .insert(target.table.clone(), schema);
+        self.insert_table_schema(&target.db, &target.table, schema);
         self.tables.insert(target_key.clone(), tdata);
 
         let next_version = self.schema_version_for(&source_key).saturating_add(1);
