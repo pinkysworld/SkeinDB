@@ -14,6 +14,7 @@
 //! - Correctness > cleverness: dependency tracking here is coarse
 //!   (per-table version counters). This is safe but may over-invalidate.
 
+use parking_lot::RwLock as PlRwLock;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
@@ -409,7 +410,7 @@ pub struct Engine {
     /// Research: HNSW vector indexes for approximate nearest neighbor (R10). Behind a `RwLock`
     /// (interior mutability) so the write path can invalidate/rebuild indexes through `&self` —
     /// a step toward per-database write-lock sharding (search reads share the lock).
-    hnsw_indexes: RwLock<HashMap<HnswIndexKey, HnswIndex>>,
+    hnsw_indexes: PlRwLock<HashMap<HnswIndexKey, HnswIndex>>,
 
     /// Research: schema evolution tracking (R15).
     schema_versions: HashMap<TableKey, u64>,
@@ -2139,7 +2140,7 @@ impl Engine {
             merge_wasm_registry: HashMap::new(),
             views: HashMap::new(),
             edge_coverage: HashMap::new(),
-            hnsw_indexes: RwLock::new(HashMap::new()),
+            hnsw_indexes: PlRwLock::new(HashMap::new()),
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
@@ -6199,10 +6200,7 @@ impl Engine {
             // Hold the read guard across the whole search: the block only reads the index and
             // `tdata.rows`, never re-locking `hnsw_indexes`, so this cannot self-deadlock. The
             // guard drops at the end of this block before any non-index fallback runs.
-            let hnsw_guard = self
-                .hnsw_indexes
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let hnsw_guard = self.hnsw_indexes.read();
             if let Some(hnsw) = hnsw_guard.get(&hnsw_key) {
                 if hnsw.count > 0 && hnsw.dims == dims && hnsw.built_version == schema.table_version
                 {
@@ -6556,10 +6554,7 @@ impl Engine {
             },
             column: column.to_string(),
         };
-        self.hnsw_indexes
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, hnsw);
+        self.hnsw_indexes.write().insert(key, hnsw);
     }
 
     fn invalidate_hnsw_indexes_for_table(&mut self, table: &BaseTableRef) {
@@ -6569,7 +6564,6 @@ impl Engine {
         };
         self.hnsw_indexes
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|index_key, _| index_key.table != key);
     }
 
@@ -45073,7 +45067,7 @@ mod tests {
             ],
             upsert: true,
         })?;
-        assert_eq!(engine.hnsw_indexes.read().unwrap().len(), 1);
+        assert_eq!(engine.hnsw_indexes.read().len(), 1);
 
         let query_embedding = Lit::Embedding {
             dims: 3,
@@ -45147,7 +45141,7 @@ mod tests {
             None,
             &[],
         )?;
-        assert!(engine.hnsw_indexes.read().unwrap().is_empty());
+        assert!(engine.hnsw_indexes.read().is_empty());
 
         let changed =
             engine.vector_search(search_params(Some(skeindb_skeinql::types::QueryCache {

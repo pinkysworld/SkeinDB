@@ -26,6 +26,11 @@ assets = [
 [dependencies]
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+# Non-poisoning locks. Two reasons: a panic while holding an engine lock no longer poisons it
+# (no `PoisonError::into_inner` dance at every call site), and `RwLockReadGuard::map` lets an
+# accessor hand out a guard-backed `&TableSchema`/`&TableData` — which std cannot do, and which
+# the per-database partition (docs/PERFORMANCE.md §4b) needs to keep its call sites unchanged.
+parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
