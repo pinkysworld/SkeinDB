@@ -316,6 +316,22 @@ struct TableKey {
     table: String,
 }
 
+/// The in-memory state of one database — the unit the write-lock sharding partitions on
+/// (docs/PERFORMANCE.md §4b).
+///
+/// Phase A of the partition holds only the schemas, which used to live in
+/// `Catalog::databases[db].tables`. Phase B moves the row data (`Engine::tables`) in beside
+/// them, and Phase C wraps each `DbState` in a `PlRwLock` so a write to `db1` no longer
+/// serializes against a write to `db2`.
+///
+/// This is a purely in-memory shape: `catalog.json` keeps its existing [`Catalog`] format,
+/// which [`Engine::open_with_storage_mode`] fans out into `dbs` on load and
+/// [`Engine::catalog_snapshot`] reassembles on save.
+#[derive(Debug, Default)]
+struct DbState {
+    schemas: HashMap<String, TableSchema>,
+}
+
 // -----------------------------
 // Engine
 // -----------------------------
@@ -325,7 +341,17 @@ pub struct Engine {
     data_dir: PathBuf,
     storage_mode: TableStorageMode,
 
-    catalog: Catalog,
+    /// Per-database state, keyed by database name — the partition the write-lock sharding is
+    /// built on. Holds the table schemas today; the row data in `tables` joins it in Phase B
+    /// and the whole thing goes behind a per-database `PlRwLock` in Phase C.
+    ///
+    /// Reach it through the accessors below ([`Engine::database_exists`],
+    /// [`Engine::list_tables`], [`Engine::insert_table_schema`], …) rather than directly:
+    /// they return owned data or take owned parameters, so nothing borrows the partition
+    /// across the call and they keep compiling once a lock guard sits in front of it. The one
+    /// deliberate exception is [`Engine::get_table_mut`], which reaches `dbs` and `tables` by
+    /// direct field access so the borrow checker sees two *disjoint* field borrows.
+    dbs: HashMap<String, DbState>,
     tables: HashMap<TableKey, TableData>,
 
     /// CDC change log + its global change sequence, bundled behind a `Mutex` (interior
@@ -2099,13 +2125,29 @@ impl Engine {
         // Clean up any temp files a prior crash left mid-rename before loading state.
         sweep_stale_temp_files(&data_dir);
 
+        // `catalog.json` keeps its historical shape (a single `Catalog` holding every
+        // database's schemas); fan it out into the per-database partitions on load.
+        // `persist_catalog` reassembles it on the way back out, so the on-disk format is
+        // unchanged and existing data directories load as before.
         let catalog = load_json::<Catalog>(&data_dir.join("catalog.json")).unwrap_or_default();
+        let dbs: HashMap<String, DbState> = catalog
+            .databases
+            .into_iter()
+            .map(|(db, database)| {
+                (
+                    db,
+                    DbState {
+                        schemas: database.tables,
+                    },
+                )
+            })
+            .collect();
         let advisor_persist = advisor_persist_enabled();
 
         let mut engine = Self {
             data_dir,
             storage_mode,
-            catalog,
+            dbs,
             tables: HashMap::new(),
             cdc: PlMutex::new(CdcState::default()),
             cdc_retention_events: cdc_retention_events(),
@@ -2407,29 +2449,29 @@ impl Engine {
     }
 
     pub fn list_databases(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.catalog.databases.keys().cloned().collect();
+        let mut v: Vec<String> = self.dbs.keys().cloned().collect();
         v.sort();
         v
     }
 
-    /// Whether `db` exists in the catalog.
+    /// Whether `db` exists.
     ///
-    /// Returns *owned* data rather than a borrow of the catalog. That matters for the
-    /// per-database lock restructure (docs/PERFORMANCE.md §4b): once the catalog lives behind
+    /// Returns *owned* data rather than a borrow of the partition. That matters for the
+    /// per-database lock restructure (docs/PERFORMANCE.md §4b): once a `DbState` lives behind
     /// a per-database lock, an accessor that returns a reference into it cannot compile (the
     /// reference would outlive its guard), while owned-return accessors like this one keep
-    /// working unchanged. New call sites should prefer these over touching `self.catalog`.
+    /// working unchanged. New call sites should prefer these over touching `self.dbs`.
     fn database_exists(&self, db: &str) -> bool {
-        self.catalog.databases.contains_key(db)
+        self.dbs.contains_key(db)
     }
 
-    /// Every `(db, table)` pair in the catalog, as owned strings. Owned-return for the same
+    /// Every `(db, table)` pair that has a schema, as owned strings. Owned-return for the same
     /// reason as [`Engine::database_exists`]; it also frees the caller from holding a borrow of
-    /// the catalog while it mutates tables (which several callers do).
+    /// the partition while it mutates tables (which several callers do).
     fn all_table_keys(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for (db, meta) in self.catalog.databases.iter() {
-            for table in meta.tables.keys() {
+        for (db, state) in self.dbs.iter() {
+            for table in state.schemas.keys() {
                 out.push((db.clone(), table.clone()));
             }
         }
@@ -2474,12 +2516,11 @@ impl Engine {
         self.table_exists(db, table)
     }
 
-    /// Whether `db.table` exists in the catalog. Owned-return; see [`Engine::database_exists`].
+    /// Whether `db.table` has a schema. Owned-return; see [`Engine::database_exists`].
     fn table_exists(&self, db: &str, table: &str) -> bool {
-        self.catalog
-            .databases
+        self.dbs
             .get(db)
-            .map(|meta| meta.tables.contains_key(table))
+            .map(|state| state.schemas.contains_key(table))
             .unwrap_or(false)
     }
 
@@ -2508,13 +2549,9 @@ impl Engine {
                 collect_table_object_manifest(tdata, &mut objects);
             }
             None => {
-                let database = self
-                    .catalog
-                    .databases
-                    .get(db)
-                    .ok_or_else(|| anyhow::anyhow!("database not found: {db}"))?;
-                let mut table_names: Vec<String> = database.tables.keys().cloned().collect();
-                table_names.sort();
+                // `list_tables` bails with the same "database not found: {db}" and already
+                // returns the names sorted.
+                let table_names = self.list_tables(db)?;
                 for table_name in table_names {
                     let key = TableKey {
                         db: db.to_string(),
@@ -2545,36 +2582,39 @@ impl Engine {
         self.persist_catalog()
     }
 
-    /// Create `db`'s catalog entry if it does not exist. Takes no borrow out of the catalog, so
+    /// Create `db`'s partition if it does not exist. Takes no borrow out of the partition, so
     /// it survives the per-database lock transition; see [`Engine::database_exists`].
     fn ensure_database_entry(&mut self, db: &str) {
-        self.catalog.databases.entry(db.to_string()).or_default();
+        self.dbs.entry(db.to_string()).or_default();
     }
 
-    /// Remove `db`'s catalog entry (and the schemas it holds). Returns whether it existed.
+    /// Remove `db`'s partition (and the schemas it holds). Returns whether it existed.
     fn remove_database_entry(&mut self, db: &str) -> bool {
-        self.catalog.databases.remove(db).is_some()
+        self.dbs.remove(db).is_some()
     }
 
-    /// Insert (or replace) the schema for `db.table`, creating the database entry if needed.
-    /// Takes the schema by value and returns nothing, so no borrow of the catalog escapes —
-    /// the shape that survives the per-database lock transition.
+    /// Insert (or replace) the schema for `db.table`, creating the database partition if
+    /// needed. Takes the schema by value and returns nothing, so no borrow of the partition
+    /// escapes — the shape that survives the per-database lock transition.
     fn insert_table_schema(&mut self, db: &str, table: &str, schema: TableSchema) {
-        self.catalog
-            .databases
+        self.dbs
             .entry(db.to_string())
             .or_default()
-            .tables
+            .schemas
             .insert(table.to_string(), schema);
     }
 
-    /// Remove `db.table`'s schema from the catalog. Returns whether it existed.
+    /// Remove `db.table`'s schema. Returns whether it existed.
     fn remove_table_schema(&mut self, db: &str, table: &str) -> bool {
-        self.catalog
-            .databases
+        self.take_table_schema(db, table).is_some()
+    }
+
+    /// Remove `db.table`'s schema and hand it back, for the rename/copy move that re-inserts
+    /// it under the target name. Owned return, so nothing borrows the partition afterwards.
+    fn take_table_schema(&mut self, db: &str, table: &str) -> Option<TableSchema> {
+        self.dbs
             .get_mut(db)
-            .and_then(|d| d.tables.remove(table))
-            .is_some()
+            .and_then(|state| state.schemas.remove(table))
     }
 
     pub fn drop_database(&mut self, db: &str, if_exists: bool) -> anyhow::Result<()> {
@@ -2597,10 +2637,10 @@ impl Engine {
     }
 
     pub fn list_tables(&self, db: &str) -> anyhow::Result<Vec<String>> {
-        let Some(d) = self.catalog.databases.get(db) else {
+        let Some(state) = self.dbs.get(db) else {
             anyhow::bail!("database not found: {db}");
         };
-        let mut v: Vec<String> = d.tables.keys().cloned().collect();
+        let mut v: Vec<String> = state.schemas.keys().cloned().collect();
         v.sort();
         Ok(v)
     }
@@ -2697,22 +2737,10 @@ impl Engine {
         if !self.database_exists(&target.db) {
             anyhow::bail!("not_found: database not found: {}", target.db);
         }
-        if !self
-            .catalog
-            .databases
-            .get(&source.db)
-            .map(|database| database.tables.contains_key(&source.table))
-            .unwrap_or(false)
-        {
+        if !self.table_exists(&source.db, &source.table) {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         }
-        if self
-            .catalog
-            .databases
-            .get(&target.db)
-            .map(|database| database.tables.contains_key(&target.table))
-            .unwrap_or(false)
-        {
+        if self.table_exists(&target.db, &target.table) {
             anyhow::bail!(
                 "conflict: table already exists: {}.{}",
                 target.db,
@@ -2732,12 +2760,7 @@ impl Engine {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         }
 
-        let Some(mut schema) = self
-            .catalog
-            .databases
-            .get_mut(&source.db)
-            .and_then(|database| database.tables.remove(&source.table))
-        else {
+        let Some(mut schema) = self.take_table_schema(&source.db, &source.table) else {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         };
         let Some(tdata) = self.remove_table_data(&source_key) else {
@@ -8833,7 +8856,7 @@ impl Engine {
         fs::create_dir_all(workspace_dir)?;
         let mut replay =
             Self::open_with_storage_mode_name(workspace_dir, &bundle.manifest.storage_mode)?;
-        replay.catalog = Catalog::default();
+        replay.dbs.clear();
         replay.tables.clear();
         let replay_events: Vec<ChangeEvent> = bundle
             .changes
@@ -8883,13 +8906,7 @@ impl Engine {
                     .map(|(column, next)| (column.clone(), *next))
                     .collect(),
             };
-            replay
-                .catalog
-                .databases
-                .entry(db.clone())
-                .or_default()
-                .tables
-                .insert(table_name.clone(), schema.clone());
+            replay.insert_table_schema(&db, &table_name, schema.clone());
 
             let mut tdata = TableData {
                 rows: table
@@ -11166,10 +11183,10 @@ impl Engine {
     // -----------------------------
 
     fn get_schema(&self, db: &str, table: &str) -> anyhow::Result<&TableSchema> {
-        let Some(d) = self.catalog.databases.get(db) else {
+        let Some(state) = self.dbs.get(db) else {
             anyhow::bail!("database not found: {db}");
         };
-        let Some(t) = d.tables.get(table) else {
+        let Some(t) = state.schemas.get(table) else {
             anyhow::bail!("table not found: {db}.{table}");
         };
         Ok(t)
@@ -11263,8 +11280,7 @@ impl Engine {
         max_tables: usize,
     ) -> anyhow::Result<(Vec<AiNlPromptTable>, Vec<String>)> {
         let database = self
-            .catalog
-            .databases
+            .dbs
             .get(db)
             .ok_or_else(|| anyhow::anyhow!("database not found: {db}"))?;
         let mut warnings = Vec::new();
@@ -11281,7 +11297,7 @@ impl Engine {
             }
             out
         } else {
-            let mut out: Vec<String> = database.tables.keys().cloned().collect();
+            let mut out: Vec<String> = database.schemas.keys().cloned().collect();
             out.sort();
             out
         };
@@ -11296,7 +11312,7 @@ impl Engine {
         let mut tables_out = Vec::new();
         for name in table_names.into_iter() {
             let schema = database
-                .tables
+                .schemas
                 .get(&name)
                 .ok_or_else(|| anyhow::anyhow!("table not found: {db}.{name}"))?;
             let columns = schema
@@ -11333,14 +11349,17 @@ impl Engine {
         // acquires its &mut, so materializing here covers all writes.
         self.materialize_streaming_table(&key)?;
 
-        // The schema lives in `self.catalog`, the rows in `self.tables`. Borrowing both fields
-        // mutably at once is accepted by the borrow checker as long as they are reached by
-        // *direct field access* — going through `self.get_schema_mut(..)` would instead borrow
-        // all of `self` and force the raw-pointer workaround this code used to carry.
-        let Some(database) = self.catalog.databases.get_mut(&table.db) else {
+        // The schema lives in `self.dbs`, the rows (still) in `self.tables`. Borrowing both
+        // fields mutably at once is accepted by the borrow checker as long as they are reached
+        // by *direct field access* — going through an accessor method would instead borrow all
+        // of `self` and force the raw-pointer workaround this code used to carry. That is also
+        // what lets the two halves live in different structures while the partition migrates:
+        // Phase B moves the rows into `DbState` beside the schema, and this stays a single
+        // split borrow throughout.
+        let Some(state) = self.dbs.get_mut(&table.db) else {
             anyhow::bail!("database not found: {}", table.db);
         };
-        let Some(schema) = database.tables.get_mut(&table.table) else {
+        let Some(schema) = state.schemas.get_mut(&table.table) else {
             anyhow::bail!("table not found: {}.{}", table.db, table.table);
         };
         let tdata = self
@@ -11396,8 +11415,35 @@ impl Engine {
         Ok(())
     }
 
+    /// Reassemble the on-disk [`Catalog`] from the per-database partitions.
+    ///
+    /// `catalog.json` deliberately keeps the single-document format it has always had, so a
+    /// data directory written by an older build still loads and one written here still loads
+    /// in an older build. The partitioning is an in-memory layout change only; this is the
+    /// one place that has to know both shapes (with the fan-out in
+    /// [`Engine::open_with_storage_mode`]).
+    fn catalog_snapshot(&self) -> Catalog {
+        Catalog {
+            databases: self
+                .dbs
+                .iter()
+                .map(|(db, state)| {
+                    (
+                        db.clone(),
+                        Database {
+                            tables: state.schemas.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     fn persist_catalog(&self) -> anyhow::Result<()> {
-        save_json(&self.data_dir.join("catalog.json"), &self.catalog)
+        save_json(
+            &self.data_dir.join("catalog.json"),
+            &self.catalog_snapshot(),
+        )
     }
 
     fn persist_after_schema_drop(&self) -> anyhow::Result<()> {
@@ -11893,16 +11939,7 @@ impl Engine {
     }
 
     fn load_tables_best_effort(&mut self) {
-        let targets: Vec<(String, String)> = self
-            .catalog
-            .databases
-            .iter()
-            .flat_map(|(db, d)| {
-                d.tables
-                    .keys()
-                    .map(move |table| (db.clone(), table.clone()))
-            })
-            .collect();
+        let targets = self.all_table_keys();
         let streaming_min_bytes = self.streaming_threshold_bytes();
         for (db, table) in targets {
             let key = TableKey {
@@ -12919,10 +12956,9 @@ impl Engine {
         let mut touched = false;
         for (key, table_flags) in flags.into_iter() {
             let Some(schema) = self
-                .catalog
-                .databases
+                .dbs
                 .get(&key.db)
-                .and_then(|database| database.tables.get(&key.table))
+                .and_then(|state| state.schemas.get(&key.table))
             else {
                 touched = true;
                 continue;
@@ -28964,11 +29000,12 @@ fn classify_autoparam_literal(
 }
 
 fn resolve_table_name(engine: &Engine, db: &str, table_hint: &str) -> Option<String> {
-    let db = engine.catalog.databases.get(db)?;
-    if db.tables.contains_key(table_hint) {
+    let state = engine.dbs.get(db)?;
+    if state.schemas.contains_key(table_hint) {
         return Some(table_hint.to_string());
     }
-    db.tables
+    state
+        .schemas
         .keys()
         .find(|name| name.eq_ignore_ascii_case(table_hint))
         .cloned()
