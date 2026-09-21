@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "workspace_id": "r18-candidate-workspace",
+  "bundle_id": "r18-ci-fixture",
+  "workspace_path": ".replay_workspaces/r18-candidate",
+  "expected_checksum": "fixture-correctness",
+  "observed_checksum": "fixture-correctness",
+  "table_checksums": [],
+  "replayed_tables": 2,
+  "replayed_rows": 128,
+  "replayed_changes": 32,
+  "performance_report": {
+    "format": "skein.replay.performance.v1",
+    "baseline_checksum": "fixture-performance",
+    "observed_checksum": "fixture-performance",
+    "checksum_match": true,
+    "storage": {
+      "disk_bytes_delta": 1024,
+      "wal_bytes_delta": 0,
+      "total_tables_delta": 0,
+      "total_rows_delta": 0,
+      "mvcc_versions_delta": 0,
+      "delta_chains_delta": 0
+    },
+    "cache_warm": {
+      "cached_select_entries_delta": 0,
+      "cached_patch_entries_delta": 0,
+      "hot_table_match_count": 1,
+      "missing_hot_table_count": 1,
+      "extra_hot_table_count": 0
+    },
+    "timing": {
+      "change_count_delta": 0,
+      "span_ms_delta": 4,
+      "p50_inter_event_ms_delta": 2,
+      "p95_inter_event_ms_delta": 6,
+      "p99_inter_event_ms_delta": 11
+    }
+  }
+}
