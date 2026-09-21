@@ -24968,7 +24968,7 @@ mod wasm_batch {
 
         let mut offsets = Vec::with_capacity(row_count.saturating_add(1));
         for chunk in aux_bytes.as_chunks::<4>().0 {
-            let offset = u32::from_le_bytes(chunk.try_into().unwrap_or_default());
+            let offset = u32::from_le_bytes(*chunk);
             offsets.push(offset as usize);
         }
         if offsets.len() != row_count + 1 {
