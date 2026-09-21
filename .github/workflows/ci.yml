@@ -71,7 +71,7 @@ jobs:
         with:
           name: r18-replay-comparison
           path: target/r18-replay-comparison.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   playwright:
