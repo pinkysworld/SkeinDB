@@ -34,6 +34,8 @@ That gives SkeinDB a coherent systems thesis rather than a collection of isolate
 
 A deterministic cross-layer evaluation now exercises this thesis on one workload and reports storage, CAS object-transfer, and QueryPatch byte savings separately. See [docs/REDUNDANCY_PIPELINE_EVAL.md](docs/REDUNDANCY_PIPELINE_EVAL.md) and the checked-in [default report](eval/reports/redundancy_pipeline_default.md). The report is explicitly an analytical byte model, not a live latency or throughput benchmark.
 
+That model is now paired with a **live-engine validation** that reads runtime storage counters, exercises real ValueStore object-transfer counters, and measures actual RPC response bytes. The current runtime snapshot is in [eval/reports/redundancy_runtime_ci.md](eval/reports/redundancy_runtime_ci.md).
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity
