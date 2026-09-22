@@ -307,6 +307,21 @@ jobs:
           diff -u eval/reports/cas_batch_sweep_ci.md target/redundancy-runtime/cas-batch-sweep.md
           diff -u eval/reports/cas_batch_sweep_ci.json target/redundancy-runtime/cas-batch-sweep.json
 
+      - name: Run CR08 wire-composition unit tests
+        env:
+          PYTHONPATH: eval
+        run: python -m unittest eval.test_wire_composition
+
+      - name: Run CR08 wire-composition analysis
+        run: |
+          python eval/wire_composition.py \
+            --skeindb-bin target/debug/skeindb \
+            --rows 300 \
+            --seed 20260922 \
+            --batch-size 64 \
+            --json-out target/redundancy-runtime/wire-composition.json \
+            --markdown-out target/redundancy-runtime/wire-composition.md
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
