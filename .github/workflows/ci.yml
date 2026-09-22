@@ -200,6 +200,54 @@ jobs:
           diff -u eval/reports/redundancy_pipeline_default.json /tmp/redundancy_pipeline_default.json
           diff -u eval/reports/redundancy_pipeline_default.md /tmp/redundancy_pipeline_default.md
 
+
+  redundancy-runtime:
+    name: Live redundancy validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and runtime build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-redundancy-runtime-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build SkeinDB
+        run: cargo build -p skeindb --bin skeindb
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Run live redundancy validation
+        run: |
+          python eval/runtime_redundancy_validation.py \
+            --skeindb-bin target/debug/skeindb \
+            --rows 300 \
+            --seed 20260922 \
+            --json-out target/redundancy-runtime/report.json \
+            --markdown-out target/redundancy-runtime/report.md \
+            --log-dir target/redundancy-runtime/logs
+
+      - name: Upload live redundancy evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: redundancy-runtime
+          path: target/redundancy-runtime
+          if-no-files-found: error
+          retention-days: 14
+
   driver-smoke:
     name: Real-driver smoke matrix
     runs-on: ubuntu-latest
