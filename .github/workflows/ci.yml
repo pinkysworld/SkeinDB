@@ -190,6 +190,16 @@ jobs:
       - name: Benchmark report generator tests
         run: python -m unittest discover -s eval -p 'test_*.py'
 
+      - name: Reproduce redundancy pipeline report
+        run: |
+          python eval/redundancy_pipeline.py \
+            --rows 600 \
+            --seed 20260922 \
+            --json-out /tmp/redundancy_pipeline_default.json \
+            --markdown-out /tmp/redundancy_pipeline_default.md
+          diff -u eval/reports/redundancy_pipeline_default.json /tmp/redundancy_pipeline_default.json
+          diff -u eval/reports/redundancy_pipeline_default.md /tmp/redundancy_pipeline_default.md
+
   driver-smoke:
     name: Real-driver smoke matrix
     runs-on: ubuntu-latest

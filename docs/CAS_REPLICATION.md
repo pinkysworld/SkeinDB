@@ -172,6 +172,8 @@ Expose per link and per node:
 
 These metrics make the feature publishable: they quantify bandwidth savings.
 
+For a deterministic cross-layer workload that combines this documented CAS byte bound with storage deduplication and QueryPatch delivery, see [REDUNDANCY_PIPELINE_EVAL.md](REDUNDANCY_PIPELINE_EVAL.md). Its CAS values are analytical object-byte savings, not measured network throughput.
+
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
 The runtime counters behind these metrics are exposed via the

@@ -6,6 +6,8 @@ SkeinDB includes a *query-scoped* patch primitive that lets clients update a pre
 
 This feature is designed to work alongside web validators (ETags / If-None-Match) and is especially useful when many clients poll the same query.
 
+A deterministic cross-layer byte evaluation that uses QueryPatch together with SkeinDB's storage and CAS-replication models is documented in [REDUNDANCY_PIPELINE_EVAL.md](REDUNDANCY_PIPELINE_EVAL.md). The QueryPatch part compares compact JSON response sizes and is not a latency benchmark.
+
 ## What query.patch does
 
 Given:
