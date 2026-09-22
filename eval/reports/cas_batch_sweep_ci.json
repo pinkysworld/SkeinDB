@@ -3,67 +3,67 @@
     {
       "batch_size": 16,
       "cas_overlap_batches": 16,
-      "cas_overlap_http_bytes": 57996,
-      "cas_overlap_request_bytes": 12207,
-      "combined_http_bytes": 150108,
-      "combined_http_bytes_vs_32": 8781,
-      "combined_savings_vs_32_pct": -6.2133,
+      "cas_overlap_http_bytes": 35582,
+      "cas_overlap_request_bytes": 10831,
+      "combined_http_bytes": 92077,
+      "combined_http_bytes_vs_32": 6180,
+      "combined_savings_vs_32_pct": -7.1947,
       "connections": 4,
       "zero_overlap_batches": 25,
-      "zero_overlap_http_bytes": 92112,
-      "zero_overlap_request_bytes": 19325
+      "zero_overlap_http_bytes": 56495,
+      "zero_overlap_request_bytes": 17175
     },
     {
       "batch_size": 32,
       "cas_overlap_batches": 8,
-      "cas_overlap_http_bytes": 54483,
-      "cas_overlap_request_bytes": 10398,
-      "combined_http_bytes": 141327,
+      "cas_overlap_http_bytes": 33110,
+      "cas_overlap_request_bytes": 9710,
+      "combined_http_bytes": 85897,
       "combined_http_bytes_vs_32": 0,
       "combined_savings_vs_32_pct": 0.0,
       "connections": 4,
       "zero_overlap_batches": 13,
-      "zero_overlap_http_bytes": 86844,
-      "zero_overlap_request_bytes": 16613
+      "zero_overlap_http_bytes": 52787,
+      "zero_overlap_request_bytes": 15495
     },
     {
       "batch_size": 64,
       "cas_overlap_batches": 4,
-      "cas_overlap_http_bytes": 52723,
-      "cas_overlap_request_bytes": 9487,
-      "combined_http_bytes": 136927,
-      "combined_http_bytes_vs_32": -4400,
-      "combined_savings_vs_32_pct": 3.1133,
+      "cas_overlap_http_bytes": 31867,
+      "cas_overlap_request_bytes": 9143,
+      "combined_http_bytes": 82788,
+      "combined_http_bytes_vs_32": -3109,
+      "combined_savings_vs_32_pct": 3.6195,
       "connections": 4,
       "zero_overlap_batches": 7,
-      "zero_overlap_http_bytes": 84204,
-      "zero_overlap_request_bytes": 15245
+      "zero_overlap_http_bytes": 50921,
+      "zero_overlap_request_bytes": 14643
     },
     {
       "batch_size": 128,
       "cas_overlap_batches": 3,
-      "cas_overlap_http_bytes": 52281,
-      "cas_overlap_request_bytes": 9259,
-      "combined_http_bytes": 135159,
-      "combined_http_bytes_vs_32": -6168,
-      "combined_savings_vs_32_pct": 4.3643,
+      "cas_overlap_http_bytes": 31557,
+      "cas_overlap_request_bytes": 9001,
+      "combined_http_bytes": 81548,
+      "combined_http_bytes_vs_32": -4349,
+      "combined_savings_vs_32_pct": 5.063,
       "connections": 4,
       "zero_overlap_batches": 4,
-      "zero_overlap_http_bytes": 82878,
-      "zero_overlap_request_bytes": 14561
+      "zero_overlap_http_bytes": 49991,
+      "zero_overlap_request_bytes": 14217
     },
     {
       "batch_size": 256,
       "cas_overlap_batches": 2,
-      "cas_overlap_http_bytes": 51839,
-      "cas_overlap_request_bytes": 9031,
-      "combined_http_bytes": 133835,
-      "combined_http_bytes_vs_32": -7492,
-      "combined_savings_vs_32_pct": 5.3012,
+      "cas_overlap_http_bytes": 31246,
+      "cas_overlap_request_bytes": 8859,
+      "combined_http_bytes": 80616,
+      "combined_http_bytes_vs_32": -5281,
+      "combined_savings_vs_32_pct": 6.1481,
       "connections": 4,
       "zero_overlap_batches": 2,
-      "zero_overlap_http_bytes": 81996,
-      "zero_overlap_request_bytes": 14106
+      "zero_overlap_http_bytes": 49370,
+      "zero_overlap_request_bytes": 13934
     }
   ],
   "batch_sizes": [
@@ -86,11 +86,11 @@
       "cas_overlap": {
         "batches": 12,
         "connections": 1,
-        "http_tcp_payload_bytes": 45004,
-        "request_bytes": 9409,
-        "response_bytes": 35595,
+        "http_tcp_payload_bytes": 27593,
+        "request_bytes": 8377,
+        "response_bytes": 19216,
         "value_store_object_bytes": 42211,
-        "wire_object_ratio": 1.066168
+        "wire_object_ratio": 0.653692
       },
       "preseeded_value_ids": 64,
       "scenario": "low_redundancy_high_churn",
@@ -98,11 +98,11 @@
       "zero_overlap": {
         "batches": 16,
         "connections": 1,
-        "http_tcp_payload_bytes": 60076,
-        "request_bytes": 12557,
-        "response_bytes": 47519,
+        "http_tcp_payload_bytes": 36833,
+        "request_bytes": 11181,
+        "response_bytes": 25652,
         "value_store_object_bytes": 56355,
-        "wire_object_ratio": 1.066028
+        "wire_object_ratio": 0.653589
       }
     },
     {
@@ -110,11 +110,11 @@
       "cas_overlap": {
         "batches": 6,
         "connections": 1,
-        "http_tcp_payload_bytes": 42370,
-        "request_bytes": 8053,
-        "response_bytes": 34317,
+        "http_tcp_payload_bytes": 25739,
+        "request_bytes": 7537,
+        "response_bytes": 18202,
         "value_store_object_bytes": 42211,
-        "wire_object_ratio": 1.003767
+        "wire_object_ratio": 0.60977
       },
       "preseeded_value_ids": 64,
       "scenario": "low_redundancy_high_churn",
@@ -122,11 +122,11 @@
       "zero_overlap": {
         "batches": 8,
         "connections": 1,
-        "http_tcp_payload_bytes": 56564,
-        "request_bytes": 10749,
-        "response_bytes": 45815,
+        "http_tcp_payload_bytes": 34361,
+        "request_bytes": 10061,
+        "response_bytes": 24300,
         "value_store_object_bytes": 56355,
-        "wire_object_ratio": 1.003709
+        "wire_object_ratio": 0.609724
       }
     },
     {
@@ -134,11 +134,11 @@
       "cas_overlap": {
         "batches": 3,
         "connections": 1,
-        "http_tcp_payload_bytes": 41050,
-        "request_bytes": 7369,
-        "response_bytes": 33681,
+        "http_tcp_payload_bytes": 24806,
+        "request_bytes": 7111,
+        "response_bytes": 17695,
         "value_store_object_bytes": 42211,
-        "wire_object_ratio": 0.972495
+        "wire_object_ratio": 0.587667
       },
       "preseeded_value_ids": 64,
       "scenario": "low_redundancy_high_churn",
@@ -146,11 +146,11 @@
       "zero_overlap": {
         "batches": 4,
         "connections": 1,
-        "http_tcp_payload_bytes": 54804,
-        "request_bytes": 9837,
-        "response_bytes": 44967,
+        "http_tcp_payload_bytes": 33117,
+        "request_bytes": 9493,
+        "response_bytes": 23624,
         "value_store_object_bytes": 56355,
-        "wire_object_ratio": 0.972478
+        "wire_object_ratio": 0.58765
       }
     },
     {
@@ -158,11 +158,11 @@
       "cas_overlap": {
         "batches": 2,
         "connections": 1,
-        "http_tcp_payload_bytes": 40608,
-        "request_bytes": 7141,
-        "response_bytes": 33467,
+        "http_tcp_payload_bytes": 24496,
+        "request_bytes": 6969,
+        "response_bytes": 17527,
         "value_store_object_bytes": 42211,
-        "wire_object_ratio": 0.962024
+        "wire_object_ratio": 0.580323
       },
       "preseeded_value_ids": 64,
       "scenario": "low_redundancy_high_churn",
@@ -170,11 +170,11 @@
       "zero_overlap": {
         "batches": 2,
         "connections": 1,
-        "http_tcp_payload_bytes": 53920,
-        "request_bytes": 9381,
-        "response_bytes": 44539,
+        "http_tcp_payload_bytes": 32497,
+        "request_bytes": 9209,
+        "response_bytes": 23288,
         "value_store_object_bytes": 56355,
-        "wire_object_ratio": 0.956792
+        "wire_object_ratio": 0.576648
       }
     },
     {
@@ -182,11 +182,11 @@
       "cas_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 40166,
-        "request_bytes": 6913,
-        "response_bytes": 33253,
+        "http_tcp_payload_bytes": 24185,
+        "request_bytes": 6827,
+        "response_bytes": 17358,
         "value_store_object_bytes": 42211,
-        "wire_object_ratio": 0.951553
+        "wire_object_ratio": 0.572955
       },
       "preseeded_value_ids": 64,
       "scenario": "low_redundancy_high_churn",
@@ -194,11 +194,11 @@
       "zero_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 53478,
-        "request_bytes": 9153,
-        "response_bytes": 44325,
+        "http_tcp_payload_bytes": 32185,
+        "request_bytes": 9067,
+        "response_bytes": 23118,
         "value_store_object_bytes": 56355,
-        "wire_object_ratio": 0.948949
+        "wire_object_ratio": 0.571112
       }
     },
     {
@@ -206,11 +206,11 @@
       "cas_overlap": {
         "batches": 4,
         "connections": 1,
-        "http_tcp_payload_bytes": 12992,
-        "request_bytes": 2798,
-        "response_bytes": 10194,
+        "http_tcp_payload_bytes": 7989,
+        "request_bytes": 2454,
+        "response_bytes": 5535,
         "value_store_object_bytes": 11934,
-        "wire_object_ratio": 1.088654
+        "wire_object_ratio": 0.669432
       },
       "preseeded_value_ids": 81,
       "scenario": "balanced",
@@ -218,11 +218,11 @@
       "zero_overlap": {
         "batches": 9,
         "connections": 1,
-        "http_tcp_payload_bytes": 32036,
-        "request_bytes": 6768,
-        "response_bytes": 25268,
+        "http_tcp_payload_bytes": 19662,
+        "request_bytes": 5994,
+        "response_bytes": 13668,
         "value_store_object_bytes": 29835,
-        "wire_object_ratio": 1.073772
+        "wire_object_ratio": 0.659025
       }
     },
     {
@@ -230,11 +230,11 @@
       "cas_overlap": {
         "batches": 2,
         "connections": 1,
-        "http_tcp_payload_bytes": 12113,
-        "request_bytes": 2345,
-        "response_bytes": 9768,
+        "http_tcp_payload_bytes": 7371,
+        "request_bytes": 2173,
+        "response_bytes": 5198,
         "value_store_object_bytes": 11934,
-        "wire_object_ratio": 1.014999
+        "wire_object_ratio": 0.617647
       },
       "preseeded_value_ids": 81,
       "scenario": "balanced",
@@ -242,11 +242,11 @@
       "zero_overlap": {
         "batches": 5,
         "connections": 1,
-        "http_tcp_payload_bytes": 30280,
-        "request_bytes": 5864,
-        "response_bytes": 24416,
+        "http_tcp_payload_bytes": 18426,
+        "request_bytes": 5434,
+        "response_bytes": 12992,
         "value_store_object_bytes": 29835,
-        "wire_object_ratio": 1.014915
+        "wire_object_ratio": 0.617597
       }
     },
     {
@@ -254,11 +254,11 @@
       "cas_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 11673,
-        "request_bytes": 2118,
-        "response_bytes": 9555,
+        "http_tcp_payload_bytes": 7061,
+        "request_bytes": 2032,
+        "response_bytes": 5029,
         "value_store_object_bytes": 11934,
-        "wire_object_ratio": 0.97813
+        "wire_object_ratio": 0.591671
       },
       "preseeded_value_ids": 81,
       "scenario": "balanced",
@@ -266,11 +266,11 @@
       "zero_overlap": {
         "batches": 3,
         "connections": 1,
-        "http_tcp_payload_bytes": 29400,
-        "request_bytes": 5408,
-        "response_bytes": 23992,
+        "http_tcp_payload_bytes": 17804,
+        "request_bytes": 5150,
+        "response_bytes": 12654,
         "value_store_object_bytes": 29835,
-        "wire_object_ratio": 0.98542
+        "wire_object_ratio": 0.596749
       }
     },
     {
@@ -278,11 +278,11 @@
       "cas_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 11673,
-        "request_bytes": 2118,
-        "response_bytes": 9555,
+        "http_tcp_payload_bytes": 7061,
+        "request_bytes": 2032,
+        "response_bytes": 5029,
         "value_store_object_bytes": 11934,
-        "wire_object_ratio": 0.97813
+        "wire_object_ratio": 0.591671
       },
       "preseeded_value_ids": 81,
       "scenario": "balanced",
@@ -290,11 +290,11 @@
       "zero_overlap": {
         "batches": 2,
         "connections": 1,
-        "http_tcp_payload_bytes": 28958,
-        "request_bytes": 5180,
-        "response_bytes": 23778,
+        "http_tcp_payload_bytes": 17494,
+        "request_bytes": 5008,
+        "response_bytes": 12486,
         "value_store_object_bytes": 29835,
-        "wire_object_ratio": 0.970605
+        "wire_object_ratio": 0.586358
       }
     },
     {
@@ -302,11 +302,11 @@
       "cas_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 11673,
-        "request_bytes": 2118,
-        "response_bytes": 9555,
+        "http_tcp_payload_bytes": 7061,
+        "request_bytes": 2032,
+        "response_bytes": 5029,
         "value_store_object_bytes": 11934,
-        "wire_object_ratio": 0.97813
+        "wire_object_ratio": 0.591671
       },
       "preseeded_value_ids": 81,
       "scenario": "balanced",
@@ -314,11 +314,11 @@
       "zero_overlap": {
         "batches": 1,
         "connections": 1,
-        "http_tcp_payload_bytes": 28518,
-        "request_bytes": 4953,
-        "response_bytes": 23565,
+        "http_tcp_payload_bytes": 17185,
+        "request_bytes": 4867,
+        "response_bytes": 12318,
         "value_store_object_bytes": 29835,
-        "wire_object_ratio": 0.955857
+        "wire_object_ratio": 0.576001
       }
     }
   ],
