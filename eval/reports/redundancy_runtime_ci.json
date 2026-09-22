@@ -1,0 +1,179 @@
+{
+  "claim_boundary": [
+    "No wall-clock throughput or latency claim is made.",
+    "CAS overlap is simulated on one node, but saved/fetched bytes come from real ValueStore RPC counters.",
+    "Query byte counts are real HTTP response body sizes without transport compression.",
+    "Storage byte counters are the live stats.snapshot values reported by the engine."
+  ],
+  "format": "skein.redundancy_pipeline.runtime.v1",
+  "kind": "live_engine_byte_validation",
+  "results": [
+    {
+      "analytical_reference": {
+        "cas_saved_bytes_ratio": 0.233082,
+        "lifecycle_savings_pct": 39.455,
+        "query_patch_savings_pct": 82.455,
+        "storage_savings_pct": 4.17
+      },
+      "cas_replication": {
+        "already_present_ids": 64,
+        "configured_receiver_overlap": 0.25,
+        "fetch_objects_served": 191,
+        "fetched_ids": 191,
+        "hit_rate": 0.25098039215686274,
+        "need_hits": 64,
+        "need_misses": 191,
+        "obj_bytes": 42211,
+        "ref_bytes": 14144,
+        "saved_bytes": 14144,
+        "saved_bytes_ratio": 0.25098039215686274,
+        "scope": "single-node receiver-overlap simulation over real skeinpack ValueIDs",
+        "source": "objects.need + objects.fetch + cluster.replication_stats",
+        "value_ids": 255
+      },
+      "model_delta_pct_points": {
+        "cas": 1.79,
+        "query_patch": -17.889,
+        "storage": 10.83
+      },
+      "query_delivery": {
+        "added": 15,
+        "base_select_bytes": 78904,
+        "base_source": "etag_cache",
+        "full_response_bytes": 79258,
+        "patch_response_bytes": 28084,
+        "patch_saved_bytes": 51174,
+        "patch_savings_pct": 64.566,
+        "removed": 15,
+        "source": "raw /api/v1/rpc HTTP response bodies",
+        "updated": 30
+      },
+      "rows": 300,
+      "scenario": "low_redundancy_high_churn",
+      "seed": 20260922,
+      "storage": {
+        "dedup_ratio": 1.1764705882352942,
+        "disk_bytes": 356139,
+        "duplicate_bytes": 9945,
+        "interned_values": 255,
+        "logical_bytes": 66300,
+        "savings_pct": 15.0,
+        "source": "stats.snapshot.storage",
+        "unique_bytes": 56355,
+        "unique_values": 255
+      }
+    },
+    {
+      "analytical_reference": {
+        "cas_saved_bytes_ratio": 0.574139,
+        "lifecycle_savings_pct": 59.441,
+        "query_patch_savings_pct": 95.234,
+        "storage_savings_pct": 18.98
+      },
+      "cas_replication": {
+        "already_present_ids": 81,
+        "configured_receiver_overlap": 0.6,
+        "fetch_objects_served": 54,
+        "fetched_ids": 54,
+        "hit_rate": 0.6,
+        "need_hits": 81,
+        "need_misses": 54,
+        "obj_bytes": 11934,
+        "ref_bytes": 17901,
+        "saved_bytes": 17901,
+        "saved_bytes_ratio": 0.6,
+        "scope": "single-node receiver-overlap simulation over real skeinpack ValueIDs",
+        "source": "objects.need + objects.fetch + cluster.replication_stats",
+        "value_ids": 135
+      },
+      "model_delta_pct_points": {
+        "cas": 2.586,
+        "query_patch": -11.088,
+        "storage": 36.02
+      },
+      "query_delivery": {
+        "added": 5,
+        "base_select_bytes": 78904,
+        "base_source": "etag_cache",
+        "full_response_bytes": 79505,
+        "patch_response_bytes": 12605,
+        "patch_saved_bytes": 66900,
+        "patch_savings_pct": 84.146,
+        "removed": 3,
+        "source": "raw /api/v1/rpc HTTP response bodies",
+        "updated": 7
+      },
+      "rows": 300,
+      "scenario": "balanced",
+      "seed": 20261023,
+      "storage": {
+        "dedup_ratio": 2.2222222222222223,
+        "disk_bytes": 356139,
+        "duplicate_bytes": 36465,
+        "interned_values": 135,
+        "logical_bytes": 66300,
+        "savings_pct": 55.0,
+        "source": "stats.snapshot.storage",
+        "unique_bytes": 29835,
+        "unique_values": 135
+      }
+    },
+    {
+      "analytical_reference": {
+        "cas_saved_bytes_ratio": 0.882886,
+        "lifecycle_savings_pct": 78.857,
+        "query_patch_savings_pct": 98.704,
+        "storage_savings_pct": 54.544
+      },
+      "cas_replication": {
+        "already_present_ids": 26,
+        "configured_receiver_overlap": 0.85,
+        "fetch_objects_served": 4,
+        "fetched_ids": 4,
+        "hit_rate": 0.8666666666666667,
+        "need_hits": 26,
+        "need_misses": 4,
+        "obj_bytes": 884,
+        "ref_bytes": 5746,
+        "saved_bytes": 5746,
+        "saved_bytes_ratio": 0.8666666666666667,
+        "scope": "single-node receiver-overlap simulation over real skeinpack ValueIDs",
+        "source": "objects.need + objects.fetch + cluster.replication_stats",
+        "value_ids": 30
+      },
+      "model_delta_pct_points": {
+        "cas": -1.622,
+        "query_patch": -0.536,
+        "storage": 35.456
+      },
+      "query_delivery": {
+        "added": 2,
+        "base_select_bytes": 78904,
+        "base_source": "etag_cache",
+        "full_response_bytes": 79437,
+        "patch_response_bytes": 1455,
+        "patch_saved_bytes": 77982,
+        "patch_savings_pct": 98.168,
+        "removed": 0,
+        "source": "raw /api/v1/rpc HTTP response bodies",
+        "updated": 1
+      },
+      "rows": 300,
+      "scenario": "high_redundancy_low_churn",
+      "seed": 20261124,
+      "storage": {
+        "dedup_ratio": 10.0,
+        "disk_bytes": 356139,
+        "duplicate_bytes": 59670,
+        "interned_values": 30,
+        "logical_bytes": 66300,
+        "savings_pct": 90.0,
+        "source": "stats.snapshot.storage",
+        "unique_bytes": 6630,
+        "unique_values": 30
+      }
+    }
+  ],
+  "rows": 300,
+  "seed": 20260922
+}

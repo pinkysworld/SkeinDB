@@ -100,10 +100,39 @@ Unit coverage lives in `eval/test_redundancy_pipeline.py`. CI regenerates the de
 
 The runtime ValueID is BLAKE3-128. The Python harness uses a 128-bit stdlib digest surrogate because the evaluated properties here depend only on deterministic content equality and the fixed 32-hex-character identity width. It does **not** claim cryptographic equivalence to BLAKE3.
 
-A future live-engine extension should replace this analytical identity/replication layer with measurements captured directly from:
+## Live-engine validation
 
-- `stats.snapshot.storage`;
-- `cluster.replication_stats`;
-- actual `query.select` and `query.patch` response bodies.
+The follow-up harness `eval/runtime_redundancy_validation.py` now runs the same three scenario families against a real SkeinDB process.
 
-That live extension can reuse the same report schema while changing the evidence source from analytical to runtime.
+Evidence sources:
+
+- storage: `stats.snapshot.storage.logical_bytes`, `unique_bytes`, and `duplicate_bytes`;
+- CAS: real ValueIDs emitted by `skeinpack_v1`, real `objects.need` hit bytes, real `objects.fetch` object bytes, and `cluster.replication_stats`;
+- query delivery: raw HTTP response-body bytes from `query.patch` versus a fresh full `query.select`.
+
+The CAS experiment intentionally simulates receiver overlap on a single node by partitioning real ValueIDs into "already present" and "must fetch" sets. The byte accounting therefore exercises the real ValueStore RPC counters without claiming measured multi-node network throughput.
+
+### Runtime results
+
+The first CI-backed runtime snapshot uses 300 rows per scenario and seed `20260922`.
+
+| Scenario | Runtime storage saved | Runtime CAS saved | Runtime QueryPatch saved | Model storage | Model CAS | Model QueryPatch |
+|---|---:|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 15.0% | 25.1% | 64.6% | 4.2% | 23.3% | 82.5% |
+| balanced | 55.0% | 60.0% | 84.1% | 19.0% | 57.4% | 95.2% |
+| high redundancy / low churn | 90.0% | 86.7% | 98.2% | 54.5% | 88.3% | 98.7% |
+
+The checked-in evidence is available in:
+
+- `eval/reports/redundancy_runtime_ci.json`
+- `eval/reports/redundancy_runtime_ci.md`
+
+### What the model gets right and wrong
+
+The CAS estimate is well calibrated in this workload: runtime savings differ from the analytical estimate by about +1.8, +2.6, and -1.6 percentage points across the three scenarios.
+
+The QueryPatch model is optimistic when churn is high. The analytical patch model counts the core delta representation, while the live RPC measurement also carries columns, ETags, dependency and causality metadata, typed literals, and the response envelope. The gap narrows from about 17.9 percentage points at high churn to about 0.5 points at low churn.
+
+The storage figures intentionally use different denominators. The analytical model estimates adaptive cell-reference encoding overhead, while the runtime counter reports logical ValueStore bytes versus unique ValueStore bytes. Runtime storage savings therefore validate the broader "repeated values collapse to unique content" behavior, but are not a direct validation of the on-disk reference-encoding model.
+
+CI regenerates the live Markdown report and diffs it against the checked-in snapshot. A change to these runtime byte-saving results must therefore be reviewed explicitly.
