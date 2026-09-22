@@ -630,6 +630,16 @@ def validate_result(result: dict[str, Any]) -> None:
         )
     if result["savings"]["http_tcp_payload_savings_pct"] <= 0:
         raise RuntimeError(f"{result['scenario']}: HTTP savings are not positive")
+    if baseline["wire"]["connections"] != 1:
+        raise RuntimeError(
+            f"{result['scenario']}: baseline pull used "
+            f"{baseline['wire']['connections']} TCP connections instead of 1"
+        )
+    if overlap["wire"]["connections"] != 1:
+        raise RuntimeError(
+            f"{result['scenario']}: CAS pull used "
+            f"{overlap['wire']['connections']} TCP connections instead of 1"
+        )
     if (
         second["fetched_objects"] != 0
         or second["source_objects_served"] != 0
@@ -664,19 +674,21 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "A transparent TCP proxy counts the exact TCP payload bytes used by the production HTTP objects.pull -> objects.fetch path. Each scenario compares a zero-overlap destination with a destination pre-seeded at the configured CAS overlap.",
         "",
-        "| Scenario | Baseline HTTP bytes | CAS HTTP bytes | HTTP bytes saved | Object bytes saved | Baseline wire / object | CAS wire / object | Second-pull HTTP bytes |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Baseline HTTP bytes | CAS HTTP bytes | HTTP bytes saved | Object bytes saved | Baseline connections | CAS connections | Baseline wire / object | CAS wire / object | Second-pull HTTP bytes |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in report["results"]:
         baseline = result["zero_overlap_baseline"]["wire"]
         overlap = result["cas_overlap"]["wire"]
         lines.append(
-            "| {name} | {baseline} | {overlap} | {wire_saved:.1f}% | {obj_saved:.1f}% | {base_exp:.2f}x | {cas_exp:.2f}x | {second} |".format(
+            "| {name} | {baseline} | {overlap} | {wire_saved:.1f}% | {obj_saved:.1f}% | {base_conn} | {cas_conn} | {base_exp:.2f}x | {cas_exp:.2f}x | {second} |".format(
                 name=result["scenario"],
                 baseline=baseline["http_tcp_payload_bytes"],
                 overlap=overlap["http_tcp_payload_bytes"],
                 wire_saved=result["savings"]["http_tcp_payload_savings_pct"],
                 obj_saved=result["savings"]["value_store_object_savings_pct"],
+                base_conn=baseline["connections"],
+                cas_conn=overlap["connections"],
                 base_exp=baseline["total_wire_expansion_ratio"],
                 cas_exp=overlap["total_wire_expansion_ratio"],
                 second=result["second_pull"]["http_tcp_payload_bytes"],
