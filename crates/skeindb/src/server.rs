@@ -24362,13 +24362,10 @@ fn materialize_staged_transfer_entry(
 }
 
 async fn fetch_remote_object_batch(
+    client: &reqwest::Client,
     source_rpc_url: &str,
     ids: &[String],
 ) -> Result<Vec<Value>, RpcError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|err| RpcError::new("transport_error", err.to_string()))?;
     let url = format!("{}/api/v1/rpc", source_rpc_url.trim_end_matches('/'));
     let payload = serde_json::json!({
         "skeinql": SKEINQL_VERSION,
@@ -24659,6 +24656,15 @@ async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Val
         skeindb_core::valuestore::ValueSegmentEntry,
     > = HashMap::new();
 
+    // CR06: one HTTP client per pull, not per batch. Requests are sequential,
+    // so reqwest can reuse the same keep-alive connection across all fetch
+    // batches while preserving the existing timeout and authentication path.
+    let pull_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(1)
+        .build()
+        .map_err(|err| RpcError::new("transport_error", err.to_string()))?;
+
     while !pending.is_empty() {
         let mut batch = Vec::new();
         while batch.len() < batch_size {
@@ -24673,7 +24679,7 @@ async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Val
         batches = batches.saturating_add(1);
 
         let requested_batch: HashSet<String> = batch.iter().cloned().collect();
-        let objects = fetch_remote_object_batch(&source_rpc_url, &batch).await?;
+        let objects = fetch_remote_object_batch(&pull_client, &source_rpc_url, &batch).await?;
         fetched_objects = fetched_objects.saturating_add(objects.len());
 
         let mut returned_ids = HashSet::new();
