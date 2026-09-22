@@ -12,6 +12,7 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::Path,
     extract::Query as AxumQuery,
@@ -17148,6 +17149,10 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
 fn build_http_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/rpc", post(rpc_handler))
+        .route(
+            "/api/v1/objects/fetch-bin",
+            post(objects_fetch_binary_http_handler),
+        )
         .route("/api/v1/sql/exec", post(sql_exec_http_handler))
         .route("/api/v1/q/{query_id}", get(prepared_get_handler))
         .route("/api/v1/q/{query_id}/events", get(prepared_sse_handler))
@@ -24260,6 +24265,9 @@ async fn cluster_shard_rebalance(
 
 const OBJECTS_PULL_DEFAULT_BATCH_SIZE: usize = 64;
 const OBJECTS_PULL_MAX_BATCH_SIZE: usize = 512;
+const OBJECTS_FETCH_BINARY_MAGIC: [u8; 4] = *b"SKOF";
+const OBJECTS_FETCH_BINARY_VERSION: u8 = 1;
+const OBJECTS_FETCH_BINARY_CONTENT_TYPE: &str = "application/vnd.skeindb.objects-v1";
 
 fn parse_value_id(hex: &str) -> Option<skeindb_core::valuestore::ValueId> {
     if hex.len() != 32 {
@@ -24361,11 +24369,86 @@ fn materialize_staged_transfer_entry(
     }
 }
 
-async fn fetch_remote_object_batch(
+#[derive(Debug)]
+struct RemoteTransferObject {
+    id: String,
+    payload: Option<Vec<u8>>,
+    legacy_kind: Option<String>,
+}
+
+fn decode_objects_fetch_binary(body: &[u8]) -> Result<Vec<RemoteTransferObject>, RpcError> {
+    if body.len() < 9 || body[..4] != OBJECTS_FETCH_BINARY_MAGIC {
+        return Err(RpcError::new(
+            "invalid_response",
+            "binary objects.fetch response has invalid magic/header",
+        ));
+    }
+    if body[4] != OBJECTS_FETCH_BINARY_VERSION {
+        return Err(RpcError::new(
+            "unsupported_version",
+            format!(
+                "unsupported binary objects.fetch version {}",
+                body[4]
+            ),
+        ));
+    }
+
+    let count = u32::from_le_bytes(
+        body[5..9]
+            .try_into()
+            .map_err(|_| RpcError::new("invalid_response", "invalid binary object count"))?,
+    ) as usize;
+    let mut offset = 9usize;
+    let mut objects = Vec::with_capacity(count);
+    for _ in 0..count {
+        if offset + 4 > body.len() {
+            return Err(RpcError::new(
+                "invalid_response",
+                "truncated binary objects.fetch entry length",
+            ));
+        }
+        let len = u32::from_le_bytes(
+            body[offset..offset + 4]
+                .try_into()
+                .map_err(|_| RpcError::new("invalid_response", "invalid binary entry length"))?,
+        ) as usize;
+        offset += 4;
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(|| {
+                RpcError::new(
+                    "invalid_response",
+                    "truncated binary objects.fetch entry payload",
+                )
+            })?;
+        let payload = body[offset..end].to_vec();
+        offset = end;
+
+        let transfer = skeindb_core::valuestore::decode_transfer_entry(&payload)
+            .map_err(|err| RpcError::new("invalid_response", err.to_string()))?;
+        objects.push(RemoteTransferObject {
+            id: value_id_to_hex(&transfer.id),
+            payload: Some(payload),
+            legacy_kind: None,
+        });
+    }
+    if offset != body.len() {
+        return Err(RpcError::new(
+            "invalid_response",
+            "binary objects.fetch response has trailing bytes",
+        ));
+    }
+    Ok(objects)
+}
+
+async fn fetch_remote_object_batch_json(
     client: &reqwest::Client,
     source_rpc_url: &str,
     ids: &[String],
-) -> Result<Vec<Value>, RpcError> {
+) -> Result<Vec<RemoteTransferObject>, RpcError> {
+    use base64::Engine as _;
+
     let url = format!("{}/api/v1/rpc", source_rpc_url.trim_end_matches('/'));
     let payload = serde_json::json!({
         "skeinql": SKEINQL_VERSION,
@@ -24373,9 +24456,6 @@ async fn fetch_remote_object_batch(
         "method": "objects.fetch",
         "params": {
             "ids": ids,
-            // New sources honor this compact mode. Older sources ignore the
-            // unknown field and return the legacy superset, which remains
-            // accepted by the pull decoder.
             "transfer_only": true
         },
     });
@@ -24413,16 +24493,78 @@ async fn fetch_remote_object_batch(
         return Err(RpcError::new("remote_error", msg));
     }
 
-    body.get("result")
+    let objects = body
+        .get("result")
         .and_then(|v| v.get("objects"))
         .and_then(Value::as_array)
-        .cloned()
         .ok_or_else(|| {
             RpcError::new(
                 "invalid_response",
                 "remote objects.fetch returned no objects array",
             )
+        })?;
+
+    Ok(objects
+        .iter()
+        .map(|object| {
+            let payload = object
+                .get("entry_b64")
+                .and_then(Value::as_str)
+                .and_then(|raw| base64::engine::general_purpose::STANDARD.decode(raw).ok());
+            RemoteTransferObject {
+                id: object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                payload,
+                legacy_kind: object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }
         })
+        .collect())
+}
+
+async fn fetch_remote_object_batch(
+    client: &reqwest::Client,
+    source_rpc_url: &str,
+    ids: &[String],
+) -> Result<Vec<RemoteTransferObject>, RpcError> {
+    let binary_url = format!(
+        "{}/api/v1/objects/fetch-bin",
+        source_rpc_url.trim_end_matches('/')
+    );
+    let mut req = client
+        .post(&binary_url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
+        .json(&serde_json::json!({ "ids": ids }));
+    if let Ok(token) = std::env::var("SKEINDB_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|err| RpcError::new("transport_error", format!("{} => {}", binary_url, err)))?;
+    let status = resp.status();
+    if status.is_success() {
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|err| RpcError::new("invalid_response", err.to_string()))?;
+        return decode_objects_fetch_binary(&bytes);
+    }
+
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
+        return fetch_remote_object_batch_json(client, source_rpc_url, ids).await;
+    }
+
+    Err(RpcError::new(
+        "transport_error",
+        format!("{} => {}", binary_url, status),
+    ))
 }
 
 /// Build the T167 CAS replication object-pull stats JSON from current
@@ -24539,6 +24681,125 @@ async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, Rp
     Ok(serde_json::json!({ "ok": true, "missing": missing }))
 }
 
+#[derive(serde::Deserialize)]
+struct ObjectsFetchBinaryRequest {
+    ids: Vec<String>,
+}
+
+async fn authorize_objects_fetch_binary(
+    state: &AppState,
+    headers: &HeaderMap,
+    ids: &[String],
+) -> Result<(), StatusCode> {
+    let params = serde_json::json!({ "ids": ids });
+
+    if rbac_enforced() {
+        let bearer = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim);
+        let env_token = std::env::var("SKEINDB_TOKEN").ok();
+        let principal = resolve_rpc_principal(state, env_token.as_deref(), bearer).await;
+        return match rpc_authorize(principal.as_ref(), "objects.fetch", Some(&params)) {
+            RpcAuthDecision::Allow => Ok(()),
+            RpcAuthDecision::Unauthenticated => Err(StatusCode::UNAUTHORIZED),
+            RpcAuthDecision::Forbidden { .. } | RpcAuthDecision::ForbiddenDbScope { .. } => {
+                Err(StatusCode::FORBIDDEN)
+            }
+        };
+    }
+
+    if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
+        let auth_ok = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == format!("Bearer {}", expected))
+            .unwrap_or(false);
+        if !auth_ok {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(())
+}
+
+fn encode_objects_fetch_binary_payloads(payloads: &[Vec<u8>]) -> Result<Vec<u8>, RpcError> {
+    let count = u32::try_from(payloads.len())
+        .map_err(|_| RpcError::new("internal", "too many binary fetch objects"))?;
+    let mut body = Vec::with_capacity(
+        9 + payloads.iter().map(|payload| 4 + payload.len()).sum::<usize>(),
+    );
+    body.extend_from_slice(&OBJECTS_FETCH_BINARY_MAGIC);
+    body.push(OBJECTS_FETCH_BINARY_VERSION);
+    body.extend_from_slice(&count.to_le_bytes());
+    for payload in payloads {
+        let len = u32::try_from(payload.len())
+            .map_err(|_| RpcError::new("internal", "binary transfer entry too large"))?;
+        body.extend_from_slice(&len.to_le_bytes());
+        body.extend_from_slice(payload);
+    }
+    Ok(body)
+}
+
+async fn objects_fetch_binary(
+    state: &AppState,
+    ids: Vec<String>,
+) -> Result<Vec<u8>, RpcError> {
+    let eng = state.engine.read().await;
+    let mut vs = eng.value_store_lock();
+    let mut payloads = Vec::new();
+    let mut obj_bytes = 0u64;
+
+    for id_str in &ids {
+        let Some(id) = parse_value_id(id_str) else {
+            continue;
+        };
+        if let Some(entry) = vs.get(&id).cloned() {
+            let payload = skeindb_core::valuestore::encode_transfer_entry(id, &entry)
+                .map_err(|err| RpcError::new("internal", err.to_string()))?;
+            obj_bytes = obj_bytes.saturating_add(entry.bytes.len() as u64);
+            payloads.push(payload);
+        }
+    }
+    drop(vs);
+    drop(eng);
+
+    let objects_served = payloads.len() as u64;
+    {
+        let mut c = state
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r = &mut c.replication_objects;
+        r.fetch_calls = r.fetch_calls.saturating_add(1);
+        r.fetch_ids_total = r.fetch_ids_total.saturating_add(ids.len() as u64);
+        r.fetch_objects_served = r.fetch_objects_served.saturating_add(objects_served);
+        r.obj_bytes = r.obj_bytes.saturating_add(obj_bytes);
+        r.last_updated_ms = now_unix_ms_u64();
+    }
+
+    encode_objects_fetch_binary_payloads(&payloads)
+}
+
+async fn objects_fetch_binary_http_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(params): Json<ObjectsFetchBinaryRequest>,
+) -> axum::response::Response {
+    if let Err(status) = authorize_objects_fetch_binary(&state, &headers, &params.ids).await {
+        return status.into_response();
+    }
+
+    match objects_fetch_binary(&state, params.ids).await {
+        Ok(body) => axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, OBJECTS_FETCH_BINARY_CONTENT_TYPE)
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// `objects.fetch`: given a list of ValueIDs, return the bytes (base64-encoded) for each.
 async fn objects_fetch(
     state: &AppState,
@@ -24608,7 +24869,6 @@ async fn objects_fetch(
 /// validated entries. Delta objects are transferred losslessly and can pull
 /// their base dependencies recursively.
 async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Value, RpcError> {
-    use base64::Engine as _;
 
     let source_rpc_url = params.source_rpc_url.trim().to_string();
     if source_rpc_url.is_empty() {
@@ -24684,31 +24944,17 @@ async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Val
 
         let mut returned_ids = HashSet::new();
         for object in objects {
-            let object_id = object
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase();
+            let object_id = object.id.trim().to_ascii_lowercase();
             if object_id.is_empty() || !requested_batch.contains(&object_id) {
                 continue;
             }
             returned_ids.insert(object_id.clone());
 
-            let Some(payload_b64) = object.get("entry_b64").and_then(Value::as_str) else {
+            let Some(payload) = object.payload else {
                 if !verification_failed.contains(&object_id) {
                     verification_failed.push(object_id.clone());
                 }
                 continue;
-            };
-            let payload = match base64::engine::general_purpose::STANDARD.decode(payload_b64) {
-                Ok(payload) => payload,
-                Err(_) => {
-                    if !verification_failed.contains(&object_id) {
-                        verification_failed.push(object_id.clone());
-                    }
-                    continue;
-                }
             };
             let transfer = match skeindb_core::valuestore::decode_transfer_entry(&payload) {
                 Ok(entry) => entry,
@@ -24732,8 +24978,8 @@ async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Val
                 continue;
             }
             let kind_matches = object
-                .get("kind")
-                .and_then(Value::as_str)
+                .legacy_kind
+                .as_deref()
                 .and_then(parse_value_kind_name)
                 .map(|kind| kind == transfer.entry.kind)
                 .unwrap_or(true);
