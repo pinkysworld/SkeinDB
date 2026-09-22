@@ -208,3 +208,13 @@ CR06 moves client construction to the lifetime of one `objects.pull`. The byte c
 | high redundancy / low churn | 1 / 1 | **1** | 1 / 1 | **1** |
 
 The pre-CR06 report is retained as `eval/reports/cas_http_wire_pre_cr06.{json,md}`. The current report includes connection counts and is CI-diffed. No latency or throughput improvement is claimed from the loopback test; the verified claim is deterministic connection reuse with unchanged transfer correctness and bytes.
+
+#### CR07 batch-size sweep
+
+With payload duplication and connection churn already removed, CR07 measures the remaining per-request framing cost by sweeping batch sizes 16, 32, 64, 128, and 256 on the same raw-TCP proxy path.
+
+Across the low-redundancy/high-churn and balanced scenarios, combined zero-overlap plus CAS-overlap HTTP bytes are 150,108, 141,327, 136,927, 135,159, and 133,835 bytes respectively. Moving from 32 to the existing default 64 saves 3.11%. Moving from 64 to 128 saves only another 1.29%, while 64 to 256 saves another 2.26%.
+
+The existing default of **64** is therefore retained. It captures most of the measurable per-request byte reduction while avoiding unnecessarily large single responses and coarse retry units. Explicit callers can still select other supported batch sizes.
+
+The deterministic report is checked in as `eval/reports/cas_batch_sweep_ci.{json,md}` and regenerated in CI. The result is scoped to byte efficiency; it is not a latency or throughput benchmark.
