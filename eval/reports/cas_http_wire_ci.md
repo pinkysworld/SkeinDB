@@ -9,9 +9,9 @@ A transparent TCP proxy counts the exact TCP payload bytes used by the productio
 
 | Scenario | Baseline HTTP bytes | CAS HTTP bytes | HTTP bytes saved | Object bytes saved | Baseline wire / object | CAS wire / object | Second-pull HTTP bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| low_redundancy_high_churn | 143359 | 107381 | 25.1% | 25.1% | 2.54x | 2.54x | 0 |
-| balanced | 76214 | 30487 | 60.0% | 60.0% | 2.55x | 2.55x | 0 |
-| high_redundancy_low_churn | 16887 | 2611 | 84.5% | 86.7% | 2.55x | 2.95x | 0 |
+| low_redundancy_high_churn | 56564 | 42370 | 25.1% | 25.1% | 1.00x | 1.00x | 0 |
+| balanced | 30280 | 12113 | 60.0% | 60.0% | 1.01x | 1.01x | 0 |
+| high_redundancy_low_churn | 6677 | 1267 | 81.0% | 86.7% | 1.01x | 1.43x | 0 |
 
 ## What the byte counter includes
 
@@ -19,8 +19,9 @@ A transparent TCP proxy counts the exact TCP payload bytes used by the productio
 - JSON-RPC request bodies containing ValueIDs
 - HTTP status line and response headers
 - JSON-RPC response envelopes
-- Base64-encoded `bytes_b64` and `entry_b64` fields
+- Base64-encoded `entry_b64` transfer payloads used by `objects.pull`
 - all other JSON syntax and metadata carried over the loopback TCP stream
+- the legacy `bytes_b64` field is compatibility-tested separately and is not present in the measured CR05 pull traffic
 
 ## What it excludes
 
