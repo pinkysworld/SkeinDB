@@ -1,0 +1,156 @@
+{
+  "format": "skein.redundancy_pipeline.v1",
+  "identity_note": "Runtime uses BLAKE3-128 ValueIDs. This harness uses a 128-bit stdlib surrogate because only equality and 32-hex identifier width affect the modeled byte counts.",
+  "kind": "deterministic_analytical_byte_model",
+  "limitations": [
+    "Storage numbers cover serialized cell values, not complete row/file framing.",
+    "CAS replication applies the documented U-I object-byte bound and excludes row metadata/protocol overhead.",
+    "Query delivery uses compact JSON without HTTP compression and models add/update/remove patches.",
+    "Lifecycle byte-work is a cross-layer accounting metric, not bytes on one physical channel."
+  ],
+  "results": [
+    {
+      "lifecycle_byte_work": {
+        "baseline_bytes": 381407,
+        "definition": "storage cell payload bytes + replication unique-object bytes + one query-delivery response",
+        "redundancy_aware_bytes": 230641,
+        "saved_bytes": 150766,
+        "savings_pct": 39.529
+      },
+      "query_delivery": {
+        "added": 30,
+        "full_response_bytes": 144635,
+        "patch_response_bytes": 25272,
+        "patch_saved_bytes": 119363,
+        "patch_savings_pct": 82.527,
+        "removed": 30,
+        "scope": "compact_json_response_bytes_without_http_compression",
+        "selected_delivery_bytes": 25272,
+        "selected_delivery_mode": "patch",
+        "updated": 60
+      },
+      "replication": {
+        "cas_transfer_bytes": 85297,
+        "hit_rate": 0.25045,
+        "naive_object_bytes": 111480,
+        "receiver_present_objects": 278,
+        "saved_bytes": 26183,
+        "saved_bytes_ratio": 0.234867,
+        "scope": "unique_value_object_bytes_excluding_row_metadata_and_protocol_overhead",
+        "unique_objects": 1110
+      },
+      "rows": 600,
+      "scenario": {
+        "change_rate": 0.2,
+        "name": "low_redundancy_high_churn",
+        "receiver_overlap": 0.25,
+        "repetition": 0.15
+      },
+      "storage": {
+        "adaptive_ref_bytes": 120072,
+        "distinct_values": 1110,
+        "inline_bytes": 125292,
+        "ref_profitable_values": 90,
+        "saved_bytes": 5220,
+        "savings_pct": 4.166,
+        "scope": "cell_value_payload_bytes"
+      }
+    },
+    {
+      "lifecycle_byte_work": {
+        "baseline_bytes": 331197,
+        "definition": "storage cell payload bytes + replication unique-object bytes + one query-delivery response",
+        "redundancy_aware_bytes": 132296,
+        "saved_bytes": 198901,
+        "savings_pct": 60.055
+      },
+      "query_delivery": {
+        "added": 8,
+        "full_response_bytes": 144345,
+        "patch_response_bytes": 6538,
+        "patch_saved_bytes": 137807,
+        "patch_savings_pct": 95.471,
+        "removed": 7,
+        "scope": "compact_json_response_bytes_without_http_compression",
+        "selected_delivery_bytes": 6538,
+        "selected_delivery_mode": "patch",
+        "updated": 15
+      },
+      "replication": {
+        "cas_transfer_bytes": 24226,
+        "hit_rate": 0.6,
+        "naive_object_bytes": 61560,
+        "receiver_present_objects": 522,
+        "saved_bytes": 37334,
+        "saved_bytes_ratio": 0.606465,
+        "scope": "unique_value_object_bytes_excluding_row_metadata_and_protocol_overhead",
+        "unique_objects": 870
+      },
+      "rows": 600,
+      "scenario": {
+        "change_rate": 0.05,
+        "name": "balanced",
+        "receiver_overlap": 0.6,
+        "repetition": 0.55
+      },
+      "storage": {
+        "adaptive_ref_bytes": 101532,
+        "distinct_values": 870,
+        "inline_bytes": 125292,
+        "ref_profitable_values": 270,
+        "saved_bytes": 23760,
+        "savings_pct": 18.964,
+        "scope": "cell_value_payload_bytes"
+      }
+    },
+    {
+      "lifecycle_byte_work": {
+        "baseline_bytes": 287386,
+        "definition": "storage cell payload bytes + replication unique-object bytes + one query-delivery response",
+        "redundancy_aware_bytes": 60411,
+        "saved_bytes": 226975,
+        "savings_pct": 78.979
+      },
+      "query_delivery": {
+        "added": 2,
+        "full_response_bytes": 144214,
+        "patch_response_bytes": 1513,
+        "patch_saved_bytes": 142701,
+        "patch_savings_pct": 98.951,
+        "removed": 1,
+        "scope": "compact_json_response_bytes_without_http_compression",
+        "selected_delivery_bytes": 1513,
+        "selected_delivery_mode": "patch",
+        "updated": 3
+      },
+      "replication": {
+        "cas_transfer_bytes": 1886,
+        "hit_rate": 0.85,
+        "naive_object_bytes": 17880,
+        "receiver_present_objects": 561,
+        "saved_bytes": 15994,
+        "saved_bytes_ratio": 0.894519,
+        "scope": "unique_value_object_bytes_excluding_row_metadata_and_protocol_overhead",
+        "unique_objects": 660
+      },
+      "rows": 600,
+      "scenario": {
+        "change_rate": 0.01,
+        "name": "high_redundancy_low_churn",
+        "receiver_overlap": 0.85,
+        "repetition": 0.9
+      },
+      "storage": {
+        "adaptive_ref_bytes": 57012,
+        "distinct_values": 660,
+        "inline_bytes": 125292,
+        "ref_profitable_values": 60,
+        "saved_bytes": 68280,
+        "savings_pct": 54.497,
+        "scope": "cell_value_payload_bytes"
+      }
+    }
+  ],
+  "rows": 600,
+  "seed": 20260922
+}
