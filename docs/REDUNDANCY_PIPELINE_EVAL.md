@@ -159,3 +159,24 @@ Across all three scenarios:
 The reproducible evidence lives in `eval/reports/cas_two_node_ci.json` and `eval/reports/cas_two_node_ci.md`. CI regenerates the Markdown report and diffs it against the snapshot.
 
 This closes the principal scope limitation of the earlier CAS calibration: the transfer path is now genuinely cross-process and remote. The byte denominator is still ValueStore entry bytes rather than a packet capture, so transport framing, TLS, compression, latency, and throughput remain deliberately unclaimed.
+
+### HTTP-over-TCP transfer validation
+
+`eval/two_node_http_wire_validation.py` removes the remaining application-layer byte-accounting gap. It inserts a transparent raw TCP proxy into the same two-node `objects.pull -> objects.fetch` path and compares each CAS-overlap scenario to a zero-overlap destination using the same source object set.
+
+The proxy counts exact TCP payload bytes in both directions. That includes HTTP framing, JSON-RPC envelopes, ValueID request bodies, both Base64 payload fields, and JSON metadata. It excludes lower-layer Ethernet/IP/TCP headers, packet-level retransmissions, and TLS.
+
+| Scenario | Baseline HTTP-over-TCP bytes | CAS HTTP-over-TCP bytes | HTTP savings | ValueStore-object savings | HTTP / object expansion |
+|---|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 143,359 | 107,381 | 25.1% | 25.1% | 2.54x |
+| balanced | 76,214 | 30,487 | 60.0% | 60.0% | 2.55x |
+| high redundancy / low churn | 16,887 | 2,611 | 84.5% | 86.7% | 2.95x at the tiny residual transfer |
+
+Two findings matter:
+
+1. **CAS savings survive protocol overhead.** At 25% and 60% overlap, measured HTTP savings differ from ValueStore-byte savings by only 0.002 percentage points.
+2. **The current fetch encoding has measurable amplification.** Larger transfers use about 2.54-2.55 HTTP-over-TCP bytes per ValueStore object byte. The response currently carries both `bytes_b64` and `entry_b64`; the replication importer uses `entry_b64`. For tiny residual transfers, fixed HTTP/RPC metadata increases the expansion to 2.95x and reduces the 86.7% object-byte saving to 84.5% on the HTTP stream.
+
+A second identical pull still opens zero proxy connections and transfers exactly zero HTTP bytes.
+
+The checked-in evidence lives in `eval/reports/cas_http_wire_ci.json` and `eval/reports/cas_http_wire_ci.md`. Both files are regenerated and diff-gated in CI.

@@ -178,6 +178,20 @@ A follow-up two-node runtime experiment now exercises the production `objects.pu
 
 The checked-in evidence is `eval/reports/cas_two_node_ci.{json,md}`, produced by `eval/two_node_cas_validation.py` and snapshot-diffed in CI. These are production ValueStore entry-byte counters, not packet-capture bytes; HTTP/TCP framing, TLS, compression, latency, and throughput remain outside the claim.
 
+A second experiment, `eval/two_node_http_wire_validation.py`, now measures the actual plain-HTTP transfer size seen on the TCP stream. A transparent proxy counts every TCP payload byte between destination and source, including HTTP request/status lines, headers, JSON-RPC envelopes, ValueID request data, Base64 payloads, and JSON metadata.
+
+| Scenario | 0%-overlap HTTP bytes | CAS-overlap HTTP bytes | HTTP bytes saved | ValueStore bytes saved |
+|---|---:|---:|---:|---:|
+| low redundancy / high churn | 143,359 | 107,381 | 25.1% | 25.1% |
+| balanced | 76,214 | 30,487 | 60.0% | 60.0% |
+| high redundancy / low churn | 16,887 | 2,611 | 84.5% | 86.7% |
+
+For the larger transfers, CAS object-byte savings survive almost exactly at the HTTP layer. At very high overlap the fixed request/header/RPC cost becomes visible: 86.7% object-byte savings become 84.5% HTTP-over-TCP savings.
+
+The current `objects.fetch` representation expands ValueStore object bytes to about **2.54-2.55x** total HTTP-over-TCP payload for the larger baseline transfers (about 39% ValueStore-byte efficiency). The response carries both `bytes_b64` and `entry_b64` plus JSON/RPC metadata; `objects.pull` consumes `entry_b64` for transfer verification/import. This measured amplification is now an explicit optimization target rather than an inferred cost.
+
+The checked-in evidence is `eval/reports/cas_http_wire_ci.{json,md}` and is byte-for-byte regenerated in CI. The measurement excludes Ethernet/IP/TCP packet headers, lower-layer retransmission accounting, and TLS because the CI experiment uses plain loopback HTTP.
+
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
 The runtime counters behind these metrics are exposed via the
@@ -216,4 +230,4 @@ replica sides see the local CAS cost model in real time.
 - CR01: ValueID existence Bloom summaries
 - CR02: object fetch protocol + batching (implemented via `objects.fetch` + `objects.pull`)
 - CR03: replication metrics (saved bytes, hit rate)
-- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)
+- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)\n- CR05: compact replication fetch representation: avoid redundant payload representation for `objects.pull` while preserving compatibility for general `objects.fetch` consumers; evaluate against the CI-gated HTTP-wire baseline

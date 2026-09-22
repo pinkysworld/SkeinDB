@@ -264,6 +264,29 @@ jobs:
       - name: Verify two-node CAS snapshot
         run: diff -u eval/reports/cas_two_node_ci.md target/redundancy-runtime/cas-two-node.md
 
+      - name: Run HTTP wire validation unit tests
+        env:
+          PYTHONPATH: eval
+        run: |
+          python -m unittest \
+            eval.test_two_node_http_wire_validation
+
+      - name: Run two-node CAS HTTP wire validation
+        run: |
+          python eval/two_node_http_wire_validation.py \
+            --skeindb-bin target/debug/skeindb \
+            --rows 300 \
+            --seed 20260922 \
+            --batch-size 32 \
+            --json-out target/redundancy-runtime/cas-http-wire.json \
+            --markdown-out target/redundancy-runtime/cas-http-wire.md \
+            --log-dir target/redundancy-runtime/cas-http-wire-logs
+
+      - name: Verify CAS HTTP wire snapshots
+        run: |
+          diff -u eval/reports/cas_http_wire_ci.md target/redundancy-runtime/cas-http-wire.md
+          diff -u eval/reports/cas_http_wire_ci.json target/redundancy-runtime/cas-http-wire.json
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
