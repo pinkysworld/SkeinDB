@@ -46,6 +46,8 @@ CR07 then sweeps batch sizes 16/32/64/128/256 on that same live wire path. The e
 
 CR08 decomposes the remaining wire bytes. About **54.6-54.9%** are Base64 transfer-entry JSON, about **16%** are request ValueIDs, and another **16%** are repeated response ValueIDs; HTTP headers are only about 2%. This evidence makes a backward-compatible **binary replication fetch** the next transport target. See the [wire-composition evidence](eval/reports/wire_composition_ci.md).
 
+CR09 implements that binary response while keeping a JSON request and automatic legacy fallback. At batch 32, zero-overlap wire bytes fall **56,564 -> 34,361 B**, **30,280 -> 18,426 B**, and **6,677 -> 4,059 B** versus the preserved pre-CR09 path, about **39% lower**. At the validated batch size 64, the low-redundancy CAS transfer is **24,806 B** and the balanced transfer **7,061 B**. The remaining wire is now dominated by canonical transfer-entry bytes (~66%) and request-side hexadecimal ValueIDs (~27%), making raw 16-byte request IDs the next measured transport target. See the [post-CR09 wire report](eval/reports/cas_http_wire_ci.md), [pre-CR09 baseline](eval/reports/cas_http_wire_pre_cr09.md), and [composition report](eval/reports/wire_composition_ci.md).
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity

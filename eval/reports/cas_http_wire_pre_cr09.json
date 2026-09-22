@@ -26,14 +26,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 25739,
-          "materialized_value_bytes_per_wire_byte": 1.639963,
-          "request_bytes": 7537,
-          "response_bytes": 18202,
-          "response_vs_materialized_value_ratio": 0.431215,
-          "total_wire_vs_materialized_value_ratio": 0.60977,
-          "value_store_object_bytes": 42211,
-          "wire_minus_materialized_value_bytes": -16472
+          "http_overhead_bytes_vs_value_store": 159,
+          "http_tcp_payload_bytes": 42370,
+          "request_bytes": 8053,
+          "response_bytes": 34317,
+          "response_expansion_ratio": 0.812987,
+          "total_wire_expansion_ratio": 1.003767,
+          "value_store_efficiency_pct": 99.625,
+          "value_store_object_bytes": 42211
         }
       },
       "configured_receiver_overlap": 0.25,
@@ -58,11 +58,11 @@
       },
       "rows": 300,
       "savings": {
-        "http_tcp_payload_bytes_saved": 8622,
-        "http_tcp_payload_savings_pct": 25.092,
+        "http_tcp_payload_bytes_saved": 14194,
+        "http_tcp_payload_savings_pct": 25.094,
         "value_store_object_bytes_saved": 14144,
         "value_store_object_savings_pct": 25.098,
-        "wire_savings_minus_object_savings_points": -0.006
+        "wire_savings_minus_object_savings_points": -0.004
       },
       "scenario": "low_redundancy_high_churn",
       "second_pull": {
@@ -87,14 +87,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 34361,
-          "materialized_value_bytes_per_wire_byte": 1.640086,
-          "request_bytes": 10061,
-          "response_bytes": 24300,
-          "response_vs_materialized_value_ratio": 0.431195,
-          "total_wire_vs_materialized_value_ratio": 0.609724,
-          "value_store_object_bytes": 56355,
-          "wire_minus_materialized_value_bytes": -21994
+          "http_overhead_bytes_vs_value_store": 209,
+          "http_tcp_payload_bytes": 56564,
+          "request_bytes": 10749,
+          "response_bytes": 45815,
+          "response_expansion_ratio": 0.812971,
+          "total_wire_expansion_ratio": 1.003709,
+          "value_store_efficiency_pct": 99.631,
+          "value_store_object_bytes": 56355
         }
       }
     },
@@ -115,14 +115,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 7371,
-          "materialized_value_bytes_per_wire_byte": 1.619048,
-          "request_bytes": 2173,
-          "response_bytes": 5198,
-          "response_vs_materialized_value_ratio": 0.435562,
-          "total_wire_vs_materialized_value_ratio": 0.617647,
-          "value_store_object_bytes": 11934,
-          "wire_minus_materialized_value_bytes": -4563
+          "http_overhead_bytes_vs_value_store": 179,
+          "http_tcp_payload_bytes": 12113,
+          "request_bytes": 2345,
+          "response_bytes": 9768,
+          "response_expansion_ratio": 0.818502,
+          "total_wire_expansion_ratio": 1.014999,
+          "value_store_efficiency_pct": 98.522,
+          "value_store_object_bytes": 11934
         }
       },
       "configured_receiver_overlap": 0.6,
@@ -147,7 +147,7 @@
       },
       "rows": 300,
       "savings": {
-        "http_tcp_payload_bytes_saved": 11055,
+        "http_tcp_payload_bytes_saved": 18167,
         "http_tcp_payload_savings_pct": 59.997,
         "value_store_object_bytes_saved": 17901,
         "value_store_object_savings_pct": 60.0,
@@ -176,14 +176,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 18426,
-          "materialized_value_bytes_per_wire_byte": 1.619179,
-          "request_bytes": 5434,
-          "response_bytes": 12992,
-          "response_vs_materialized_value_ratio": 0.435462,
-          "total_wire_vs_materialized_value_ratio": 0.617597,
-          "value_store_object_bytes": 29835,
-          "wire_minus_materialized_value_bytes": -11409
+          "http_overhead_bytes_vs_value_store": 445,
+          "http_tcp_payload_bytes": 30280,
+          "request_bytes": 5864,
+          "response_bytes": 24416,
+          "response_expansion_ratio": 0.818368,
+          "total_wire_expansion_ratio": 1.014915,
+          "value_store_efficiency_pct": 98.53,
+          "value_store_object_bytes": 29835
         }
       }
     },
@@ -204,14 +204,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 807,
-          "materialized_value_bytes_per_wire_byte": 1.095415,
-          "request_bytes": 281,
-          "response_bytes": 526,
-          "response_vs_materialized_value_ratio": 0.595023,
-          "total_wire_vs_materialized_value_ratio": 0.912896,
-          "value_store_object_bytes": 884,
-          "wire_minus_materialized_value_bytes": -77
+          "http_overhead_bytes_vs_value_store": 383,
+          "http_tcp_payload_bytes": 1267,
+          "request_bytes": 367,
+          "response_bytes": 900,
+          "response_expansion_ratio": 1.0181,
+          "total_wire_expansion_ratio": 1.433258,
+          "value_store_efficiency_pct": 69.771,
+          "value_store_object_bytes": 884
         }
       },
       "configured_receiver_overlap": 0.85,
@@ -236,11 +236,11 @@
       },
       "rows": 300,
       "savings": {
-        "http_tcp_payload_bytes_saved": 3252,
-        "http_tcp_payload_savings_pct": 80.118,
+        "http_tcp_payload_bytes_saved": 5410,
+        "http_tcp_payload_savings_pct": 81.024,
         "value_store_object_bytes_saved": 5746,
         "value_store_object_savings_pct": 86.667,
-        "wire_savings_minus_object_savings_points": -6.549
+        "wire_savings_minus_object_savings_points": -5.643
       },
       "scenario": "high_redundancy_low_churn",
       "second_pull": {
@@ -265,14 +265,14 @@
         },
         "wire": {
           "connections": 1,
-          "http_tcp_payload_bytes": 4059,
-          "materialized_value_bytes_per_wire_byte": 1.633407,
-          "request_bytes": 1192,
-          "response_bytes": 2867,
-          "response_vs_materialized_value_ratio": 0.432428,
-          "total_wire_vs_materialized_value_ratio": 0.612217,
-          "value_store_object_bytes": 6630,
-          "wire_minus_materialized_value_bytes": -2571
+          "http_overhead_bytes_vs_value_store": 47,
+          "http_tcp_payload_bytes": 6677,
+          "request_bytes": 1278,
+          "response_bytes": 5399,
+          "response_expansion_ratio": 0.814329,
+          "total_wire_expansion_ratio": 1.007089,
+          "value_store_efficiency_pct": 99.296,
+          "value_store_object_bytes": 6630
         }
       }
     }

@@ -281,6 +281,44 @@ CR08 therefore selects a **binary replication fetch path** as the next protocol 
 
 Evidence: `eval/reports/wire_composition_ci.{json,md}`, regenerated and diff-gated in CI. CR08 is explanatory byte accounting only and makes no latency or throughput claim.
 
+### 7.6) CR09 binary replication response
+
+CR09 implements the transport direction selected by CR08. New sources expose `POST /api/v1/objects/fetch-bin`: the request remains JSON for a narrow compatibility surface, while the response carries canonical `encode_transfer_entry` bytes directly.
+
+Binary response v1:
+
+```text
+magic      4 bytes  "SKOF"
+version    1 byte   1
+count      u32 LE
+repeat count times:
+  length   u32 LE
+  payload  canonical transfer-entry bytes
+```
+
+The transfer entry already embeds its ValueID, so the response does not repeat hexadecimal IDs. `objects.pull` prefers the binary endpoint and falls back to the CR05 JSON-RPC `objects.fetch transfer_only` path on HTTP 404/405, preserving compatibility with older sources. The binary endpoint applies the same bearer/RBAC authorization policy as `objects.fetch`.
+
+Against the preserved CR06/CR07 pre-CR09 HTTP snapshot at batch 32:
+
+| Scenario | Pre-CR09 zero-overlap | CR09 zero-overlap | Reduction | Pre-CR09 CAS | CR09 CAS |
+|---|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 56,564 B | 34,361 B | 39.3% | 42,370 B | 25,739 B |
+| balanced | 30,280 B | 18,426 B | 39.1% | 12,113 B | 7,371 B |
+| high redundancy / low churn | 6,677 B | 4,059 B | 39.2% | 1,267 B | 807 B |
+
+At the validated batch size 64, CR09 wire composition is:
+
+| Scenario | Wire total | Request IDs | Request envelope + HTTP | Binary entries | Binary framing | Response HTTP |
+|---|---:|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 24,806 B | 6,688 B (27.0%) | 423 B | 16,424 B (66.2%) | 791 B | 480 B |
+| balanced | 7,061 B | 1,891 B (26.8%) | 141 B | 4,644 B (65.8%) | 225 B | 160 B |
+
+The canonical transfer-entry representation is compact enough that total wire can be smaller than the runtime materialized-value byte counter for delta-heavy data. That is a representation effect, not negative protocol overhead.
+
+CR09 therefore removes Base64 and repeated response-ID JSON as dominant costs. The next measured transport target is request-side ID encoding: hexadecimal JSON ValueIDs are now about **27%** of the remaining wire bytes.
+
+Evidence: `eval/reports/cas_http_wire_pre_cr09.{json,md}`, `eval/reports/cas_http_wire_ci.{json,md}`, `eval/reports/wire_composition_pre_cr09.{json,md}`, and `eval/reports/wire_composition_ci.{json,md}`. CI regenerates the post-CR09 snapshots byte-for-byte.
+
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
 The runtime counters behind these metrics are exposed via the

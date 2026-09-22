@@ -166,6 +166,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RpcResponse"
+  /api/v1/objects/fetch-bin:
+    post:
+      summary: Binary ValueStore transfer endpoint for replication pulls
+      description: |
+        Internal/experimental CR09 transport used by objects.pull. The request
+        remains JSON with an ids array of 32-character hexadecimal ValueIDs.
+        A successful response uses application/vnd.skeindb.objects-v1 and an
+        SKOF v1 binary body carrying canonical transfer-entry bytes. New
+        destinations fall back to the legacy objects.fetch RPC when this path
+        is unavailable on an older source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                    pattern: "^[0-9a-fA-F]{32}$"
+      responses:
+        "200":
+          description: SKOF v1 binary transfer-entry batch
+          content:
+            application/vnd.skeindb.objects-v1:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Missing or invalid bearer credential
+        "403":
+          description: Credential lacks permission
   /api/v1/q/{query_id}:
     get:
       summary: Execute a prepared query by id (optional)

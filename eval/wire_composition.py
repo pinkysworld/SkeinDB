@@ -16,12 +16,12 @@ request side
 response side
 - HTTP headers / status line
 - HTTP transfer framing
-- JSON representation of returned object IDs
-- JSON representation of entry_b64 transfer payloads
-- remaining JSON-RPC response envelope
+- CR09 binary envelope framing
+- canonical transfer-entry bytes
 
-It also decodes entry_b64 to report the canonical transfer-entry bytes and
-compares those to SkeinDB's source-side ValueStore obj_bytes counter.
+For backward compatibility, the parser also understands the pre-CR09
+JSON/entry_b64 response. It compares decoded/canonical transfer bytes to
+SkeinDB's source-side ValueStore obj_bytes counter.
 
 This is an explanatory byte-accounting experiment, not a latency/throughput test.
 """
@@ -299,6 +299,35 @@ def parse_http_stream(stream: bytes) -> list[HttpMessage]:
     return messages
 
 
+BINARY_FETCH_MAGIC = b"SKOF"
+BINARY_FETCH_VERSION = 1
+
+
+def parse_binary_fetch_body(body: bytes) -> tuple[list[bytes], int]:
+    if len(body) < 9 or body[:4] != BINARY_FETCH_MAGIC:
+        raise ValueError("invalid binary fetch header")
+    if body[4] != BINARY_FETCH_VERSION:
+        raise ValueError(f"unsupported binary fetch version {body[4]}")
+    count = int.from_bytes(body[5:9], "little")
+    offset = 9
+    payloads: list[bytes] = []
+    framing = 9
+    for _ in range(count):
+        if offset + 4 > len(body):
+            raise ValueError("truncated binary entry length")
+        size = int.from_bytes(body[offset : offset + 4], "little")
+        offset += 4
+        framing += 4
+        end = offset + size
+        if end > len(body):
+            raise ValueError("truncated binary entry payload")
+        payloads.append(body[offset:end])
+        offset = end
+    if offset != len(body):
+        raise ValueError("binary fetch body has trailing bytes")
+    return payloads, framing
+
+
 def source_fetch_delta(
     before: dict[str, Any], after: dict[str, Any]
 ) -> dict[str, int]:
@@ -329,7 +358,9 @@ def decompose(
 
     for message in request_messages:
         payload = json.loads(message.body)
-        ids = payload["params"]["ids"]
+        ids = payload.get("ids")
+        if ids is None:
+            ids = payload["params"]["ids"]
         requested_ids += len(ids)
         request_ids_json += len(compact_json(ids))
 
@@ -342,11 +373,24 @@ def decompose(
     response_body = sum(len(m.body) for m in response_messages)
     response_ids_json = 0
     response_entry_b64_json = 0
+    response_binary_framing = 0
+    response_binary_transfer = 0
     entry_b64_chars = 0
     decoded_transfer_entry_bytes = 0
     response_objects = 0
+    response_modes: set[str] = set()
 
     for message in response_messages:
+        if message.body.startswith(BINARY_FETCH_MAGIC):
+            response_modes.add("binary_v1")
+            entries, framing = parse_binary_fetch_body(message.body)
+            response_binary_framing += framing
+            response_binary_transfer += sum(len(entry) for entry in entries)
+            decoded_transfer_entry_bytes += sum(len(entry) for entry in entries)
+            response_objects += len(entries)
+            continue
+
+        response_modes.add("json_rpc")
         payload = json.loads(message.body)
         objects = payload["result"]["objects"]
         response_objects += len(objects)
@@ -359,10 +403,14 @@ def decompose(
             decoded_transfer_entry_bytes += len(base64.b64decode(entry_b64))
 
     response_json_other = (
-        response_body - response_ids_json - response_entry_b64_json
+        response_body
+        - response_ids_json
+        - response_entry_b64_json
+        - response_binary_framing
+        - response_binary_transfer
     )
     if response_json_other < 0:
-        raise RuntimeError("negative response JSON remainder")
+        raise RuntimeError("negative response remainder")
 
     wire_total = sum(m.total_wire_bytes for m in request_messages) + sum(
         m.total_wire_bytes for m in response_messages
@@ -376,6 +424,8 @@ def decompose(
         + response_transfer
         + response_ids_json
         + response_entry_b64_json
+        + response_binary_framing
+        + response_binary_transfer
         + response_json_other
     )
     if wire_total != categorized_total:
@@ -400,26 +450,32 @@ def decompose(
             + request_json_other,
         },
         "response": {
+            "modes": sorted(response_modes),
             "http_headers_bytes": response_headers,
             "transfer_framing_bytes": response_transfer,
             "object_ids_json_bytes": response_ids_json,
             "entry_b64_json_bytes": response_entry_b64_json,
+            "binary_protocol_framing_bytes": response_binary_framing,
+            "binary_transfer_entry_bytes": response_binary_transfer,
             "json_rpc_other_bytes": response_json_other,
             "total_bytes": response_headers
             + response_transfer
             + response_ids_json
             + response_entry_b64_json
+            + response_binary_framing
+            + response_binary_transfer
             + response_json_other,
         },
         "derived": {
             "entry_b64_character_bytes": entry_b64_chars,
             "decoded_transfer_entry_bytes": decoded_transfer_entry_bytes,
             "value_store_object_bytes": obj_bytes,
-            "base64_text_expansion_bytes": entry_b64_chars
-            - decoded_transfer_entry_bytes,
+            "base64_text_expansion_bytes": max(
+                0, entry_b64_chars - decoded_transfer_entry_bytes
+            ),
             "base64_text_expansion_ratio": (
                 round(entry_b64_chars / decoded_transfer_entry_bytes, 6)
-                if decoded_transfer_entry_bytes
+                if entry_b64_chars and decoded_transfer_entry_bytes
                 else 0.0
             ),
             "decoded_transfer_vs_value_store_ratio": (
@@ -632,6 +688,12 @@ def add_percentages(result: dict[str, Any]) -> None:
         "response_http_headers": breakdown["response"]["http_headers_bytes"],
         "response_object_ids_json": breakdown["response"]["object_ids_json_bytes"],
         "response_entry_b64_json": breakdown["response"]["entry_b64_json_bytes"],
+        "response_binary_protocol_framing": breakdown["response"][
+            "binary_protocol_framing_bytes"
+        ],
+        "response_binary_transfer_entries": breakdown["response"][
+            "binary_transfer_entry_bytes"
+        ],
         "response_json_rpc_other": breakdown["response"]["json_rpc_other_bytes"],
         "response_transfer_framing": breakdown["response"][
             "transfer_framing_bytes"
@@ -652,9 +714,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Batch size: **{report['batch_size']}**  ",
         f"Seed: **{report['seed']}**",
         "",
-        "The table decomposes the exact HTTP-over-TCP payload bytes used by the compact CR05 + persistent CR06 pull path.",
+        "The table decomposes the exact HTTP-over-TCP payload bytes used by the CR09 binary-response pull path. The request remains JSON; the response carries canonical transfer entries directly.",
         "",
-        "| Scenario | Wire bytes | Request IDs | Request envelope+HTTP | entry_b64 JSON | Response IDs | Response envelope+HTTP | Decoded transfer bytes | ValueStore object bytes |",
+        "| Scenario | Wire bytes | Request IDs | Request envelope+HTTP | Binary transfer entries | Binary framing | Response envelope+HTTP | Decoded transfer bytes | ValueStore object bytes |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in report["results"]:
@@ -671,18 +733,18 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
         lines.append(
             "| {scenario} | {wire} | {req_ids} ({req_pct:.1f}%) | {req_fixed} | "
-            "{entry} ({entry_pct:.1f}%) | {resp_ids} | {resp_fixed} | {decoded} | {obj} |".format(
+            "{entry} ({entry_pct:.1f}%) | {binary_framing} | {resp_fixed} | {decoded} | {obj} |".format(
                 scenario=result["scenario"],
                 wire=b["wire_total_bytes"],
                 req_ids=b["request"]["ids_json_bytes"],
                 req_pct=pct(b["request"]["ids_json_bytes"], b["wire_total_bytes"]),
                 req_fixed=request_fixed,
-                entry=b["response"]["entry_b64_json_bytes"],
+                entry=b["response"]["binary_transfer_entry_bytes"],
                 entry_pct=pct(
-                    b["response"]["entry_b64_json_bytes"],
+                    b["response"]["binary_transfer_entry_bytes"],
                     b["wire_total_bytes"],
                 ),
-                resp_ids=b["response"]["object_ids_json_bytes"],
+                binary_framing=b["response"]["binary_protocol_framing_bytes"],
                 resp_fixed=response_fixed,
                 decoded=b["derived"]["decoded_transfer_entry_bytes"],
                 obj=b["derived"]["value_store_object_bytes"],
@@ -694,16 +756,16 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Derived ratios",
             "",
-            "| Scenario | Base64 text / decoded transfer | Decoded transfer / ValueStore object | Total wire / ValueStore object |",
-            "|---|---:|---:|---:|",
+            "| Scenario | Response mode | Decoded transfer / ValueStore object | Total wire / ValueStore object |",
+            "|---|---|---:|---:|",
         ]
     )
     for result in report["results"]:
         d = result["breakdown"]["derived"]
         lines.append(
-            "| {scenario} | {b64:.3f}x | {transfer:.3f}x | {wire:.3f}x |".format(
+            "| {scenario} | {mode} | {transfer:.3f}x | {wire:.3f}x |".format(
                 scenario=result["scenario"],
-                b64=d["base64_text_expansion_ratio"],
+                mode=",".join(result["breakdown"]["response"]["modes"]),
                 transfer=d["decoded_transfer_vs_value_store_ratio"],
                 wire=d["wire_vs_value_store_ratio"],
             )
@@ -712,7 +774,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Every wire category is derived from captured HTTP bytes and the categories close exactly to the proxy total. Base64-decoded transfer-entry bytes and ValueStore object bytes are derived metrics and are not added to the wire total.",
+            "Every wire category is derived from captured HTTP bytes and the categories close exactly to the proxy total. Canonical transfer-entry bytes and ValueStore object bytes are derived metrics and are not double-counted.",
             "",
             "The experiment is explanatory byte accounting only; it makes no latency or throughput claim.",
             "",

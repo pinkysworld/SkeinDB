@@ -269,14 +269,16 @@ def transfer_metrics(
         "request_bytes": wire["client_to_source_bytes"],
         "response_bytes": downstream,
         "connections": wire["connections"],
-        "http_overhead_bytes_vs_value_store": total - obj_bytes,
-        "total_wire_expansion_ratio": round(total / obj_bytes, 6)
+        "wire_minus_materialized_value_bytes": total - obj_bytes,
+        "total_wire_vs_materialized_value_ratio": round(total / obj_bytes, 6)
         if obj_bytes
         else 0.0,
-        "response_expansion_ratio": round(downstream / obj_bytes, 6)
+        "response_vs_materialized_value_ratio": round(downstream / obj_bytes, 6)
         if obj_bytes
         else 0.0,
-        "value_store_efficiency_pct": cas.pct(obj_bytes, total),
+        "materialized_value_bytes_per_wire_byte": round(obj_bytes / total, 6)
+        if total
+        else 0.0,
     }
 
 
@@ -672,9 +674,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Seed: **{report['seed']}**  ",
         f"Pull batch size: **{report['batch_size']}**",
         "",
-        "A transparent TCP proxy counts the exact TCP payload bytes used by the production HTTP objects.pull -> objects.fetch path. Each scenario compares a zero-overlap destination with a destination pre-seeded at the configured CAS overlap.",
+        "A transparent TCP proxy counts the exact TCP payload bytes used by the production objects.pull path. CR09 keeps the request JSON-compatible but prefers a binary fetch response, with automatic fallback to the legacy JSON-RPC objects.fetch path. Each scenario compares a zero-overlap destination with a destination pre-seeded at the configured CAS overlap.",
         "",
-        "| Scenario | Baseline HTTP bytes | CAS HTTP bytes | HTTP bytes saved | Object bytes saved | Baseline connections | CAS connections | Baseline wire / object | CAS wire / object | Second-pull HTTP bytes |",
+        "| Scenario | Baseline HTTP bytes | CAS HTTP bytes | HTTP bytes saved | Object bytes saved | Baseline connections | CAS connections | Baseline wire / materialized value | CAS wire / materialized value | Second-pull HTTP bytes |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in report["results"]:
@@ -689,8 +691,8 @@ def render_markdown(report: dict[str, Any]) -> str:
                 obj_saved=result["savings"]["value_store_object_savings_pct"],
                 base_conn=baseline["connections"],
                 cas_conn=overlap["connections"],
-                base_exp=baseline["total_wire_expansion_ratio"],
-                cas_exp=overlap["total_wire_expansion_ratio"],
+                base_exp=baseline["total_wire_vs_materialized_value_ratio"],
+                cas_exp=overlap["total_wire_vs_materialized_value_ratio"],
                 second=result["second_pull"]["http_tcp_payload_bytes"],
             )
         )
@@ -700,12 +702,11 @@ def render_markdown(report: dict[str, Any]) -> str:
             "## What the byte counter includes",
             "",
             "- HTTP request line and request headers",
-            "- JSON-RPC request bodies containing ValueIDs",
+            "- JSON request bodies containing hexadecimal ValueIDs",
             "- HTTP status line and response headers",
-            "- JSON-RPC response envelopes",
-            "- Base64-encoded `entry_b64` transfer payloads used by `objects.pull`",
-            "- all other JSON syntax and metadata carried over the loopback TCP stream",
-            "- the legacy `bytes_b64` field is compatibility-tested separately and is not present in the measured CR05 pull traffic",
+            "- CR09 binary response framing and canonical transfer-entry bytes",
+            "- all request JSON syntax and metadata carried over the loopback TCP stream",
+            "- the legacy JSON-RPC `objects.fetch` response remains compatibility-tested separately and is used as an automatic fallback for older nodes",
             "",
             "## What it excludes",
             "",
@@ -714,7 +715,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "- TLS framing, because the CI experiment uses plain loopback HTTP",
             "- latency and throughput claims",
             "",
-            "The report therefore measures exact **HTTP-over-TCP payload bytes** seen by the transparent proxy, not packet-capture bytes on a physical network.",
+            "The report therefore measures exact **HTTP-over-TCP payload bytes** seen by the transparent proxy, not packet-capture bytes on a physical network. `ValueStore object bytes` are materialized-value bytes from runtime counters; canonical delta transfer entries can legitimately be smaller, so wire/materialized-value ratios below 1 are expected and are not negative protocol overhead.",
             "",
         ]
     )

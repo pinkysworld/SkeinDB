@@ -28,9 +28,9 @@ class WireCountersTests(unittest.TestCase):
             "total_http_tcp_payload_bytes": 2000,
         }
         measured = wire.transfer_metrics(fetch, raw)
-        self.assertEqual(measured["http_overhead_bytes_vs_value_store"], 1000)
-        self.assertEqual(measured["total_wire_expansion_ratio"], 2.0)
-        self.assertEqual(measured["value_store_efficiency_pct"], 50.0)
+        self.assertEqual(measured["wire_minus_materialized_value_bytes"], 1000)
+        self.assertEqual(measured["total_wire_vs_materialized_value_ratio"], 2.0)
+        self.assertEqual(measured["materialized_value_bytes_per_wire_byte"], 0.5)
 
     def test_source_fetch_delta(self):
         before = {
