@@ -40,6 +40,8 @@ CAS transfer is also validated **across two independent live SkeinDB processes**
 
 The same path is measured at the **HTTP-over-TCP byte level** through a transparent proxy. CR05 now makes replication pulls request a compact, backward-compatible `transfer_only` fetch representation. Against the preserved pre-CR05 snapshot, zero-overlap HTTP transfer drops by about **60%**, and large-transfer wire/object amplification falls from ~**2.55x** to ~**1.00-1.01x**, while a repeated fully synchronized pull still transfers **0 bytes**. See [post-CR05 evidence](eval/reports/cas_http_wire_ci.md) and the [preserved pre-CR05 baseline](eval/reports/cas_http_wire_pre_cr05.md).
 
+CR06 also reuses a single HTTP client across all batches in one pull. The same wire harness now verifies **one TCP connection per non-empty pull** instead of one connection per batch: 8->1 and 6->1 in the largest standard scenario, and 5->1 / 2->1 in the balanced case. The application-byte totals are intentionally unchanged. The [pre-CR06 snapshot](eval/reports/cas_http_wire_pre_cr06.md) is retained for comparison.
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity
