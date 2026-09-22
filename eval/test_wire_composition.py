@@ -39,6 +39,23 @@ class HttpParserTests(unittest.TestCase):
     def test_compact_json_is_stable(self):
         self.assertEqual(wc.compact_json(["a", "b"]), b'["a","b"]')
 
+    def test_binary_fetch_body_parser(self):
+        payloads = [b"abc", b"defgh"]
+        body = bytearray(b"SKOF")
+        body.append(1)
+        body.extend((2).to_bytes(4, "little"))
+        for payload in payloads:
+            body.extend(len(payload).to_bytes(4, "little"))
+            body.extend(payload)
+        parsed, framing = wc.parse_binary_fetch_body(bytes(body))
+        self.assertEqual(parsed, payloads)
+        self.assertEqual(framing, 9 + 4 * len(payloads))
+
+    def test_binary_fetch_body_rejects_trailing_bytes(self):
+        body = b"SKOF" + bytes([1]) + (0).to_bytes(4, "little") + b"x"
+        with self.assertRaises(ValueError):
+            wc.parse_binary_fetch_body(body)
+
 
 if __name__ == "__main__":
     unittest.main()
