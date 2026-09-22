@@ -519,7 +519,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "## Interpretation",
             "",
             "- **CAS calibration is close.** Runtime CAS savings differ from the analytical model by "
-            + ", ".join(f"{value:+.1f}" for value in cas_deltas)
+            + f"{cas_deltas[0]:+.1f}, {cas_deltas[1]:+.1f}, and {cas_deltas[2]:+.1f}"
             + " percentage points across the three scenarios.",
             "- **QueryPatch has fixed protocol overhead that matters at higher churn.** The analytical model counts compact patch payloads, while the runtime measurement includes the full RPC envelope, typed literals, columns, dependencies, causality, and patch metadata. The gap shrinks from "
             + f"{query_deltas[0]:.1f} points at high churn to {query_deltas[-1]:.1f} points at low churn.",
