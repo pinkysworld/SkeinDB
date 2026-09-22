@@ -192,6 +192,34 @@ The current `objects.fetch` representation expands ValueStore object bytes to ab
 
 The checked-in evidence is `eval/reports/cas_http_wire_ci.{json,md}` and is byte-for-byte regenerated in CI. The measurement excludes Ethernet/IP/TCP packet headers, lower-layer retransmission accounting, and TLS because the CI experiment uses plain loopback HTTP.
 
+### 7.2) CR05 compact transfer-only fetch
+
+CR05 keeps the public legacy `objects.fetch` response compatible while adding an optional compact request flag:
+
+```json
+{
+  "method": "objects.fetch",
+  "params": {
+    "ids": ["<value-id>"],
+    "transfer_only": true
+  }
+}
+```
+
+Legacy mode still returns `id`, `bytes_b64`, `entry_b64`, `kind`, and `verified`. Compact mode returns only `id` and the canonical `entry_b64`. The live harness verifies that `entry_b64` is byte-for-byte identical between the two modes. `objects.pull` now requests compact mode automatically. Older source nodes remain compatible because the pre-CR05 parameter parser ignores unknown request fields and returns the legacy superset, which the pull decoder still accepts.
+
+The preserved pre-CR05 snapshot is `eval/reports/cas_http_wire_pre_cr05.{json,md}`. With the same workload and batch size, CR05 changes the measured wire path as follows:
+
+| Scenario | Pre-CR05 baseline HTTP bytes | CR05 baseline HTTP bytes | Transfer reduction | Pre-CR05 wire/object | CR05 wire/object |
+|---|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 143,359 | 56,564 | 60.5% | 2.54x | 1.00x |
+| balanced | 76,214 | 30,280 | 60.3% | 2.55x | 1.01x |
+| high redundancy / low churn | 16,887 | 6,677 | 60.5% | 2.55x | 1.01x |
+
+For the CAS-overlap transfers themselves, low and balanced scenarios fall from 107,381 -> 42,370 bytes and 30,487 -> 12,113 bytes respectively, also about 60% lower. The tiny four-object residual transfer falls from 2,611 -> 1,267 bytes; fixed request/header costs dominate there.
+
+For the larger transfers, ValueStore-byte efficiency rises from roughly **39% pre-CR05 to 98.5-99.6% post-CR05**. The optimization changes representation only; object verification, recursive delta-base fetching, post-transfer completeness, and idempotent second pulls remain unchanged.
+
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
 The runtime counters behind these metrics are exposed via the
@@ -230,4 +258,4 @@ replica sides see the local CAS cost model in real time.
 - CR01: ValueID existence Bloom summaries
 - CR02: object fetch protocol + batching (implemented via `objects.fetch` + `objects.pull`)
 - CR03: replication metrics (saved bytes, hit rate)
-- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)\n- CR05: compact replication fetch representation: avoid redundant payload representation for `objects.pull` while preserving compatibility for general `objects.fetch` consumers; evaluate against the CI-gated HTTP-wire baseline
+- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)\n- CR05: compact replication fetch representation (implemented): `objects.pull` requests `transfer_only: true`; legacy direct `objects.fetch` remains unchanged by default; CI preserves pre-CR05 and post-CR05 HTTP-wire snapshots.
