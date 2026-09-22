@@ -36,6 +36,8 @@ A deterministic cross-layer evaluation now exercises this thesis on one workload
 
 That model is now paired with a **live-engine validation** that reads runtime storage counters, exercises real ValueStore object-transfer counters, and measures actual RPC response bytes. The current runtime snapshot is in [eval/reports/redundancy_runtime_ci.md](eval/reports/redundancy_runtime_ci.md).
 
+CAS transfer is also validated **across two independent live SkeinDB processes**: the destination is pre-seeded with a controlled subset of real ValueIDs, then pulls the missing objects from the source through the production `objects.pull -> objects.fetch` HTTP path. The checked-in two-node evidence is [eval/reports/cas_two_node_ci.md](eval/reports/cas_two_node_ci.md), including an idempotence check that a second pull performs zero remote fetches.
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity

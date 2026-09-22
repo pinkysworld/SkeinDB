@@ -242,6 +242,28 @@ jobs:
       - name: Verify live redundancy snapshot
         run: diff -u eval/reports/redundancy_runtime_ci.md target/redundancy-runtime/report.md
 
+      - name: Run two-node CAS validation unit tests
+        env:
+          PYTHONPATH: eval
+        run: |
+          python -m unittest \
+            eval.test_runtime_redundancy_validation \
+            eval.test_two_node_cas_validation
+
+      - name: Run two-node CAS transfer validation
+        run: |
+          python eval/two_node_cas_validation.py \
+            --skeindb-bin target/debug/skeindb \
+            --rows 300 \
+            --seed 20260922 \
+            --batch-size 32 \
+            --json-out target/redundancy-runtime/cas-two-node.json \
+            --markdown-out target/redundancy-runtime/cas-two-node.md \
+            --log-dir target/redundancy-runtime/cas-two-node-logs
+
+      - name: Verify two-node CAS snapshot
+        run: diff -u eval/reports/cas_two_node_ci.md target/redundancy-runtime/cas-two-node.md
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7

@@ -136,3 +136,26 @@ The QueryPatch model is optimistic when churn is high. The analytical patch mode
 The storage figures intentionally use different denominators. The analytical model estimates adaptive cell-reference encoding overhead, while the runtime counter reports logical ValueStore bytes versus unique ValueStore bytes. Runtime storage savings therefore validate the broader "repeated values collapse to unique content" behavior, but are not a direct validation of the on-disk reference-encoding model.
 
 CI regenerates the live Markdown report and diffs it against the checked-in snapshot. A change to these runtime byte-saving results must therefore be reviewed explicitly.
+
+### Two-node CAS transfer validation
+
+The single-node CAS calibration is now complemented by `eval/two_node_cas_validation.py`, which starts two independent SkeinDB processes and drives the real remote `objects.pull -> objects.fetch` path.
+
+The destination is populated with exact typed literals corresponding to a deterministic fraction of the source's ValueIDs. It then requests the complete source object set. The experiment uses production `cluster.replication_stats.ref_bytes` on the destination for bytes already present and the source's `obj_bytes` delta for bytes actually served during the remote pull.
+
+| Scenario | Source ValueIDs | Pre-seeded | Remote fetched/stored | Saved object bytes | Remote fetches on identical second pull |
+|---|---:|---:|---:|---:|---:|
+| low redundancy / high churn | 255 | 64 | 191 / 191 | 25.1% | 0 |
+| balanced | 135 | 81 | 54 / 54 | 60.0% | 0 |
+| high redundancy / low churn | 30 | 26 | 4 / 4 | 86.7% | 0 |
+
+Across all three scenarios:
+
+- `objects.pull` reports zero invalid IDs, zero remote-missing IDs, and zero verification failures;
+- the destination reports zero missing source ValueIDs after the transfer;
+- the number of source `objects.fetch` calls matches the configured 32-object pull batches (6, 2, and 1);
+- a second identical pull sees every object locally, executes zero transfer batches, makes zero source fetch calls, and transfers zero object bytes.
+
+The reproducible evidence lives in `eval/reports/cas_two_node_ci.json` and `eval/reports/cas_two_node_ci.md`. CI regenerates the Markdown report and diffs it against the snapshot.
+
+This closes the principal scope limitation of the earlier CAS calibration: the transfer path is now genuinely cross-process and remote. The byte denominator is still ValueStore entry bytes rather than a packet capture, so transport framing, TLS, compression, latency, and throughput remain deliberately unclaimed.
