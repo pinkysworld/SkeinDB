@@ -261,6 +261,9 @@ jobs:
             --markdown-out target/redundancy-runtime/cas-two-node.md \
             --log-dir target/redundancy-runtime/cas-two-node-logs
 
+      - name: Verify two-node CAS snapshot
+        run: diff -u eval/reports/cas_two_node_ci.md target/redundancy-runtime/cas-two-node.md
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
