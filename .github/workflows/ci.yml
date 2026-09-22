@@ -322,6 +322,11 @@ jobs:
             --json-out target/redundancy-runtime/wire-composition.json \
             --markdown-out target/redundancy-runtime/wire-composition.md
 
+      - name: Verify CR08 wire-composition snapshots
+        run: |
+          diff -u eval/reports/wire_composition_ci.md target/redundancy-runtime/wire-composition.md
+          diff -u eval/reports/wire_composition_ci.json target/redundancy-runtime/wire-composition.json
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
