@@ -3046,6 +3046,11 @@ pub struct ObjectsPullParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<usize>,
+
+    /// Prefer the compact binary objects.fetch transport when the source supports it.
+    /// Defaults to true in the server. Set false for compatibility/evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer_binary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
