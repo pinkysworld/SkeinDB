@@ -11,18 +11,18 @@ Notes:
 This file is the research task inventory. It is not the best place to read current maturity at a glance.
 
 - Runtime truth: all R01-R20 tracks have executable coverage in code, methods, tests, or benchmark scaffolds.
-- Current maturity split: **R01-R17 and R20 are hardened**; **R18 and R19 remain prototype implemented**.
-- Checklist state: **109 done / 0 open** research checkboxes. The checklist is complete, but some tracks still remain prototype-strength in runtime maturity.
+- Current maturity split: **R01-R18 and R20 are hardened**; **R19 remains prototype implemented**.
+- Checklist state: **109 done / 0 open** research checkboxes. The checklist is complete, but R19 still remains prototype-strength in runtime maturity.
 - Current source of truth for implemented-vs-partial status: `docs/TRUE_STATUS_MATRIX.md`.
 
 ## Current partial research areas
 
 | Track | Truth today | Remaining gap |
 |---|---|---|
-| R18 Perf regression replay | Replay bundles can carry performance profiles, deterministic replay can rehydrate cache hints, variance reports exist; 2026-06-11 micro: timing injection primitive (`inject_replay_timing`) + wired to pacing mechanism (`apply_simulated_pacing` in maintenance_replay_run) + exercised in replay run + LSM/cache stats + new unit `engine::tests::replay_pacing_applies_injected_delays_for_replay_exec_fidelity` + updated engine roundtrips + cluster_rpc t188 (replay/RPC integration test) (engine::tests + cluster). 2026-06-11 A/B storage interleave (this round): replay materialize (R18 run path) routes core writers + streaming stub (via extended replay_bundle_export_import_run_roundtrip + t183); storage_stats_snapshot fidelity use. See TRUE_STATUS. | Timing pacing is wired into replay execution. A checked-in R18 comparator smoke gate now runs the real `skeindb replay compare` command in `.github/workflows/ci.yml` and uploads its JSON report; automatic base-vs-head execution of the same replay bundle across two commits remains the main CI hardening gap. |
 | R19 Wasm query operators | `wasm.plan.compile/run/inspect/perf_report/edge_package` exists with generated fixed-width artifacts and host fallback. | Production SIMD-lowered codegen and broader hardened operator coverage are not yet claimed. 2026-06-11 micro: hardened host fallback surface coverage (wasm_plan_run dispatch + inspect exercised on host_interpreted_v1 in engine::tests::wasm_plan_compile_falls_back_for_unsupported_types with data roundtrip). See TRUE_STATUS_MATRIX. |
 
 ## Recent verified closures
+- **2026-09-22:** R18 hardened baseline closed: PR CI now builds the pull-request base and head revisions separately, generates a 20-row / 20-change performance-annotated replay bundle with the base binary, replays that exact artifact with both binaries, compares fresh reports through `skeindb replay compare`, and uploads the bundle/reports/comparison/metadata as evidence. The base-generated artifact also provides an explicit backward-compatibility check for replay bundles. Broader research questions such as reproducing arbitrary production concurrency or complete compaction-queue state remain outside the hardened baseline claim.
 - **2026-06-11:** R19 host fallback micro (see TRUE_STATUS for details).
 
 
