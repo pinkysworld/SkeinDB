@@ -509,6 +509,26 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
         ]
     )
+
+    cas_deltas = [result["model_delta_pct_points"]["cas"] for result in report["results"]]
+    query_deltas = [
+        result["model_delta_pct_points"]["query_patch"] for result in report["results"]
+    ]
+    lines.extend(
+        [
+            "## Interpretation",
+            "",
+            "- **CAS calibration is close.** Runtime CAS savings differ from the analytical model by "
+            + ", ".join(f"{value:+.1f}" for value in cas_deltas)
+            + " percentage points across the three scenarios.",
+            "- **QueryPatch has fixed protocol overhead that matters at higher churn.** The analytical model counts compact patch payloads, while the runtime measurement includes the full RPC envelope, typed literals, columns, dependencies, causality, and patch metadata. The gap shrinks from "
+            + f"{query_deltas[0]:.1f} points at high churn to {query_deltas[-1]:.1f} points at low churn.",
+            "- **Storage uses a different denominator by design.** Runtime `stats.snapshot.storage` reports logical ValueStore bytes versus unique ValueStore bytes, while the analytical model estimates adaptive on-disk cell-reference encoding. The runtime percentages therefore should not be treated as a direct validation of the encoding model.",
+            "",
+            "The full JSON snapshot contains the byte counts and model deltas behind these percentages.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
