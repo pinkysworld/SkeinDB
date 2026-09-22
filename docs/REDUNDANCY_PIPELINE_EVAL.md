@@ -218,3 +218,13 @@ Across the low-redundancy/high-churn and balanced scenarios, combined zero-overl
 The existing default of **64** is therefore retained. It captures most of the measurable per-request byte reduction while avoiding unnecessarily large single responses and coarse retry units. Explicit callers can still select other supported batch sizes.
 
 The deterministic report is checked in as `eval/reports/cas_batch_sweep_ci.{json,md}` and regenerated in CI. The result is scoped to byte efficiency; it is not a latency or throughput benchmark.
+
+#### CR08 wire composition
+
+CR08 parses the captured HTTP stream itself rather than treating the proxy total as one opaque number. At the validated batch size 64, the low-redundancy/high-churn CAS transfer consists of 41,050 bytes: 22,534 bytes (54.9%) are the JSON-quoted `entry_b64` payloads, 6,688 bytes (16.3%) are request ValueIDs, 6,494 bytes (15.8%) are repeated response ValueIDs, and the remaining request/response HTTP + JSON-RPC structure accounts for 5,334 bytes. The balanced case has nearly identical percentages.
+
+The measured Base64 text expansion is 1.349x over decoded transfer entries. HTTP headers are small relative to the remaining payload, so further header or connection tuning is not the main optimization opportunity.
+
+This evidence motivates the next staged transport change: a backward-compatible binary replication response carrying canonical transfer-entry bytes directly. Because each canonical transfer entry already embeds its ValueID, such a response can remove both Base64 expansion and repeated response-ID JSON. Raw 16-byte request IDs are a separate later optimization.
+
+The checked-in report is `eval/reports/wire_composition_ci.{json,md}`, and CI requires its categories to reproduce exactly.

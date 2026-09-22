@@ -44,6 +44,8 @@ CR06 also reuses a single HTTP client across all batches in one pull. The same w
 
 CR07 then sweeps batch sizes 16/32/64/128/256 on that same live wire path. The existing default **64** is retained: it saves 3.11% combined HTTP bytes versus 32, while 128 and 256 provide only about 1.29% and 2.26% additional savings versus 64 at the cost of larger retry units. See the [batch-sweep evidence](eval/reports/cas_batch_sweep_ci.md).
 
+CR08 decomposes the remaining wire bytes. About **54.6-54.9%** are Base64 transfer-entry JSON, about **16%** are request ValueIDs, and another **16%** are repeated response ValueIDs; HTTP headers are only about 2%. This evidence makes a backward-compatible **binary replication fetch** the next transport target. See the [wire-composition evidence](eval/reports/wire_composition_ci.md).
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity
