@@ -239,6 +239,9 @@ jobs:
             --markdown-out target/redundancy-runtime/report.md \
             --log-dir target/redundancy-runtime/logs
 
+      - name: Verify live redundancy snapshot
+        run: diff -u eval/reports/redundancy_runtime_ci.md target/redundancy-runtime/report.md
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
