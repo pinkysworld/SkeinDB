@@ -1,0 +1,240 @@
+{
+  "batch_size": 32,
+  "claim_boundary": [
+    "Counts exact TCP payload bytes between objects.pull and objects.fetch over plain HTTP.",
+    "Includes HTTP framing, JSON-RPC envelopes, ValueID request data, Base64 payloads, and JSON metadata.",
+    "Excludes Ethernet/IP/TCP packet headers, lower-layer retransmission accounting, and TLS.",
+    "No latency or throughput claim is made."
+  ],
+  "format": "skein.cas_http_wire.runtime.v1",
+  "kind": "raw_tcp_proxy_http_transfer_measurement",
+  "results": [
+    {
+      "batch_size": 32,
+      "cas_overlap": {
+        "fetch": {
+          "fetch_calls": 6,
+          "fetch_ids_total": 191,
+          "obj_bytes": 42211,
+          "objects_served": 191
+        },
+        "pull": {
+          "already_present": 64,
+          "batches": 6,
+          "fetched_objects": 191,
+          "stored": 191
+        },
+        "wire": {
+          "connections": 6,
+          "http_overhead_bytes_vs_value_store": 65170,
+          "http_tcp_payload_bytes": 107381,
+          "request_bytes": 7927,
+          "response_bytes": 99454,
+          "response_expansion_ratio": 2.356116,
+          "total_wire_expansion_ratio": 2.54391,
+          "value_store_efficiency_pct": 39.31,
+          "value_store_object_bytes": 42211
+        }
+      },
+      "configured_receiver_overlap": 0.25,
+      "objects": {
+        "overlap_missing_value_ids": 191,
+        "preseeded_value_ids": 64,
+        "source_value_ids": 255
+      },
+      "rows": 300,
+      "savings": {
+        "http_tcp_payload_bytes_saved": 35978,
+        "http_tcp_payload_savings_pct": 25.096,
+        "value_store_object_bytes_saved": 14144,
+        "value_store_object_savings_pct": 25.098,
+        "wire_savings_minus_object_savings_points": -0.002
+      },
+      "scenario": "low_redundancy_high_churn",
+      "second_pull": {
+        "already_present": 255,
+        "connections": 0,
+        "fetched_objects": 0,
+        "http_tcp_payload_bytes": 0,
+        "source_objects_served": 0
+      },
+      "seed": 20260922,
+      "zero_overlap_baseline": {
+        "fetch": {
+          "fetch_calls": 8,
+          "fetch_ids_total": 255,
+          "obj_bytes": 56355,
+          "objects_served": 255
+        },
+        "pull": {
+          "batches": 8,
+          "fetched_objects": 255,
+          "stored": 255
+        },
+        "wire": {
+          "connections": 8,
+          "http_overhead_bytes_vs_value_store": 87004,
+          "http_tcp_payload_bytes": 143359,
+          "request_bytes": 10581,
+          "response_bytes": 132778,
+          "response_expansion_ratio": 2.3561,
+          "total_wire_expansion_ratio": 2.543856,
+          "value_store_efficiency_pct": 39.31,
+          "value_store_object_bytes": 56355
+        }
+      }
+    },
+    {
+      "batch_size": 32,
+      "cas_overlap": {
+        "fetch": {
+          "fetch_calls": 2,
+          "fetch_ids_total": 54,
+          "obj_bytes": 11934,
+          "objects_served": 54
+        },
+        "pull": {
+          "already_present": 81,
+          "batches": 2,
+          "fetched_objects": 54,
+          "stored": 54
+        },
+        "wire": {
+          "connections": 2,
+          "http_overhead_bytes_vs_value_store": 18553,
+          "http_tcp_payload_bytes": 30487,
+          "request_bytes": 2303,
+          "response_bytes": 28184,
+          "response_expansion_ratio": 2.361656,
+          "total_wire_expansion_ratio": 2.554634,
+          "value_store_efficiency_pct": 39.145,
+          "value_store_object_bytes": 11934
+        }
+      },
+      "configured_receiver_overlap": 0.6,
+      "objects": {
+        "overlap_missing_value_ids": 54,
+        "preseeded_value_ids": 81,
+        "source_value_ids": 135
+      },
+      "rows": 300,
+      "savings": {
+        "http_tcp_payload_bytes_saved": 45727,
+        "http_tcp_payload_savings_pct": 59.998,
+        "value_store_object_bytes_saved": 17901,
+        "value_store_object_savings_pct": 60.0,
+        "wire_savings_minus_object_savings_points": -0.002
+      },
+      "scenario": "balanced",
+      "second_pull": {
+        "already_present": 135,
+        "connections": 0,
+        "fetched_objects": 0,
+        "http_tcp_payload_bytes": 0,
+        "source_objects_served": 0
+      },
+      "seed": 20261023,
+      "zero_overlap_baseline": {
+        "fetch": {
+          "fetch_calls": 5,
+          "fetch_ids_total": 135,
+          "obj_bytes": 29835,
+          "objects_served": 135
+        },
+        "pull": {
+          "batches": 5,
+          "fetched_objects": 135,
+          "stored": 135
+        },
+        "wire": {
+          "connections": 5,
+          "http_overhead_bytes_vs_value_store": 46379,
+          "http_tcp_payload_bytes": 76214,
+          "request_bytes": 5759,
+          "response_bytes": 70455,
+          "response_expansion_ratio": 2.361488,
+          "total_wire_expansion_ratio": 2.554517,
+          "value_store_efficiency_pct": 39.146,
+          "value_store_object_bytes": 29835
+        }
+      }
+    },
+    {
+      "batch_size": 32,
+      "cas_overlap": {
+        "fetch": {
+          "fetch_calls": 1,
+          "fetch_ids_total": 4,
+          "obj_bytes": 884,
+          "objects_served": 4
+        },
+        "pull": {
+          "already_present": 26,
+          "batches": 1,
+          "fetched_objects": 4,
+          "stored": 4
+        },
+        "wire": {
+          "connections": 1,
+          "http_overhead_bytes_vs_value_store": 1727,
+          "http_tcp_payload_bytes": 2611,
+          "request_bytes": 346,
+          "response_bytes": 2265,
+          "response_expansion_ratio": 2.562217,
+          "total_wire_expansion_ratio": 2.95362,
+          "value_store_efficiency_pct": 33.857,
+          "value_store_object_bytes": 884
+        }
+      },
+      "configured_receiver_overlap": 0.85,
+      "objects": {
+        "overlap_missing_value_ids": 4,
+        "preseeded_value_ids": 26,
+        "source_value_ids": 30
+      },
+      "rows": 300,
+      "savings": {
+        "http_tcp_payload_bytes_saved": 14276,
+        "http_tcp_payload_savings_pct": 84.538,
+        "value_store_object_bytes_saved": 5746,
+        "value_store_object_savings_pct": 86.667,
+        "wire_savings_minus_object_savings_points": -2.129
+      },
+      "scenario": "high_redundancy_low_churn",
+      "second_pull": {
+        "already_present": 30,
+        "connections": 0,
+        "fetched_objects": 0,
+        "http_tcp_payload_bytes": 0,
+        "source_objects_served": 0
+      },
+      "seed": 20261124,
+      "zero_overlap_baseline": {
+        "fetch": {
+          "fetch_calls": 1,
+          "fetch_ids_total": 30,
+          "obj_bytes": 6630,
+          "objects_served": 30
+        },
+        "pull": {
+          "batches": 1,
+          "fetched_objects": 30,
+          "stored": 30
+        },
+        "wire": {
+          "connections": 1,
+          "http_overhead_bytes_vs_value_store": 10257,
+          "http_tcp_payload_bytes": 16887,
+          "request_bytes": 1257,
+          "response_bytes": 15630,
+          "response_expansion_ratio": 2.357466,
+          "total_wire_expansion_ratio": 2.547059,
+          "value_store_efficiency_pct": 39.261,
+          "value_store_object_bytes": 6630
+        }
+      }
+    }
+  ],
+  "rows": 300,
+  "seed": 20260922
+}
