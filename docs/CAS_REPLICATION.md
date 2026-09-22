@@ -172,7 +172,11 @@ Expose per link and per node:
 
 These metrics make the feature publishable: they quantify bandwidth savings.
 
-For a deterministic cross-layer workload that combines this documented CAS byte bound with storage deduplication and QueryPatch delivery, see [REDUNDANCY_PIPELINE_EVAL.md](REDUNDANCY_PIPELINE_EVAL.md). Its CAS values are analytical object-byte savings, not measured network throughput.
+For a deterministic cross-layer workload that combines this documented CAS byte bound with storage deduplication and QueryPatch delivery, see [REDUNDANCY_PIPELINE_EVAL.md](REDUNDANCY_PIPELINE_EVAL.md). Its original CAS values are analytical object-byte savings.
+
+A follow-up two-node runtime experiment now exercises the production `objects.pull -> objects.fetch` path over real HTTP between two independent SkeinDB processes. The destination is pre-seeded with a deterministic subset of the source ValueIDs and then requests the full object set. For 300-row low/balanced/high-redundancy scenarios, the measured ValueStore object-byte savings are **25.1%**, **60.0%**, and **86.7%**. The first pull fetched/stored 191, 54, and 4 missing objects respectively with zero invalid IDs, zero remote-missing IDs, and zero verification failures. A second identical pull performed zero remote fetches and transferred zero object bytes in all scenarios.
+
+The checked-in evidence is `eval/reports/cas_two_node_ci.{json,md}`, produced by `eval/two_node_cas_validation.py` and snapshot-diffed in CI. These are production ValueStore entry-byte counters, not packet-capture bytes; HTTP/TCP framing, TLS, compression, latency, and throughput remain outside the claim.
 
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
