@@ -150,7 +150,7 @@
         "http_tcp_payload_bytes_saved": 18167,
         "http_tcp_payload_savings_pct": 59.997,
         "value_store_object_bytes_saved": 17901,
-        "value_store_object_savings_pct": 60,
+        "value_store_object_savings_pct": 60.0,
         "wire_savings_minus_object_savings_points": -0.003
       },
       "scenario": "balanced",
