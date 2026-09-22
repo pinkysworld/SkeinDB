@@ -1,0 +1,179 @@
+{
+  "batch_size": 32,
+  "claim_boundary": [
+    "Two independent SkeinDB processes communicate over the real objects.pull -> objects.fetch HTTP path.",
+    "Byte accounting uses production ValueStore entry-byte counters, not a packet capture.",
+    "No latency, throughput, HTTP framing, TLS, or compression claim is made."
+  ],
+  "format": "skein.cas_two_node.runtime.v1",
+  "kind": "two_process_real_objects_pull_validation",
+  "results": [
+    {
+      "batch_size": 32,
+      "byte_accounting": {
+        "analytical_saved_bytes_ratio": 0.233082,
+        "destination_preexisting_object_bytes": 14144,
+        "object_byte_baseline": 56355,
+        "saved_bytes_ratio": 0.25098,
+        "saved_pct": 25.098,
+        "source_transferred_object_bytes": 42211
+      },
+      "configured_receiver_overlap": 0.25,
+      "first_pull": {
+        "already_present": 64,
+        "batches": 6,
+        "expected_batches": 6,
+        "fetched_objects": 191,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 255,
+        "stored": 191,
+        "verification_failed": []
+      },
+      "objects": {
+        "preflight_missing_ids": 191,
+        "preflight_present_ids": 64,
+        "preseeded_value_ids": 64,
+        "source_value_ids": 255
+      },
+      "postflight_missing_ids": 0,
+      "rows": 300,
+      "scenario": "low_redundancy_high_churn",
+      "second_pull": {
+        "already_present": 255,
+        "batches": 0,
+        "fetched_objects": 0,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 255,
+        "stored": 0,
+        "verification_failed": []
+      },
+      "second_pull_source_fetch": {
+        "fetch_calls": 0,
+        "fetch_ids_total": 0,
+        "obj_bytes": 0,
+        "objects_served": 0
+      },
+      "seed": 20260922,
+      "source_fetch": {
+        "fetch_calls": 6,
+        "fetch_ids_total": 191,
+        "obj_bytes": 42211,
+        "objects_served": 191
+      }
+    },
+    {
+      "batch_size": 32,
+      "byte_accounting": {
+        "analytical_saved_bytes_ratio": 0.574139,
+        "destination_preexisting_object_bytes": 17901,
+        "object_byte_baseline": 29835,
+        "saved_bytes_ratio": 0.6,
+        "saved_pct": 60.0,
+        "source_transferred_object_bytes": 11934
+      },
+      "configured_receiver_overlap": 0.6,
+      "first_pull": {
+        "already_present": 81,
+        "batches": 2,
+        "expected_batches": 2,
+        "fetched_objects": 54,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 135,
+        "stored": 54,
+        "verification_failed": []
+      },
+      "objects": {
+        "preflight_missing_ids": 54,
+        "preflight_present_ids": 81,
+        "preseeded_value_ids": 81,
+        "source_value_ids": 135
+      },
+      "postflight_missing_ids": 0,
+      "rows": 300,
+      "scenario": "balanced",
+      "second_pull": {
+        "already_present": 135,
+        "batches": 0,
+        "fetched_objects": 0,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 135,
+        "stored": 0,
+        "verification_failed": []
+      },
+      "second_pull_source_fetch": {
+        "fetch_calls": 0,
+        "fetch_ids_total": 0,
+        "obj_bytes": 0,
+        "objects_served": 0
+      },
+      "seed": 20261023,
+      "source_fetch": {
+        "fetch_calls": 2,
+        "fetch_ids_total": 54,
+        "obj_bytes": 11934,
+        "objects_served": 54
+      }
+    },
+    {
+      "batch_size": 32,
+      "byte_accounting": {
+        "analytical_saved_bytes_ratio": 0.882886,
+        "destination_preexisting_object_bytes": 5746,
+        "object_byte_baseline": 6630,
+        "saved_bytes_ratio": 0.866667,
+        "saved_pct": 86.667,
+        "source_transferred_object_bytes": 884
+      },
+      "configured_receiver_overlap": 0.85,
+      "first_pull": {
+        "already_present": 26,
+        "batches": 1,
+        "expected_batches": 1,
+        "fetched_objects": 4,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 30,
+        "stored": 4,
+        "verification_failed": []
+      },
+      "objects": {
+        "preflight_missing_ids": 4,
+        "preflight_present_ids": 26,
+        "preseeded_value_ids": 26,
+        "source_value_ids": 30
+      },
+      "postflight_missing_ids": 0,
+      "rows": 300,
+      "scenario": "high_redundancy_low_churn",
+      "second_pull": {
+        "already_present": 30,
+        "batches": 0,
+        "fetched_objects": 0,
+        "invalid_ids": [],
+        "remote_missing": [],
+        "requested": 30,
+        "stored": 0,
+        "verification_failed": []
+      },
+      "second_pull_source_fetch": {
+        "fetch_calls": 0,
+        "fetch_ids_total": 0,
+        "obj_bytes": 0,
+        "objects_served": 0
+      },
+      "seed": 20261124,
+      "source_fetch": {
+        "fetch_calls": 1,
+        "fetch_ids_total": 4,
+        "obj_bytes": 884,
+        "objects_served": 4
+      }
+    }
+  ],
+  "rows": 300,
+  "seed": 20260922
+}
