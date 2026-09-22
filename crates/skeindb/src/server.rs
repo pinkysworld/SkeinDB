@@ -24543,7 +24543,11 @@ async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, Rp
 }
 
 /// `objects.fetch`: given a list of ValueIDs, return the bytes (base64-encoded) for each.
-async fn objects_fetch(\n    state: &AppState,\n    ids: Vec<String>,\n    transfer_only: bool,\n) -> Result<Value, RpcError> {
+async fn objects_fetch(
+    state: &AppState,
+    ids: Vec<String>,
+    transfer_only: bool,
+) -> Result<Value, RpcError> {
     let eng = state.engine.read().await;
     let mut vs = eng.value_store_lock();
     let mut objects: Vec<Value> = Vec::new();
