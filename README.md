@@ -42,6 +42,8 @@ The same path is measured at the **HTTP-over-TCP byte level** through a transpar
 
 CR06 also reuses a single HTTP client across all batches in one pull. The same wire harness now verifies **one TCP connection per non-empty pull** instead of one connection per batch: 8->1 and 6->1 in the largest standard scenario, and 5->1 / 2->1 in the balanced case. The application-byte totals are intentionally unchanged. The [pre-CR06 snapshot](eval/reports/cas_http_wire_pre_cr06.md) is retained for comparison.
 
+CR07 then sweeps batch sizes 16/32/64/128/256 on that same live wire path. The existing default **64** is retained: it saves 3.11% combined HTTP bytes versus 32, while 128 and 256 provide only about 1.29% and 2.26% additional savings versus 64 at the cost of larger retry units. See the [batch-sweep evidence](eval/reports/cas_batch_sweep_ci.md).
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity

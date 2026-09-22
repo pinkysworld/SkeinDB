@@ -287,6 +287,26 @@ jobs:
           diff -u eval/reports/cas_http_wire_ci.md target/redundancy-runtime/cas-http-wire.md
           diff -u eval/reports/cas_http_wire_ci.json target/redundancy-runtime/cas-http-wire.json
 
+      - name: Run CAS batch-sweep unit tests
+        env:
+          PYTHONPATH: eval
+        run: python -m unittest eval.test_cas_batch_sweep
+
+      - name: Run objects.pull batch-size sweep
+        run: |
+          python eval/cas_batch_sweep.py \
+            --skeindb-bin target/debug/skeindb \
+            --rows 300 \
+            --seed 20260922 \
+            --batch-sizes 16,32,64,128,256 \
+            --json-out target/redundancy-runtime/cas-batch-sweep.json \
+            --markdown-out target/redundancy-runtime/cas-batch-sweep.md
+
+      - name: Verify CAS batch-sweep snapshots
+        run: |
+          diff -u eval/reports/cas_batch_sweep_ci.md target/redundancy-runtime/cas-batch-sweep.md
+          diff -u eval/reports/cas_batch_sweep_ci.json target/redundancy-runtime/cas-batch-sweep.json
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
