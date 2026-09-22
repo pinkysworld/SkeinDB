@@ -47,7 +47,7 @@ The database is intentionally broader than any single paper. Research claims sho
 
 - **Compatibility:** MySQL is the broadest adoption surface; PostgreSQL is a substantial but still partial PG v3 implementation. SkeinDB does **not** claim 100% MySQL or PostgreSQL compatibility.
 - **Core roadmap:** all 140 top-level core checklist items are closed, while some phases still contain production-hardening work.
-- **Research roadmap:** R01-R17 and R20 are marked hardened; R18 performance replay and R19 Wasm query operators remain prototype-strength.
+- **Research roadmap:** R01-R18 and R20 are marked hardened; R19 Wasm query operators remains prototype-strength.
 - **Status authority:** [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md) is the short source of truth for implemented, partial, and prototype areas. [docs/PROJECT_BACKLOG.md](docs/PROJECT_BACKLOG.md) and [docs/RESEARCH_BACKLOG.md](docs/RESEARCH_BACKLOG.md) contain the detailed task history.
 
 ## Core architecture
@@ -102,7 +102,7 @@ The compatibility suite includes a **1600+ line MySQL corpus**, live WordPress-o
 ## What's Still Partial
 
 - PostgreSQL support is real but still partial: COPY protocol, portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open. See [docs/PG_COMPAT.md](docs/PG_COMPAT.md).
-- Eighteen research tracks (`R01`-`R17` and `R20`) are hardened with evidence-backed tests; `R18` performance replay and `R19` Wasm query operators remain prototype implemented. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
+- Nineteen research tracks (`R01`-`R18` and `R20`) are hardened with evidence-backed tests; `R19` Wasm query operators remains prototype implemented. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
 - Clustering, CDC, snapshots, Wasm operators, and advisor flows are wired end-to-end; CDC still needs broader predicates, alternative event encodings, external sinks, and cluster-wide fanout, while R19 still does not claim production SIMD-lowered codegen.
 - The HA/consensus path includes commit-index-aware read-committed reads and automated bounded-memory snapshot re-sync. Remaining distribution work is mainly broader hardening, availability/performance work, and edge-case coverage rather than those earlier correctness gaps. See [docs/CLUSTERING.md](docs/CLUSTERING.md) §2.5 and [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 - SkeinDB does **not** claim 100% MySQL or PostgreSQL parity.
