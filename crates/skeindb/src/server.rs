@@ -19787,9 +19787,11 @@ pub(crate) async fn handle_rpc(
                     #[derive(serde::Deserialize)]
                     struct P {
                         ids: Vec<String>,
+                        #[serde(default)]
+                        transfer_only: bool,
                     }
                     let p: P = parse_params(params.clone())?;
-                    objects_fetch(state, p.ids).await
+                    objects_fetch(state, p.ids, p.transfer_only).await
                 }
                 "objects.pull" => {
                     let p: ObjectsPullParams = parse_params(params.clone())?;
@@ -24372,7 +24374,13 @@ async fn fetch_remote_object_batch(
         "skeinql": SKEINQL_VERSION,
         "id": "objects.pull.remote",
         "method": "objects.fetch",
-        "params": { "ids": ids },
+        "params": {
+            "ids": ids,
+            // New sources honor this compact mode. Older sources ignore the
+            // unknown field and return the legacy superset, which remains
+            // accepted by the pull decoder.
+            "transfer_only": true
+        },
     });
 
     let mut req = client
@@ -24535,7 +24543,7 @@ async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, Rp
 }
 
 /// `objects.fetch`: given a list of ValueIDs, return the bytes (base64-encoded) for each.
-async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcError> {
+async fn objects_fetch(\n    state: &AppState,\n    ids: Vec<String>,\n    transfer_only: bool,\n) -> Result<Value, RpcError> {
     let eng = state.engine.read().await;
     let mut vs = eng.value_store_lock();
     let mut objects: Vec<Value> = Vec::new();
@@ -24547,22 +24555,33 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
         };
         if let Some(entry) = vs.get(&id).cloned() {
             use base64::Engine as _;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&entry.bytes);
             let entry_b64 = skeindb_core::valuestore::encode_transfer_entry(id, &entry)
                 .ok()
                 .map(|payload| base64::engine::general_purpose::STANDARD.encode(payload));
-            let computed = vs
-                .materialize(&id)
-                .map(|bytes| skeindb_core::value_id(&bytes))
-                .ok();
             obj_bytes = obj_bytes.saturating_add(entry.bytes.len() as u64);
-            objects.push(serde_json::json!({
-                "id": id_str,
-                "bytes_b64": b64,
-                "entry_b64": entry_b64,
-                "kind": format!("{:?}", entry.kind),
-                "verified": computed == Some(id),
-            }));
+
+            if transfer_only {
+                // CR05 compact replication fetch: objects.pull only needs the
+                // canonical transfer entry. The legacy representation remains
+                // the default for direct objects.fetch callers.
+                objects.push(serde_json::json!({
+                    "id": id_str,
+                    "entry_b64": entry_b64,
+                }));
+            } else {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&entry.bytes);
+                let computed = vs
+                    .materialize(&id)
+                    .map(|bytes| skeindb_core::value_id(&bytes))
+                    .ok();
+                objects.push(serde_json::json!({
+                    "id": id_str,
+                    "bytes_b64": b64,
+                    "entry_b64": entry_b64,
+                    "kind": format!("{:?}", entry.kind),
+                    "verified": computed == Some(id),
+                }));
+            }
         }
     }
     drop(vs);
