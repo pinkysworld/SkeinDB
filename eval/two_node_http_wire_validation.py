@@ -367,6 +367,42 @@ def run_scenario(
                     f"{scenario.name}: skeinpack exposed too few source ValueIDs"
                 )
 
+            # CR05 compatibility contract: direct objects.fetch remains legacy by
+            # default, while transfer_only returns only the fields required by
+            # objects.pull. The canonical transfer payload itself must be identical.
+            probe_id = value_ids[0]
+            legacy_fetch, _ = runtime.rpc(
+                source_url,
+                "objects.fetch",
+                {"ids": [probe_id]},
+                source_request,
+            )
+            source_request += 1
+            compact_fetch, _ = runtime.rpc(
+                source_url,
+                "objects.fetch",
+                {"ids": [probe_id], "transfer_only": True},
+                source_request,
+            )
+            source_request += 1
+            legacy_object = legacy_fetch["result"]["objects"][0]
+            compact_object = compact_fetch["result"]["objects"][0]
+            required_legacy = {"id", "bytes_b64", "entry_b64", "kind", "verified"}
+            if not required_legacy.issubset(legacy_object):
+                raise RuntimeError(
+                    f"{scenario.name}: legacy objects.fetch shape changed: "
+                    f"{sorted(legacy_object)}"
+                )
+            if set(compact_object) != {"id", "entry_b64"}:
+                raise RuntimeError(
+                    f"{scenario.name}: compact objects.fetch shape unexpected: "
+                    f"{sorted(compact_object)}"
+                )
+            if compact_object["entry_b64"] != legacy_object["entry_b64"]:
+                raise RuntimeError(
+                    f"{scenario.name}: compact transfer payload differs from legacy"
+                )
+
             baseline_pull, baseline_fetch, baseline_wire, baseline_request, source_request = (
                 pull_with_measurement(
                     baseline_url,
@@ -481,6 +517,13 @@ def run_scenario(
                     "source_value_ids": len(value_ids),
                     "preseeded_value_ids": len(preseed_ids),
                     "overlap_missing_value_ids": len(missing),
+                },
+                "fetch_format_compatibility": {
+                    "legacy_fields": sorted(legacy_object),
+                    "transfer_only_fields": sorted(compact_object),
+                    "entry_payload_equal": (
+                        compact_object["entry_b64"] == legacy_object["entry_b64"]
+                    ),
                 },
                 "zero_overlap_baseline": {
                     "pull": {
@@ -648,8 +691,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "- JSON-RPC request bodies containing ValueIDs",
             "- HTTP status line and response headers",
             "- JSON-RPC response envelopes",
-            "- Base64-encoded `bytes_b64` and `entry_b64` fields",
+            "- Base64-encoded `entry_b64` transfer payloads used by `objects.pull`",
             "- all other JSON syntax and metadata carried over the loopback TCP stream",
+            "- the legacy `bytes_b64` field is compatibility-tested separately and is not present in the measured CR05 pull traffic",
             "",
             "## What it excludes",
             "",
