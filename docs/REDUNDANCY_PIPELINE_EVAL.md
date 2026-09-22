@@ -175,8 +175,22 @@ The proxy counts exact TCP payload bytes in both directions. That includes HTTP 
 Two findings matter:
 
 1. **CAS savings survive protocol overhead.** At 25% and 60% overlap, measured HTTP savings differ from ValueStore-byte savings by only 0.002 percentage points.
-2. **The current fetch encoding has measurable amplification.** Larger transfers use about 2.54-2.55 HTTP-over-TCP bytes per ValueStore object byte. The response currently carries both `bytes_b64` and `entry_b64`; the replication importer uses `entry_b64`. For tiny residual transfers, fixed HTTP/RPC metadata increases the expansion to 2.95x and reduces the 86.7% object-byte saving to 84.5% on the HTTP stream.
+2. **The pre-CR05 fetch encoding had measurable amplification.** The preserved baseline used about 2.54-2.55 HTTP-over-TCP bytes per ValueStore object byte because the response carried both `bytes_b64` and `entry_b64` plus metadata. CR05 introduces a backward-compatible `transfer_only` response used by `objects.pull`, leaving legacy direct fetches unchanged.
 
 A second identical pull still opens zero proxy connections and transfers exactly zero HTTP bytes.
 
 The checked-in evidence lives in `eval/reports/cas_http_wire_ci.json` and `eval/reports/cas_http_wire_ci.md`. Both files are regenerated and diff-gated in CI.
+
+#### CR05 before/after
+
+The original wire report is retained as `eval/reports/cas_http_wire_pre_cr05.{json,md}`. Re-running the identical harness after CR05 yields:
+
+| Scenario | Pre-CR05 zero-overlap | Post-CR05 zero-overlap | Reduction | Post-CR05 wire/object |
+|---|---:|---:|---:|---:|
+| low redundancy / high churn | 143,359 B | 56,564 B | 60.5% | 1.00x |
+| balanced | 76,214 B | 30,280 B | 60.3% | 1.01x |
+| high redundancy / low churn | 16,887 B | 6,677 B | 60.5% | 1.01x |
+
+The CAS savings signal itself is preserved: 25.1% and 60.0% overlap savings remain essentially identical to the ValueStore-byte savings. At the tiny four-object residual transfer, HTTP savings are 81.0% versus 86.7% object-byte savings because fixed request overhead becomes dominant.
+
+The compatibility probe confirms that legacy fetch fields remain present by default, compact mode contains only `id + entry_b64`, and the canonical `entry_b64` payload is identical in both modes.
