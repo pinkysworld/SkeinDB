@@ -24386,10 +24386,7 @@ fn decode_objects_fetch_binary(body: &[u8]) -> Result<Vec<RemoteTransferObject>,
     if body[4] != OBJECTS_FETCH_BINARY_VERSION {
         return Err(RpcError::new(
             "unsupported_version",
-            format!(
-                "unsupported binary objects.fetch version {}",
-                body[4]
-            ),
+            format!("unsupported binary objects.fetch version {}", body[4]),
         ));
     }
 
@@ -24557,7 +24554,10 @@ async fn fetch_remote_object_batch(
         return decode_objects_fetch_binary(&bytes);
     }
 
-    if matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
         return fetch_remote_object_batch_json(client, source_rpc_url, ids).await;
     }
 
@@ -24727,7 +24727,10 @@ fn encode_objects_fetch_binary_payloads(payloads: &[Vec<u8>]) -> Result<Vec<u8>,
     let count = u32::try_from(payloads.len())
         .map_err(|_| RpcError::new("internal", "too many binary fetch objects"))?;
     let mut body = Vec::with_capacity(
-        9 + payloads.iter().map(|payload| 4 + payload.len()).sum::<usize>(),
+        9 + payloads
+            .iter()
+            .map(|payload| 4 + payload.len())
+            .sum::<usize>(),
     );
     body.extend_from_slice(&OBJECTS_FETCH_BINARY_MAGIC);
     body.push(OBJECTS_FETCH_BINARY_VERSION);
@@ -24741,10 +24744,7 @@ fn encode_objects_fetch_binary_payloads(payloads: &[Vec<u8>]) -> Result<Vec<u8>,
     Ok(body)
 }
 
-async fn objects_fetch_binary(
-    state: &AppState,
-    ids: Vec<String>,
-) -> Result<Vec<u8>, RpcError> {
+async fn objects_fetch_binary(state: &AppState, ids: Vec<String>) -> Result<Vec<u8>, RpcError> {
     let eng = state.engine.read().await;
     let mut vs = eng.value_store_lock();
     let mut payloads = Vec::new();
@@ -24869,7 +24869,6 @@ async fn objects_fetch(
 /// validated entries. Delta objects are transferred losslessly and can pull
 /// their base dependencies recursively.
 async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Value, RpcError> {
-
     let source_rpc_url = params.source_rpc_url.trim().to_string();
     if source_rpc_url.is_empty() {
         return Err(RpcError::new(
