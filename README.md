@@ -5,7 +5,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-09-21.
+Last updated: 2026-09-22.
 
 **SkeinDB is a redundancy-aware relational database that carries content identity from storage to replication to query delivery.**
 
@@ -31,6 +31,8 @@ That gives SkeinDB a coherent systems thesis rather than a collection of isolate
 - **Move less:** CAS-aware replication transfers only missing ValueIDs and verifies fetched objects by hash.
 - **Return less:** dependency-derived ETags, conditional reads, and query-scoped delta responses avoid retransmitting unchanged result state.
 - **Recompute less:** plan caching, autoparameterization, query coalescing, incremental views, and dependency tracking reuse prior work where correctness allows it.
+
+A deterministic cross-layer evaluation now exercises this thesis on one workload and reports storage, CAS object-transfer, and QueryPatch byte savings separately. See [docs/REDUNDANCY_PIPELINE_EVAL.md](docs/REDUNDANCY_PIPELINE_EVAL.md) and the checked-in [default report](eval/reports/redundancy_pipeline_default.md). The report is explicitly an analytical byte model, not a live latency or throughput benchmark.
 
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
