@@ -234,8 +234,10 @@ Current R18/T189 CI harness behavior:
 - The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.
 - Threshold flags cover `--max-p95-delta-ms`, `--max-p99-delta-ms`, `--max-span-delta-ms`, `--max-disk-bytes-delta`, and `--max-missing-hot-tables-delta`.
 - The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.
-- CI now executes the real `skeindb replay compare` CLI against deterministic checked-in R18 report fixtures and uploads `r18-replay-comparison.json` as a workflow artifact. This guards the comparator contract and threshold behavior on every change.
-- The remaining hardening step is a two-revision job that generates fresh baseline and candidate reports by executing the same replay bundle with binaries built from the PR base and head commits. Until that exists, R18 remains prototype-strength rather than hardened.
+- CI executes the real `skeindb replay compare` CLI against deterministic checked-in R18 report fixtures and uploads `r18-replay-comparison.json`, guarding the comparator contract and threshold behavior on every change.
+- Pull requests also run `scripts/r18_cross_revision_ci.sh`: the job builds separate binaries for the PR base and head commits, creates a deterministic 20-row / 20-change workload with the base binary, exports one performance-annotated bundle from the base revision, replays that exact bundle with both revisions, compares the fresh reports, and uploads the bundle, reports, comparison, metadata, and server log.
+- Generating the artifact with the base revision intentionally adds a replay-bundle backward-compatibility check: the candidate must consume an artifact emitted by the current mainline revision.
+- This closes the CI hardening gap for the snapshot-based R18 baseline. It does not claim reproduction of arbitrary production concurrency, complete compaction-queue state, or general wall-clock workload equivalence.
 
 Current R18/T188 replay-runner implementation:
 
