@@ -25,7 +25,7 @@
           "stored": 191
         },
         "wire": {
-          "connections": 6,
+          "connections": 1,
           "http_overhead_bytes_vs_value_store": 159,
           "http_tcp_payload_bytes": 42370,
           "request_bytes": 8053,
@@ -86,7 +86,7 @@
           "stored": 255
         },
         "wire": {
-          "connections": 8,
+          "connections": 1,
           "http_overhead_bytes_vs_value_store": 209,
           "http_tcp_payload_bytes": 56564,
           "request_bytes": 10749,
@@ -114,7 +114,7 @@
           "stored": 54
         },
         "wire": {
-          "connections": 2,
+          "connections": 1,
           "http_overhead_bytes_vs_value_store": 179,
           "http_tcp_payload_bytes": 12113,
           "request_bytes": 2345,
@@ -150,7 +150,7 @@
         "http_tcp_payload_bytes_saved": 18167,
         "http_tcp_payload_savings_pct": 59.997,
         "value_store_object_bytes_saved": 17901,
-        "value_store_object_savings_pct": 60.0,
+        "value_store_object_savings_pct": 60,
         "wire_savings_minus_object_savings_points": -0.003
       },
       "scenario": "balanced",
@@ -175,7 +175,7 @@
           "stored": 135
         },
         "wire": {
-          "connections": 5,
+          "connections": 1,
           "http_overhead_bytes_vs_value_store": 445,
           "http_tcp_payload_bytes": 30280,
           "request_bytes": 5864,
