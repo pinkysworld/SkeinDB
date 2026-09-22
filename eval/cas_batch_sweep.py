@@ -46,7 +46,7 @@ def summarize_run(result: dict[str, Any]) -> dict[str, Any]:
             "response_bytes": zero["wire"]["response_bytes"],
             "http_tcp_payload_bytes": zero["wire"]["http_tcp_payload_bytes"],
             "value_store_object_bytes": zero["wire"]["value_store_object_bytes"],
-            "wire_object_ratio": zero["wire"]["total_wire_expansion_ratio"],
+            "wire_object_ratio": zero["wire"]["total_wire_vs_materialized_value_ratio"],
         },
         "cas_overlap": {
             "batches": overlap["pull"]["batches"],
@@ -55,7 +55,7 @@ def summarize_run(result: dict[str, Any]) -> dict[str, Any]:
             "response_bytes": overlap["wire"]["response_bytes"],
             "http_tcp_payload_bytes": overlap["wire"]["http_tcp_payload_bytes"],
             "value_store_object_bytes": overlap["wire"]["value_store_object_bytes"],
-            "wire_object_ratio": overlap["wire"]["total_wire_expansion_ratio"],
+            "wire_object_ratio": overlap["wire"]["total_wire_vs_materialized_value_ratio"],
         },
     }
 
@@ -141,7 +141,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Rows per scenario: **{report['rows']}**  ",
         f"Seed: **{report['seed']}**",
         "",
-        "The sweep varies only `objects.pull.batch_size`. CR05 compact transfer encoding and CR06 persistent keep-alive are held constant.",
+        "The sweep varies only `objects.pull.batch_size`. CR05 compact transfer semantics, CR06 persistent keep-alive, and CR09 binary responses are held constant.",
         "",
         "| Batch | Combined HTTP bytes | Savings vs 32 | Zero-overlap batches | CAS-overlap batches | Request bytes (zero/CAS) | Connections |",
         "|---:|---:|---:|---:|---:|---:|---:|",
@@ -165,7 +165,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Per-scenario measurements",
             "",
-            "| Scenario | Batch | Zero HTTP bytes | CAS HTTP bytes | Zero batches | CAS batches | Zero wire/object | CAS wire/object |",
+            "| Scenario | Batch | Zero HTTP bytes | CAS HTTP bytes | Zero batches | CAS batches | Zero wire/materialized value | CAS wire/materialized value |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -185,7 +185,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "This is a byte-efficiency sweep, not a latency or throughput benchmark. Larger batches reduce per-request HTTP/JSON-RPC framing but can increase individual response size and retry granularity.",
+            "This is a byte-efficiency sweep, not a latency or throughput benchmark. Larger batches reduce per-request HTTP/JSON framing but can increase individual response size and retry granularity.",
             "",
         ]
     )
