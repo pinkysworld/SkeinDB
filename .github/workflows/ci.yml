@@ -242,6 +242,12 @@ jobs:
       - name: Verify live redundancy snapshot
         run: diff -u eval/reports/redundancy_runtime_ci.md target/redundancy-runtime/report.md
 
+      - name: Run two-node CAS validation unit tests
+        run: |
+          python -m unittest \
+            eval/test_runtime_redundancy_validation.py \
+            eval/test_two_node_cas_validation.py
+
       - name: Run two-node CAS transfer validation
         run: |
           python eval/two_node_cas_validation.py \
