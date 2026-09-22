@@ -74,6 +74,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+
+  r18-cross-revision:
+    name: R18 base vs head replay
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-r18-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-r18-
+            ${{ runner.os }}-cargo-
+
+      - name: Run same replay bundle on base and head
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/r18_cross_revision_ci.sh
+
+      - name: Upload R18 cross-revision evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r18-cross-revision
+          path: target/r18-cross-revision
+          if-no-files-found: ignore
+          retention-days: 14
+
   playwright:
     name: SkeinAdmin e2e
     runs-on: ubuntu-latest
