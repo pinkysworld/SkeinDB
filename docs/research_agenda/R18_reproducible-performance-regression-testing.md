@@ -52,3 +52,5 @@ Current adaptation:
 - `maintenance.replay.run` emits a variance report for annotated bundles, rehydrates captured select/patch cache counts in the replay workspace, and compares a normalized replay-run checksum over reconstructable snapshot state.
 - Snapshot bundles still rely on retained change-event metadata plus table snapshots rather than impossible row-by-row WAL mutation replay.
 - The raw `disk_bytes` / `wal_bytes` fields remain part of the variance report instead of the replay-run checksum so workspace-local artifact files do not cause false mismatches.
+- PR CI now performs a true cross-revision check: the base commit emits the performance-annotated replay bundle, both base and head replay the identical artifact, and the existing comparator gates fresh reports. This hardens the developer-workflow contribution while also checking replay-artifact backward compatibility.
+- Scope note: the hardened baseline is snapshot-based and reconstructs captured cache/timing/storage summaries; it does not claim full reproduction of arbitrary production concurrency or every compaction-queue detail from the broader research hypothesis.
