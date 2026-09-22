@@ -228,3 +228,13 @@ The measured Base64 text expansion is 1.349x over decoded transfer entries. HTTP
 This evidence motivates the next staged transport change: a backward-compatible binary replication response carrying canonical transfer-entry bytes directly. Because each canonical transfer entry already embeds its ValueID, such a response can remove both Base64 expansion and repeated response-ID JSON. Raw 16-byte request IDs are a separate later optimization.
 
 The checked-in report is `eval/reports/wire_composition_ci.{json,md}`, and CI requires its categories to reproduce exactly.
+
+#### CR09 binary response
+
+CR09 replaces the Base64/JSON response selected by CR08 with a small binary envelope containing canonical transfer-entry bytes. The request remains JSON, and new destinations automatically fall back to the legacy compact JSON-RPC fetch when a source does not expose the binary endpoint.
+
+At batch 32, zero-overlap transfers fall from 56,564 to 34,361 bytes (low redundancy), 30,280 to 18,426 bytes (balanced), and 6,677 to 4,059 bytes (high redundancy), roughly **39% below the pre-CR09 path**. CAS-overlap transfers fall from 42,370 to 25,739 bytes and 12,113 to 7,371 bytes in the two larger scenarios.
+
+At batch 64, the remaining low-redundancy CAS stream is 24,806 bytes: 16,424 bytes (66.2%) are canonical binary transfer entries and 6,688 bytes (27.0%) are still hexadecimal request ValueIDs. The balanced case is 7,061 bytes with 65.8% transfer entries and 26.8% request IDs.
+
+That moves the next optimization target from the response to the request: raw 16-byte ValueIDs can remove the remaining hexadecimal JSON expansion without changing the canonical object representation. The pre-CR09 and post-CR09 reports are retained separately for direct reproducibility.
