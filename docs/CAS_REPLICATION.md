@@ -220,6 +220,25 @@ For the CAS-overlap transfers themselves, low and balanced scenarios fall from 1
 
 For the larger transfers, ValueStore-byte efficiency rises from roughly **39% pre-CR05 to 98.5-99.6% post-CR05**. The optimization changes representation only; object verification, recursive delta-base fetching, post-transfer completeness, and idempotent second pulls remain unchanged.
 
+### 7.3) CR06 persistent pull client
+
+CR06 reuses one `reqwest::Client` for the complete `objects.pull` operation instead of constructing a new client for every batch. Fetches remain sequential, so the same HTTP/1.1 keep-alive connection can carry all remote `objects.fetch` batches for one pull.
+
+The preserved pre-CR06 snapshot is `eval/reports/cas_http_wire_pre_cr06.{json,md}`. With the same CR05 transfer format and 32-object batch size, CR06 leaves application bytes unchanged but collapses connection churn:
+
+| Scenario | Pull side | Batches | Pre-CR06 TCP connections | CR06 TCP connections |
+|---|---|---:|---:|---:|
+| low redundancy / high churn | zero-overlap baseline | 8 | 8 | **1** |
+| low redundancy / high churn | CAS overlap | 6 | 6 | **1** |
+| balanced | zero-overlap baseline | 5 | 5 | **1** |
+| balanced | CAS overlap | 2 | 2 | **1** |
+| high redundancy / low churn | zero-overlap baseline | 1 | 1 | **1** |
+| high redundancy / low churn | CAS overlap | 1 | 1 | **1** |
+
+The raw HTTP-over-TCP byte counts remain 56,564 / 42,370 B, 30,280 / 12,113 B, and 6,677 / 1,267 B for baseline / overlap respectively. CR06 is therefore a connection-reuse optimization rather than a byte-compression claim.
+
+The live wire harness now fails if any non-empty pull opens more than one source TCP connection. Fully synchronized second pulls still open zero remote connections and transfer zero bytes.
+
 ### 7.1) `cluster.replication_stats` RPC (T167)
 
 The runtime counters behind these metrics are exposed via the
@@ -258,4 +277,4 @@ replica sides see the local CAS cost model in real time.
 - CR01: ValueID existence Bloom summaries
 - CR02: object fetch protocol + batching (implemented via `objects.fetch` + `objects.pull`)
 - CR03: replication metrics (saved bytes, hit rate)
-- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)\n- CR05: compact replication fetch representation (implemented): `objects.pull` requests `transfer_only: true`; legacy direct `objects.fetch` remains unchanged by default; CI preserves pre-CR05 and post-CR05 HTTP-wire snapshots.
+- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)\n- CR05: compact replication fetch representation (implemented): `objects.pull` requests `transfer_only: true`; legacy direct `objects.fetch` remains unchanged by default; CI preserves pre-CR05 and post-CR05 HTTP-wire snapshots.\n- CR06: persistent pull HTTP client (implemented): one `reqwest::Client` per `objects.pull`, with CI requiring one source TCP connection for every non-empty multi-batch pull.
