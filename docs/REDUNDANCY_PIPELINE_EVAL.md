@@ -194,3 +194,17 @@ The original wire report is retained as `eval/reports/cas_http_wire_pre_cr05.{js
 The CAS savings signal itself is preserved: 25.1% and 60.0% overlap savings remain essentially identical to the ValueStore-byte savings. At the tiny four-object residual transfer, HTTP savings are 81.0% versus 86.7% object-byte savings because fixed request overhead becomes dominant.
 
 The compatibility probe confirms that legacy fetch fields remain present by default, compact mode contains only `id + entry_b64`, and the canonical `entry_b64` payload is identical in both modes.
+
+#### CR06 connection reuse
+
+After CR05 removed redundant payload bytes, the next measurable overhead was connection churn. Before CR06, `fetch_remote_object_batch` constructed a fresh `reqwest::Client` for every batch, so the transparent proxy observed one TCP connection per batch.
+
+CR06 moves client construction to the lifetime of one `objects.pull`. The byte counts remain unchanged, while the connection count becomes one for every non-empty pull:
+
+| Scenario | Baseline batches / connections before | Baseline connections after | CAS batches / connections before | CAS connections after |
+|---|---:|---:|---:|---:|
+| low redundancy / high churn | 8 / 8 | **1** | 6 / 6 | **1** |
+| balanced | 5 / 5 | **1** | 2 / 2 | **1** |
+| high redundancy / low churn | 1 / 1 | **1** | 1 / 1 | **1** |
+
+The pre-CR06 report is retained as `eval/reports/cas_http_wire_pre_cr06.{json,md}`. The current report includes connection counts and is CI-diffed. No latency or throughput improvement is claimed from the loopback test; the verified claim is deterministic connection reuse with unchanged transfer correctness and bytes.
