@@ -38,6 +38,8 @@ That model is now paired with a **live-engine validation** that reads runtime st
 
 CAS transfer is also validated **across two independent live SkeinDB processes**: the destination is pre-seeded with a controlled subset of real ValueIDs, then pulls the missing objects from the source through the production `objects.pull -> objects.fetch` HTTP path. The checked-in two-node evidence is [eval/reports/cas_two_node_ci.md](eval/reports/cas_two_node_ci.md), including an idempotence check that a second pull performs zero remote fetches.
 
+The same path is now measured at the **HTTP-over-TCP byte level** through a transparent proxy. Against zero-overlap baselines, CAS reduces measured HTTP payload bytes by **25.1%**, **60.0%**, and **84.5%** across the three standard scenarios; a repeated fully-synchronized pull transfers **0 bytes**. See [eval/reports/cas_http_wire_ci.md](eval/reports/cas_http_wire_ci.md).
+
 SkeinDB is also deliberately usable as software, not only as a research prototype. One executable can expose MySQL, PostgreSQL v3, SkeinQL over HTTP/JSON-RPC, optional QUIC, and the embedded SkeinAdmin console.
 
 ## Project identity
