@@ -302,6 +302,11 @@ jobs:
             --json-out target/redundancy-runtime/cas-batch-sweep.json \
             --markdown-out target/redundancy-runtime/cas-batch-sweep.md
 
+      - name: Verify CAS batch-sweep snapshots
+        run: |
+          diff -u eval/reports/cas_batch_sweep_ci.md target/redundancy-runtime/cas-batch-sweep.md
+          diff -u eval/reports/cas_batch_sweep_ci.json target/redundancy-runtime/cas-batch-sweep.json
+
       - name: Upload live redundancy evidence
         if: always()
         uses: actions/upload-artifact@v7
