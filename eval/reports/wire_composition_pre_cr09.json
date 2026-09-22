@@ -1,0 +1,171 @@
+{
+  "batch_size": 64,
+  "claim_boundary": [
+    "Exact plain-HTTP TCP payload bytes are captured and parsed.",
+    "Wire categories sum exactly to the proxy byte total.",
+    "Decoded transfer-entry and ValueStore object bytes are derived comparisons, not extra wire categories.",
+    "No latency or throughput conclusion is drawn."
+  ],
+  "format": "skein.cas_wire_composition.runtime.v1",
+  "kind": "captured_http_wire_composition",
+  "results": [
+    {
+      "batch_size": 64,
+      "breakdown": {
+        "derived": {
+          "base64_text_expansion_bytes": 5728,
+          "base64_text_expansion_ratio": 1.348758,
+          "decoded_transfer_entry_bytes": 16424,
+          "decoded_transfer_vs_value_store_ratio": 0.389093,
+          "entry_b64_character_bytes": 22152,
+          "value_store_object_bytes": 42211,
+          "wire_vs_value_store_ratio": 0.972495
+        },
+        "messages": 3,
+        "request": {
+          "http_headers_bytes": 357,
+          "ids_json_bytes": 6688,
+          "json_rpc_other_bytes": 324,
+          "total_bytes": 7369,
+          "transfer_framing_bytes": 0
+        },
+        "requested_ids": 191,
+        "response": {
+          "entry_b64_json_bytes": 22534,
+          "http_headers_bytes": 429,
+          "json_rpc_other_bytes": 4224,
+          "object_ids_json_bytes": 6494,
+          "total_bytes": 33681,
+          "transfer_framing_bytes": 0
+        },
+        "response_objects": 191,
+        "wire_categories": {
+          "request_http_headers": {
+            "bytes": 357,
+            "pct": 0.87
+          },
+          "request_ids_json": {
+            "bytes": 6688,
+            "pct": 16.292
+          },
+          "request_json_rpc_other": {
+            "bytes": 324,
+            "pct": 0.789
+          },
+          "request_transfer_framing": {
+            "bytes": 0,
+            "pct": 0.0
+          },
+          "response_entry_b64_json": {
+            "bytes": 22534,
+            "pct": 54.894
+          },
+          "response_http_headers": {
+            "bytes": 429,
+            "pct": 1.045
+          },
+          "response_json_rpc_other": {
+            "bytes": 4224,
+            "pct": 10.29
+          },
+          "response_object_ids_json": {
+            "bytes": 6494,
+            "pct": 15.82
+          },
+          "response_transfer_framing": {
+            "bytes": 0,
+            "pct": 0.0
+          }
+        },
+        "wire_total_bytes": 41050
+      },
+      "missing_value_ids": 191,
+      "preseeded_value_ids": 64,
+      "pull_batches": 3,
+      "rows": 300,
+      "scenario": "low_redundancy_high_churn",
+      "seed": 20260922,
+      "source_value_ids": 255
+    },
+    {
+      "batch_size": 64,
+      "breakdown": {
+        "derived": {
+          "base64_text_expansion_bytes": 1620,
+          "base64_text_expansion_ratio": 1.348837,
+          "decoded_transfer_entry_bytes": 4644,
+          "decoded_transfer_vs_value_store_ratio": 0.38914,
+          "entry_b64_character_bytes": 6264,
+          "value_store_object_bytes": 11934,
+          "wire_vs_value_store_ratio": 0.97813
+        },
+        "messages": 1,
+        "request": {
+          "http_headers_bytes": 119,
+          "ids_json_bytes": 1891,
+          "json_rpc_other_bytes": 108,
+          "total_bytes": 2118,
+          "transfer_framing_bytes": 0
+        },
+        "requested_ids": 54,
+        "response": {
+          "entry_b64_json_bytes": 6372,
+          "http_headers_bytes": 142,
+          "json_rpc_other_bytes": 1205,
+          "object_ids_json_bytes": 1836,
+          "total_bytes": 9555,
+          "transfer_framing_bytes": 0
+        },
+        "response_objects": 54,
+        "wire_categories": {
+          "request_http_headers": {
+            "bytes": 119,
+            "pct": 1.019
+          },
+          "request_ids_json": {
+            "bytes": 1891,
+            "pct": 16.2
+          },
+          "request_json_rpc_other": {
+            "bytes": 108,
+            "pct": 0.925
+          },
+          "request_transfer_framing": {
+            "bytes": 0,
+            "pct": 0.0
+          },
+          "response_entry_b64_json": {
+            "bytes": 6372,
+            "pct": 54.588
+          },
+          "response_http_headers": {
+            "bytes": 142,
+            "pct": 1.216
+          },
+          "response_json_rpc_other": {
+            "bytes": 1205,
+            "pct": 10.323
+          },
+          "response_object_ids_json": {
+            "bytes": 1836,
+            "pct": 15.729
+          },
+          "response_transfer_framing": {
+            "bytes": 0,
+            "pct": 0.0
+          }
+        },
+        "wire_total_bytes": 11673
+      },
+      "missing_value_ids": 54,
+      "preseeded_value_ids": 81,
+      "pull_batches": 1,
+      "rows": 300,
+      "scenario": "balanced",
+      "seed": 20261023,
+      "source_value_ids": 135
+    }
+  ],
+  "rows": 300,
+  "seed": 20260922
+}
