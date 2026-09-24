@@ -139,7 +139,7 @@
     <article class="doc-article">
       <h1 id="skeindb-on-disk-format-v03-v02-compatible">SkeinDB On-Disk Format v0.3 (v0.2 compatible)<a class="headerlink" href="#skeindb-on-disk-format-v03-v02-compatible" title="Permanent link">¶</a></h1>
 <p>Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-05-27</p>
+Last updated: 2026-09-24</p>
 <p>This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.</p>
 <p>Design goals:
@@ -171,8 +171,8 @@ All formats MUST be versioned. Any breaking change requires a format version bum
   advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
   tables/
-    <db>/<table>.json         (prototype row store, format v3)
-    <db>/<table>.rseg         (prototype row segment container, format v1)
+    <db>/<table>.json         (prototype row store, format v6)
+    <db>/<table>.rseg         (prototype row segment container, format v2)
     <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
   wal/
     <db>/wal-000001.log       (per-database row-redo WAL, core WAL framing)
@@ -654,12 +654,13 @@ embedded here; they live in the <code>ValueStore</code> and are referenced by <c
 - The catalog stores only typed metadata plus <code>value_id</code>; the Wasm bytes are
   stored separately in <code>.vseg</code> data managed by <code>ValueStore</code>.
 - Unknown <code>format_version</code> values are rejected by the current core loader.</p>
-<h3 id="118-tablesjson-format-v3">11.8 tables/<db>/<table>.json (format v3)<a class="headerlink" href="#118-tablesjson-format-v3" title="Permanent link">¶</a></h3>
+<h3 id="118-tablesjson-formats-v3-v6">11.8 tables/<db>/<table>.json (formats v3-v6)<a class="headerlink" href="#118-tablesjson-formats-v3-v6" title="Permanent link">¶</a></h3>
 <p>Prototype row persistence for <code>tables/&lt;db&gt;/&lt;table&gt;.json</code> now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;incarnation_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">    </span><span class="p">{</span>
 <span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
@@ -704,21 +705,22 @@ ValueID-backed JSON format to reduce duplicated literal payloads in row files.</
 - Unknown <code>format_version</code> values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (<code>Vec&lt;RowEntry&gt;</code>) remain readable.
 - v2 table-row payloads without <code>schema_version</code> remain readable and are normalized from <code>schema_versions.json</code> when loaded.</p>
-<h4 id="1181-encrypted-at-rest-cells-format_version-4">11.8.1 Encrypted-at-rest cells (<code>format_version: 4</code>)<a class="headerlink" href="#1181-encrypted-at-rest-cells-format_version-4" title="Permanent link">¶</a></h4>
+<h4 id="1181-encrypted-at-rest-cells-format_version-6-legacy-v2-v5-readable-when-safe">11.8.1 Encrypted-at-rest cells (<code>format_version: 6</code>; legacy v2-v5 readable when safe)<a class="headerlink" href="#1181-encrypted-at-rest-cells-format_version-6-legacy-v2-v5-readable-when-safe" title="Permanent link">¶</a></h4>
 <p>When a database has an active encryption profile (<code>ENC_RANDOM</code> or <code>ENC_MLE_DB</code>
 with a registered active key), the engine writes table-row files with
-<code>"format_version": 4</code> and replaces the value of each encryptable cell with a
+<code>"format_version": 6</code> and replaces the value of each encryptable cell with a
 self-describing <code>"$skein_enc"</code> envelope object instead of storing the plaintext
 literal inline:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;incarnation_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">    </span><span class="p">{</span>
 <span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">        </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">},</span>
 <span class="w">        </span><span class="nt">&quot;payload&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">          </span><span class="nt">&quot;$skein_enc&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">            </span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;payload&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;$skein_enc&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;$skein_row:42:payload&quot;</span><span class="p">,</span>
 <span class="w">            </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;str&quot;</span><span class="p">,</span>
 <span class="w">            </span><span class="nt">&quot;env_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;base64 EncryptionEnvelope.stored_bytes()&gt;&quot;</span>
 <span class="w">          </span><span class="p">}</span>
@@ -740,31 +742,46 @@ literal inline:</p>
   <code>EncryptionEnvelope</code> (mode tag, key id, salt/nonce, ciphertext). The plaintext
   is <code>serde_json::to_vec(&amp;Lit)</code> of the original cell, so the literal type is
   recovered exactly on decrypt.
+- The encryption AAD includes the database, table, logical column, and catalog
+  <code>incarnation_id</code>. The serialized <code>col</code> value carries the logical column and
+  incarnation context needed to reconstruct that AAD. Rewriting a snapshot's
+  cleartext incarnation header cannot make ciphertext from a dropped table
+  authenticate under a recreated table.
 - Under <code>ENC_MLE_DB</code>, equal plaintext within the same encryption context yields
   an identical envelope (deterministic), which preserves equality semantics;
   under <code>ENC_RANDOM</code> each cell uses a random nonce, so value-reference dedup
   (<code>"$skein_ref"</code>) is disabled while encryption is active.
-- Master keys are never persisted. If a <code>format_version: 4</code> file is loaded and no
+- Master keys are never persisted. If an encrypted file is loaded and no
   matching key is registered (or decryption fails), that table is marked
   <strong>locked</strong>: it loads with zero rows and any persist of the table is refused so
   the on-disk ciphertext is never overwritten or lost. Registering/activating the
   key transparently reloads, decrypts, and unlocks the table and rebuilds its
-  indexes.
-- v2/v3 row files (plaintext, optionally value-ref-backed) remain readable; v4 is
-  only emitted when encryption is active for the owning database.
+- indexes. An enabled profile with a missing active key also blocks writes to
+  empty or plaintext-only tables, so neither WAL nor snapshots silently fall back
+  to plaintext.
+- Plaintext/value-ref row files in v2-v5 remain readable. Legacy encrypted files
+  with <code>incarnation_id: 0</code> remain readable; encrypted files with a nonzero
+  incarnation that predate v6 cannot authenticate that lifetime and are kept
+  locked rather than risk replaying data across a dropped/recreated name. Back up
+  such a file before an explicit trusted migration. New snapshots use v6, whether
+  encryption is active or not.
+- <code>incarnation_id</code> binds the snapshot to its catalog table lifetime. A file whose
+  id differs from the current catalog entry is treated as stale and its rows are
+  not loaded into a dropped-and-recreated table.
 - Rotating the active key (<code>settings.encryption.rotate_key</code>) only flips the
   database's active key id; rows already written stay sealed under the previous
   key (still decryptable while it is registered). The
   <code>settings.encryption.reencrypt_table</code> RPC rewrites a table's backing file so
   every encrypted cell is re-sealed under the current active key, completing the
-  rotation. It does not change the on-disk format (still <code>format_version: 4</code>) and
+  rotation. It does not change the on-disk format (still <code>format_version: 6</code>) and
   is a no-op when the database has no active encryption mode/key.</p>
-<h3 id="119-tablesrseg-prototype-segment-container-v1">11.9 tables/<db>/<table>.rseg (prototype segment container v1)<a class="headerlink" href="#119-tablesrseg-prototype-segment-container-v1" title="Permanent link">¶</a></h3>
+<h3 id="119-tablesrseg-prototype-segment-container-v2">11.9 tables/<db>/<table>.rseg (prototype segment container v2)<a class="headerlink" href="#119-tablesrseg-prototype-segment-container-v2" title="Permanent link">¶</a></h3>
 <p>SkeinDB can also persist table rows in a compact framed container with extension <code>.rseg</code>.</p>
 <p>Header:
 - <code>magic[8]</code>: <code>SKNSEGR1</code>
-- <code>segment_format_version</code> (<code>u32 LE</code>): currently <code>1</code>
-- <code>table_format_version</code> (<code>u32 LE</code>): currently <code>3</code> (same row payload schema as <code>.json</code>)
+- <code>segment_format_version</code> (<code>u32 LE</code>): currently <code>2</code> (<code>1</code> remains readable)
+- <code>table_format_version</code> (<code>u32 LE</code>): currently <code>6</code> (same row payload schema as <code>.json</code>)
+- <code>incarnation_id</code> (<code>u64 LE</code>): catalog table lifetime that owns the rows
 - <code>row_count</code> (<code>u64 LE</code>)</p>
 <p>Body:
 - Repeated <code>row_count</code> times:
@@ -777,6 +794,8 @@ literal inline:</p>
 - default mode (<code>serve</code> without <code>--storage-mode</code>): <code>segment</code>, so new deployments write/read <code>.rseg</code> and fall back to <code>.json</code>.</p>
 <p>Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
+- Legacy v1 segment headers have no incarnation field and decode as incarnation 0.
+- A segment whose incarnation does not match the catalog is ignored as stale.
 - v2 row payloads remain readable; missing <code>schema_version</code> fields are normalized from the per-table schema-version map on load.
 - If both files are missing or unreadable, the table loads as empty.</p>
 <h3 id="1110-tablessidxjson-prototype-secondary-index-cache-v1">11.10 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)<a class="headerlink" href="#1110-tablessidxjson-prototype-secondary-index-cache-v1" title="Permanent link">¶</a></h3>
@@ -807,47 +826,75 @@ literal inline:</p>
 - Missing files or unknown <code>format_version</code> values are ignored and fall back to rebuilding from row data.</p>
 <h3 id="1111-row-redo-wal-waldbwal-000001log">11.11 Row-redo WAL (<code>wal/&lt;db&gt;/wal-000001.log</code>)<a class="headerlink" href="#1111-row-redo-wal-waldbwal-000001log" title="Permanent link">¶</a></h3>
 <p>A <strong>per-database</strong> engine-level write-ahead log at <code>&lt;data_dir&gt;/wal/&lt;db&gt;/wal-000001.log</code>
-provides crash recovery for committed table data — each database has its own WAL, opened
-lazily on that database's first mutation. It uses the core WAL file framing from §9 (64-byte
-file header + length-prefixed records, grouped into <code>begin</code> / <code>mutation</code> / <code>commit</code>
-transactions), one transaction per committed DML statement. A single DML statement only ever
-touches one database, so a WAL transaction never spans databases; partitioning the log per
-database keeps one database's append + group-commit fsync independent of another's (the
-durability-side prerequisite for per-database write-lock sharding — see PERFORMANCE.md §4b).</p>
-<p>A <strong>legacy single global WAL</strong> at <code>&lt;data_dir&gt;/wal-000001.log</code>, written by a version predating
-the per-database split, is drained onto the snapshots and removed on the first <code>Engine::open</code>
-after upgrade — an automatic, one-time migration to the per-database layout.</p>
-<p>Each <code>mutation</code> record's payload is a JSON-encoded <strong>row redo record</strong> — the full final
-state of one changed row:</p>
+provides recovery for committed row mutations. Each database has its own WAL, opened lazily on
+its first mutation. The file uses the core WAL framing from §9 (64-byte file header and
+length-prefixed records grouped into <code>begin</code> / <code>mutation</code> / <code>commit</code> transactions), with one
+transaction per committed DML statement. A single DML statement touches one database, so a
+transaction never spans databases.</p>
+<p>A <strong>legacy single global WAL</strong> at <code>&lt;data_dir&gt;/wal-000001.log</code>, written before the per-database
+split, is replayed and removed on the first <code>Engine::open</code> after upgrade.</p>
+<p>Database and table names used as path components must be a single safe name. Empty names,
+<code>.</code> / <code>..</code>, path separators, drive/stream delimiters, and control characters are rejected by
+the engine API. Catalog entries with unsafe names are not loaded as table paths.</p>
+<p>New row redo payloads use version 3. A plain (unencrypted) payload has this shape:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;items&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}],</span>
-<span class="w">  </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
-<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;commit_ts_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1718900000000</span>
+<span class="w">  </span><span class="nt">&quot;incarnation_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;payload&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;U64&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}}],</span>
+<span class="w">    </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;U64&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;commit_ts_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1718900000000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;auto_inc_next&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
+<p>When row encryption is active, <code>payload</code> is a <code>"$skein_enc"</code> envelope over the complete row
+redo payload, including string primary-key values. The database/table identifiers and table
+incarnation remain visible to route recovery. The incarnation is also included in the AEAD
+context, so changing it in the checksummed but unkeyed WAL header cannot authorize replay into
+a later table lifetime. Plaintext version-2 records remain readable, as do encrypted version-2
+records for incarnation zero. An encrypted version-2 record routed to a nonzero table
+incarnation cannot authenticate that lifetime, so the WAL is retained and writes to that
+table are blocked until the log is resolved. The reader also accepts unversioned version-1
+records, whose row and key values are plaintext. The catalog has an optional global
+<code>next_table_incarnation</code> counter and per-table <code>incarnation_id</code>; old catalogs deserialize with
+zero values, and newly created tables receive fresh non-zero ids.</p>
 <p>Semantics:</p>
 <ul>
-<li><strong>Ordering.</strong> On every committed <code>data_insert</code> / <code>data_update</code> / <code>data_delete</code>, the
-  affected rows' redo records are appended and <strong>fsynced before</strong> the table snapshot
-  (<code>.rseg</code>/<code>.json</code>) is written. A crash at any point therefore leaves a state the next
-  open can reconstruct.</li>
-<li><strong>Replay.</strong> On <code>Engine::open</code>, after snapshots are loaded, every database's committed
-  records (plus any legacy global WAL) are replayed. Redo is <strong>idempotent</strong>: a record is
-  applied only when its <code>version</code> exceeds the row already present (by primary key), so
-  records the snapshot already reflects are skipped and a mutation lost between its WAL
-  commit and the snapshot write is restored. Deletes replay as tombstones (<code>deleted: true</code>).</li>
-<li><strong>Truncation.</strong> After a successful replay — and at every checkpoint, once all table
-  snapshots are durable — the WALs are deleted and reopened lazily on the next mutation, so
-  each only ever holds mutations since the last checkpoint.</li>
+<li><strong>Ordering and durability.</strong> DML redo records are appended before deferred table snapshot
+  persistence. Multi-row INSERT/UPDATE/DELETE validate as one statement and roll back touched
+  rows and index deltas if validation or WAL append fails. Dirty-table checkpoints persist all
+  row snapshots and the catalog successfully before deleting the WAL; if either checkpoint
+  fails, the WAL and dirty markers remain for retry or recovery. <code>SKEINDB_WAL_SYNC_BATCH=1</code>
+  (the default) fsyncs every commit. A larger batch
+  improves throughput but can lose up to <code>N-1</code> recent commits per database on power loss; it
+  does not change the committed-prefix recovery rule. A failed multi-row insert does not
+  publish earlier rows or append its redo records.</li>
+<li><strong>Uncertain fsync.</strong> If a complete commit frame has been appended but WAL fsync fails,
+  the in-memory change is retained and further writes are blocked. Restart recovery decides
+  whether that committed frame reached stable storage; an ambiguous write is never silently
+  rolled back in memory and retried with the same row version.</li>
+<li><strong>Replay.</strong> On <code>Engine::open</code>, after snapshots are loaded, committed records are replayed.
+  Redo is idempotent: a record applies only when its version exceeds the row already present
+  for that primary key. Deletes replay as tombstones. Records for a different table
+  incarnation are obsolete, so dropping and recreating the same name cannot resurrect the old
+  rows. Replay also restores row-version and auto-increment catalog state before the WAL is
+  truncated. Malformed routing metadata keeps the WAL for repair instead of being discarded as
+  an obsolete record.</li>
+<li><strong>Locked encrypted data.</strong> If the required key is absent, the WAL stays on disk, that table
+  is blocked from writes, and replay retries after key registration. Recovery truncates the
+  WAL only after every applicable record is durable or obsolete.</li>
+<li><strong>Truncation.</strong> At a successful replay or checkpoint, snapshots supersede the WAL records;
+  the log files are deleted and reopened lazily on the next mutation.</li>
 </ul>
-<p>No existing on-disk record format changes; the record layout is identical to the previous
-single-WAL version — only the file's location moved under <code>wal/&lt;db&gt;/</code>.</p>
+<p>The core WAL file framing did not change. New row payloads use version 3; version 2, unversioned
+version 1, and the legacy single-WAL location remain readable.</p>
 <hr />
 <h1 id="appendix-a-v02v03-extensions">Appendix A) v0.2/v0.3 extensions<a class="headerlink" href="#appendix-a-v02v03-extensions" title="Permanent link">¶</a></h1>
 <p>This appendix specifies optional extensions that can be implemented without invalidating v0.1 data.
@@ -1003,8 +1050,8 @@ The FileHeader format_ver remains 1; extensions use new record types and/or high
 <li><a href="#115-schema_changesjson">11.5 schema_changes.json</a></li>
 <li><a href="#116-schema_flagsjson">11.6 schema_flags.json</a></li>
 <li><a href="#117-wasm_catalogjson">11.7 wasm_catalog.json</a></li>
-<li><a href="#118-tablesjson-format-v3">11.8 tables//.json (format v3)</a></li>
-<li><a href="#119-tablesrseg-prototype-segment-container-v1">11.9 tables//.rseg (prototype segment container v1)</a></li>
+<li><a href="#118-tablesjson-formats-v3-v6">11.8 tables//.json (formats v3-v6)</a></li>
+<li><a href="#119-tablesrseg-prototype-segment-container-v2">11.9 tables//.rseg (prototype segment container v2)</a></li>
 <li><a href="#1110-tablessidxjson-prototype-secondary-index-cache-v1">11.10 tables//.sidx.json (prototype secondary index cache v1)</a></li>
 <li><a href="#1111-row-redo-wal-waldbwal-000001log">11.11 Row-redo WAL (wal/&lt;db&gt;/wal-000001.log)</a></li>
 </ul>

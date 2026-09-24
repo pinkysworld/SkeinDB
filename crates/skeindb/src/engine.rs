@@ -128,6 +128,10 @@ use skeindb_skeinql::types::{
 pub struct Catalog {
     #[serde(default)]
     pub databases: HashMap<String, Database>,
+    /// Monotonic identity assigned to each table incarnation. This lets WAL replay tell a
+    /// dropped table from a later table created with the same name.
+    #[serde(default)]
+    next_table_incarnation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -142,6 +146,11 @@ pub struct TableSchema {
 
     #[serde(default)]
     pub primary_key: Vec<String>,
+
+    /// Durable identity for this lifetime of the table name. Older catalogs deserialize as
+    /// zero; new tables always receive a non-zero id before any row WAL record is written.
+    #[serde(default)]
+    pub incarnation_id: u64,
 
     #[serde(default)]
     pub compat_mysql: Option<serde_json::Value>,
@@ -184,9 +193,10 @@ pub struct RowEntry {
     pub commit_ts_ms: u64,
 }
 
-// Bumped to 4 for T193: row segments/JSON may carry encrypted-at-rest cell payloads
-// keyed by `TABLE_ROW_ENC_KEY`. Version 2/3 files (plaintext only) remain readable.
-const TABLE_ROWS_FORMAT_VERSION: u32 = 4;
+// Version 5 tags row snapshots with an incarnation id. Version 6 additionally binds that id
+// into encrypted cell AAD; versions 2-5 remain readable only where legacy encryption cannot
+// cross an incarnation boundary.
+const TABLE_ROWS_FORMAT_VERSION: u32 = 6;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 /// Marker key for an encrypted-at-rest row cell payload (T193). The payload object carries
 /// the originating column id, the value kind label, and a base64 of the self-describing
@@ -197,13 +207,16 @@ const TABLE_ROW_ENC_KEY: &str = "$skein_enc";
 /// plaintext serialization (serde_json of `Lit`) changes in an incompatible way.
 const ENCRYPTION_CELL_CODEC_VERSION: u32 = 1;
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
-const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
+const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 2;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
 const ENCRYPTION_STATE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableRowsDisk {
     format_version: u32,
+    /// Catalog incarnation that owns these rows. Old JSON and segment files decode as 0.
+    #[serde(default)]
+    incarnation_id: u64,
     rows: Vec<RowEntryDisk>,
 }
 
@@ -256,13 +269,13 @@ struct EncryptionStateDisk {
     next_audit_id: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct VectorIndex {
     built_version: u64,
     buckets: HashMap<u64, Vec<usize>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SecondaryIndex {
     built_version: u64,
     columns: Vec<String>,
@@ -305,6 +318,117 @@ impl TableData {
     /// access) must gate on this and let streaming tables fall through to the read seam.
     fn is_resident(&self) -> bool {
         matches!(self.residency, TableResidency::Resident)
+    }
+}
+
+/// Per-row undo log for statement-level atomicity. It scales with changed rows rather than
+/// cloning a whole resident table for every write.
+enum RowMutationUndo {
+    Inserted {
+        idx: usize,
+        pk_key: String,
+        previous_pk_idx: Option<usize>,
+        row: RowObject,
+    },
+    Updated {
+        idx: usize,
+        before: RowEntry,
+        old_pk_key: String,
+        new_pk_key: String,
+        previous_new_pk_idx: Option<usize>,
+        pk_changed: bool,
+        old_secondary_removed: bool,
+        new_secondary_added: bool,
+    },
+    Deleted {
+        idx: usize,
+        before: RowEntry,
+        secondary_removed: bool,
+    },
+}
+
+fn rollback_row_mutations(
+    tdata: &mut TableData,
+    undo: &mut Vec<RowMutationUndo>,
+) -> anyhow::Result<()> {
+    let mut first_error = None;
+    for action in undo.drain(..).rev() {
+        match action {
+            RowMutationUndo::Inserted {
+                idx,
+                pk_key,
+                previous_pk_idx,
+                row,
+            } => {
+                if let Err(err) = secondary_index_remove_row(tdata, idx, &row) {
+                    first_error.get_or_insert(err);
+                }
+                if tdata.pk_index.get(&pk_key) == Some(&idx) {
+                    if let Some(previous_idx) = previous_pk_idx {
+                        tdata.pk_index.insert(pk_key, previous_idx);
+                    } else {
+                        tdata.pk_index.remove(&pk_key);
+                    }
+                }
+                tdata.rows.truncate(idx);
+            }
+            RowMutationUndo::Updated {
+                idx,
+                before,
+                old_pk_key,
+                new_pk_key,
+                previous_new_pk_idx,
+                pk_changed,
+                old_secondary_removed,
+                new_secondary_added,
+            } => {
+                let after_row = tdata.rows.get(idx).map(|entry| entry.row.clone());
+                if new_secondary_added {
+                    if let Some(after_row) = after_row.as_ref() {
+                        if let Err(err) = secondary_index_remove_row(tdata, idx, after_row) {
+                            first_error.get_or_insert(err);
+                        }
+                    }
+                }
+                if let Some(entry) = tdata.rows.get_mut(idx) {
+                    *entry = before.clone();
+                }
+                if old_secondary_removed {
+                    if let Err(err) = secondary_index_add_row(tdata, idx, &before.row) {
+                        first_error.get_or_insert(err);
+                    }
+                }
+                if pk_changed {
+                    if tdata.pk_index.get(&new_pk_key) == Some(&idx) {
+                        if let Some(previous_idx) = previous_new_pk_idx {
+                            tdata.pk_index.insert(new_pk_key, previous_idx);
+                        } else {
+                            tdata.pk_index.remove(&new_pk_key);
+                        }
+                    }
+                    tdata.pk_index.insert(old_pk_key, idx);
+                }
+            }
+            RowMutationUndo::Deleted {
+                idx,
+                before,
+                secondary_removed,
+            } => {
+                if let Some(entry) = tdata.rows.get_mut(idx) {
+                    *entry = before.clone();
+                }
+                if secondary_removed {
+                    if let Err(err) = secondary_index_add_row(tdata, idx, &before.row) {
+                        first_error.get_or_insert(err);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(err) = first_error {
+        Err(err)
+    } else {
+        Ok(())
     }
 }
 
@@ -442,6 +566,18 @@ pub struct Engine {
     /// Monotonic transaction id stamped on WAL records. Shared across databases; each
     /// per-database WAL only ever sees a subset and pairs begin/commit by id within its file.
     wal_next_txn: u64,
+    /// Tables whose retained WAL uses an encrypted row format that did not authenticate
+    /// the table incarnation. Recovery leaves those logs intact and blocks writes until the
+    /// operator resolves them, so a forged routing id cannot authorize cross-incarnation data.
+    wal_write_blocked_tables: HashMap<TableKey, String>,
+    /// A WAL commit frame was appended but its requested fsync failed. Its durable outcome is
+    /// uncertain, so preserve memory and refuse further writes until restart/recovery.
+    wal_write_blocked_reason: Option<String>,
+    #[cfg(test)]
+    wal_sync_fail_next_for_test: bool,
+    /// True while startup replay has committed records that cannot yet be made durable
+    /// (usually because an encrypted table's key is unavailable).
+    wal_recovery_incomplete: bool,
     /// Group-commit batch size: fsync a database's WAL once every this many committed
     /// transactions (read once from `SKEINDB_WAL_SYNC_BATCH` at open; default 1 = fsync every
     /// commit = strongest durability). A larger value amortizes the fsync — fewer
@@ -2031,6 +2167,28 @@ fn cdc_subscription_matches_columns(
         })
 }
 
+/// Database and table names are also used as storage path components. Keep the existing
+/// human-readable on-disk layout, but reject values that could escape or alias that layout.
+fn validate_storage_name(name: &str, kind: &str) -> anyhow::Result<()> {
+    use std::path::Component;
+
+    let mut components = Path::new(name).components();
+    let safe_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(char::is_control)
+        || !safe_component
+    {
+        anyhow::bail!("invalid_request: {kind} name must be a single safe storage path component");
+    }
+    Ok(())
+}
+
 impl Engine {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let storage_mode = TableStorageMode::from_env();
@@ -2110,6 +2268,11 @@ impl Engine {
             corrupt_tables: HashSet::new(),
             wals: HashMap::new(),
             wal_next_txn: 0,
+            wal_write_blocked_tables: HashMap::new(),
+            wal_write_blocked_reason: None,
+            #[cfg(test)]
+            wal_sync_fail_next_for_test: false,
+            wal_recovery_incomplete: false,
             wal_sync_batch: std::env::var("SKEINDB_WAL_SYNC_BATCH")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -2435,19 +2598,34 @@ impl Engine {
     }
 
     pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
+        validate_storage_name(db, "database")?;
         self.catalog.databases.entry(db.to_string()).or_default();
         self.persist_catalog()
     }
 
     pub fn drop_database(&mut self, db: &str, if_exists: bool) -> anyhow::Result<()> {
+        validate_storage_name(db, "database")?;
         let Some(database) = self.catalog.databases.get(db) else {
             if if_exists {
                 return Ok(());
             }
             anyhow::bail!("database not found: {db}");
         };
+        let database_before_drop = database.clone();
         let table_names: Vec<String> = database.tables.keys().cloned().collect();
+        for table in &table_names {
+            validate_storage_name(table, "table")?;
+        }
+        self.flush_dirty_tables()?;
         self.catalog.databases.remove(db);
+        // Persist the schema tombstone before removing row files. A crash after this write
+        // can leave an orphan file, but it cannot reload the dropped database.
+        if let Err(err) = self.persist_catalog() {
+            self.catalog
+                .databases
+                .insert(db.to_string(), database_before_drop);
+            return Err(err);
+        }
 
         for table in table_names {
             self.remove_table_state(db, &table)?;
@@ -2476,15 +2654,35 @@ impl Engine {
         if_not_exists: bool,
         compat_mysql: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
+        validate_storage_name(db, "database")?;
+        validate_storage_name(table, "table")?;
+        if self
+            .row_encryption_codec(db, table)
+            .requires_key_but_unavailable()
+        {
+            anyhow::bail!(
+                "encryption key required: database '{db}' has encryption enabled but its active key is unavailable"
+            );
+        }
         self.create_database(db)?;
-        let d = self.catalog.databases.get_mut(db).expect("db just ensured");
-
-        if d.tables.contains_key(table) {
+        if self
+            .catalog
+            .databases
+            .get(db)
+            .expect("db just ensured")
+            .tables
+            .contains_key(table)
+        {
             if if_not_exists {
                 return Ok(());
             }
             anyhow::bail!("table already exists: {db}.{table}");
         }
+
+        let incarnation_id = self.catalog.next_table_incarnation.max(1);
+        self.catalog.next_table_incarnation = incarnation_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("table incarnation id space exhausted"))?;
 
         let mut auto_inc_next = HashMap::new();
         for c in columns.iter() {
@@ -2493,16 +2691,22 @@ impl Engine {
             }
         }
 
-        d.tables.insert(
-            table.to_string(),
-            TableSchema {
-                columns,
-                primary_key,
-                compat_mysql,
-                table_version: 0,
-                auto_inc_next,
-            },
-        );
+        self.catalog
+            .databases
+            .get_mut(db)
+            .expect("db just ensured")
+            .tables
+            .insert(
+                table.to_string(),
+                TableSchema {
+                    columns,
+                    primary_key,
+                    incarnation_id,
+                    compat_mysql,
+                    table_version: 0,
+                    auto_inc_next,
+                },
+            );
 
         self.tables.insert(
             TableKey {
@@ -2524,21 +2728,42 @@ impl Engine {
     }
 
     pub fn drop_table(&mut self, db: &str, table: &str, if_exists: bool) -> anyhow::Result<()> {
-        let Some(database) = self.catalog.databases.get_mut(db) else {
+        validate_storage_name(db, "database")?;
+        validate_storage_name(table, "table")?;
+        let Some(database) = self.catalog.databases.get(db) else {
             if if_exists {
                 return Ok(());
             }
             anyhow::bail!("database not found: {db}");
         };
 
-        let removed = database.tables.remove(table).is_some();
-        if !removed {
+        if !database.tables.contains_key(table) {
             if if_exists {
                 return Ok(());
             }
             anyhow::bail!("table not found: {db}.{table}");
         }
 
+        // Checkpoint pending row images before changing the table incarnation. The new
+        // incarnation id also makes any retained/legacy WAL records inapplicable on reuse.
+        self.flush_dirty_tables()?;
+        let removed_schema = self
+            .catalog
+            .databases
+            .get_mut(db)
+            .expect("database checked above")
+            .tables
+            .remove(table)
+            .expect("table checked above");
+        if let Err(err) = self.persist_catalog() {
+            self.catalog
+                .databases
+                .get_mut(db)
+                .expect("database checked above")
+                .tables
+                .insert(table.to_string(), removed_schema);
+            return Err(err);
+        }
         self.remove_table_state(db, table)?;
         self.persist_after_schema_drop()?;
         self.cleanup_database_table_dir_if_empty(db);
@@ -2550,6 +2775,10 @@ impl Engine {
         source: &BaseTableRef,
         target: &BaseTableRef,
     ) -> anyhow::Result<()> {
+        validate_storage_name(&source.db, "database")?;
+        validate_storage_name(&source.table, "table")?;
+        validate_storage_name(&target.db, "database")?;
+        validate_storage_name(&target.table, "table")?;
         if source.db == target.db && source.table == target.table {
             return Ok(());
         }
@@ -2587,13 +2816,20 @@ impl Engine {
             db: source.db.clone(),
             table: source.table.clone(),
         };
+        self.ensure_table_writable(&source_key)?;
         let target_key = TableKey {
             db: target.db.clone(),
             table: target.table.clone(),
         };
+        self.ensure_table_writable(&target_key)?;
+        self.flush_dirty_tables()?;
         if !self.tables.contains_key(&source_key) {
             anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
         }
+        // A Streaming table still points at the source table's segment path. Materialize it
+        // before moving the in-memory state so persisting the target writes a new segment
+        // under the target name before source cleanup removes the old one.
+        self.materialize_streaming_table(&source_key)?;
 
         let Some(mut schema) = self
             .catalog
@@ -3768,6 +4004,13 @@ impl Engine {
             table: table.table.clone(),
         };
         let row_schema_version = self.schema_version_for(&table_key);
+        self.ensure_table_writable(&table_key)?;
+        self.materialize_streaming_table(&table_key)?;
+
+        // Keep only a row-level undo journal while validating and applying the batch. This
+        // preserves statement atomicity without copying the entire table for each insert.
+        let schema_before = self.get_schema(&table.db, &table.table)?.clone();
+        let mut undo = Vec::new();
 
         // Only advancing an auto-increment counter changes the *durable* catalog on an insert;
         // the per-insert table_version bump is an in-memory index-staleness marker that is
@@ -3775,75 +4018,116 @@ impl Engine {
         // counter actually moved — this removes an fsync from every non-auto-increment insert.
         let mut catalog_persist_needed = false;
 
-        {
+        let validation = {
             let (schema, tdata) = self.get_table_mut(table)?;
-            rebuild_secondary_indexes_if_stale(schema, tdata)?;
+            let result = (|| -> anyhow::Result<()> {
+                rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
-            for mut row in rows {
-                // Fill missing cols and apply auto-increment.
-                apply_defaults_and_autoinc(schema, &mut row, &mut last_insert_id)?;
-                if let Some(col) = not_null_violation(schema, &row) {
-                    anyhow::bail!("invalid_request: null value for non-null column {col}");
-                }
-                if let Some(index_name) = mysql_compat_unique_conflict(schema, tdata, &row, None)? {
-                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
-                }
-
-                // Build PK
-                let pk = extract_pk(schema, &row)?;
-                let pk_key_s = pk_key(&pk);
-                let pk_conflict = tdata
-                    .pk_index
-                    .get(&pk_key_s)
-                    .and_then(|idx| tdata.rows.get(*idx))
-                    .map(|entry| !entry.deleted)
-                    .unwrap_or(false);
-                if pk_conflict {
-                    anyhow::bail!(
-                        "conflict: {}",
-                        duplicate_key_message(primary_key_index_name(schema))
-                    );
-                }
-
-                let version = next_row_version(schema);
-                let idx = tdata.rows.len();
-                let entry = RowEntry {
-                    row: row.clone(),
-                    version,
-                    schema_version: row_schema_version,
-                    deleted: false,
-                    commit_ts_ms: now_millis(),
-                };
-                wal_records.push(WalRowRecord::from_entry(
-                    &table.db,
-                    &table.table,
-                    pk.clone(),
-                    &entry,
-                ));
-                tdata.rows.push(entry);
-                tdata.pk_index.insert(pk_key_s, idx);
-                secondary_index_add_row(tdata, idx, &row)?;
-
-                change_rows.push((pk, row.clone()));
-                collect_value_store_items(&row, &mut intern_items);
-                snapshot_rows.push(row.clone());
-                affected += 1;
-
-                if let Some(cols) = returning.as_ref() {
-                    let mut out = serde_json::Map::new();
-                    for c in cols {
-                        if let Some(v) = row.get(c) {
-                            out.insert(c.clone(), serde_json::to_value(v)?);
-                        }
+                for mut row in rows {
+                    // Fill missing cols and apply auto-increment.
+                    apply_defaults_and_autoinc(schema, &mut row, &mut last_insert_id)?;
+                    if let Some(col) = not_null_violation(schema, &row) {
+                        anyhow::bail!("invalid_request: null value for non-null column {col}");
                     }
-                    returning_rows.push(serde_json::Value::Object(out));
+                    if let Some(index_name) =
+                        mysql_compat_unique_conflict(schema, tdata, &row, None)?
+                    {
+                        anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
+                    }
+
+                    let pk = extract_pk(schema, &row)?;
+                    let pk_key_s = pk_key(&pk);
+                    let pk_conflict = tdata
+                        .pk_index
+                        .get(&pk_key_s)
+                        .and_then(|idx| tdata.rows.get(*idx))
+                        .map(|entry| !entry.deleted)
+                        .unwrap_or(false);
+                    if pk_conflict {
+                        anyhow::bail!(
+                            "conflict: {}",
+                            duplicate_key_message(primary_key_index_name(schema))
+                        );
+                    }
+
+                    let version = next_row_version(schema);
+                    let idx = tdata.rows.len();
+                    let entry = RowEntry {
+                        row: row.clone(),
+                        version,
+                        schema_version: row_schema_version,
+                        deleted: false,
+                        commit_ts_ms: now_millis(),
+                    };
+                    wal_records.push(WalRowRecord::from_entry(
+                        &table.db,
+                        &table.table,
+                        schema.incarnation_id,
+                        pk.clone(),
+                        &entry,
+                    ));
+                    tdata.rows.push(entry);
+                    let previous_pk_idx = tdata.pk_index.insert(pk_key_s.clone(), idx);
+                    undo.push(RowMutationUndo::Inserted {
+                        idx,
+                        pk_key: pk_key_s,
+                        previous_pk_idx,
+                        row: row.clone(),
+                    });
+                    secondary_index_add_row(tdata, idx, &row)?;
+
+                    change_rows.push((pk, row.clone()));
+                    collect_value_store_items(&row, &mut intern_items);
+                    snapshot_rows.push(row.clone());
+                    affected += 1;
+
+                    if let Some(cols) = returning.as_ref() {
+                        let mut out = serde_json::Map::new();
+                        for c in cols {
+                            if let Some(v) = row.get(c) {
+                                out.insert(c.clone(), serde_json::to_value(v)?);
+                            }
+                        }
+                        returning_rows.push(serde_json::Value::Object(out));
+                    }
+                }
+
+                bump_table_version(schema);
+                set_secondary_indexes_built_version(tdata, schema.table_version)?;
+                catalog_persist_needed |=
+                    affected > 0 && schema.columns.iter().any(|c| c.auto_increment);
+                if catalog_persist_needed {
+                    for record in &mut wal_records {
+                        record.auto_inc_next = Some(schema.auto_inc_next.clone());
+                    }
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = rollback_row_mutations(tdata, &mut undo);
+                schema.clone_from(&schema_before);
+            }
+            result
+        };
+        validation?;
+
+        // Failures before the commit frame roll back the touched rows and index deltas. If
+        // fsync fails after that frame was appended, preserve the mutation and block writes:
+        // recovery must decide whether the uncertain commit reached stable storage.
+        if let Err(err) = self.wal_log_rows(&wal_records) {
+            if self.wal_write_blocked_reason.is_some() {
+                return Err(err.context(
+                    "WAL commit outcome is uncertain; in-memory rows are retained and writes are blocked until restart",
+                ));
+            }
+            if let Ok((schema, tdata)) = self.get_table_mut(table) {
+                let rollback = rollback_row_mutations(tdata, &mut undo);
+                schema.clone_from(&schema_before);
+                if let Err(rollback_err) = rollback {
+                    return Err(err.context(format!("row rollback also failed: {rollback_err}")));
                 }
             }
-
-            bump_table_version(schema);
-            set_secondary_indexes_built_version(tdata, schema.table_version)?;
-            catalog_persist_needed |=
-                affected > 0 && schema.columns.iter().any(|c| c.auto_increment);
+            return Err(err);
         }
 
         if !intern_items.is_empty() {
@@ -3871,12 +4155,11 @@ impl Engine {
             );
         }
         if catalog_persist_needed {
-            self.persist_catalog()?;
+            // Row redo carries the resulting auto-increment state; recovery repairs the
+            // catalog if this best-effort checkpoint fails after the WAL commit.
+            let _ = self.persist_catalog();
         }
-        // Durably log the row redo records before writing the snapshot, so a crash
-        // between here and the snapshot write is recoverable on the next open.
-        self.wal_log_rows(&wal_records)?;
-        self.persist_table_deferred(&table.db, &table.table)?;
+        let _ = self.persist_table_deferred(&table.db, &table.table);
 
         Ok(WriteResult {
             affected,
@@ -3924,113 +4207,183 @@ impl Engine {
             db: table.db.clone(),
             table: table.table.clone(),
         };
+        self.ensure_table_writable(&key)?;
+        self.materialize_streaming_table(&key)?;
         let row_schema_version = self.schema_version_for(&key);
         let predicate_plan = {
             let (schema, _) = self.get_table(table)?;
             compile_interned_predicate_for_table(self, &key, schema, predicate, args)
         };
-
-        {
+        let schema_before = self.get_schema(&table.db, &table.table)?.clone();
+        let mut undo = Vec::new();
+        let mutation = {
             let (schema, tdata) = self.get_table_mut(table)?;
-            rebuild_secondary_indexes_if_stale(schema, tdata)?;
+            let result = (|| -> anyhow::Result<()> {
+                rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
-            for idx in 0..tdata.rows.len() {
-                if tdata.rows[idx].deleted {
-                    continue;
-                }
-                let current_row = tdata.rows[idx].row.clone();
-                let matches = if let Some(plan) = predicate_plan.as_ref() {
-                    compiled_interned_predicate_matches_row(plan, &current_row)
-                        .unwrap_or(eval_predicate(predicate, &current_row, None, args)?)
-                } else {
-                    eval_predicate(predicate, &current_row, None, args)?
-                };
-                if !matches {
-                    continue;
-                }
+                for idx in 0..tdata.rows.len() {
+                    if tdata.rows[idx].deleted {
+                        continue;
+                    }
+                    let current_entry = tdata.rows[idx].clone();
+                    let current_row = current_entry.row.clone();
+                    let matches = match predicate_plan.as_ref() {
+                        Some(plan) => {
+                            match compiled_interned_predicate_matches_row(plan, &current_row) {
+                                Some(matches) => matches,
+                                None => eval_predicate(predicate, &current_row, None, args)?,
+                            }
+                        }
+                        None => eval_predicate(predicate, &current_row, None, args)?,
+                    };
+                    if !matches {
+                        continue;
+                    }
 
-                if let Some(tag) = if_match {
-                    let current = row_etag(&tdata.rows[idx].row, tdata.rows[idx].version);
-                    if current != tag {
-                        anyhow::bail!("conflict");
+                    if let Some(tag) = if_match {
+                        let current = row_etag(&current_entry.row, current_entry.version);
+                        if current != tag {
+                            anyhow::bail!("conflict");
+                        }
+                    }
+
+                    let mut new_row = current_row.clone();
+                    for (k, v) in set.iter() {
+                        let lit = eval_expr(v, &current_row, None, args)?;
+                        new_row.insert(k.clone(), lit);
+                    }
+                    if let Some(col) = not_null_violation(schema, &new_row) {
+                        anyhow::bail!("invalid_request: null value for non-null column {col}");
+                    }
+                    let current_pk_key = pk_key(&extract_pk(schema, &current_row)?);
+                    if primary_key_conflict_key(schema, tdata, &new_row, Some(idx))?.is_some() {
+                        anyhow::bail!(
+                            "conflict: {}",
+                            duplicate_key_message(primary_key_index_name(schema))
+                        );
+                    }
+                    if let Some(index_name) =
+                        mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx))?
+                    {
+                        anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
+                    }
+                    let new_pk_key = pk_key(&extract_pk(schema, &new_row)?);
+                    let pk_changed = current_pk_key != new_pk_key;
+                    undo.push(RowMutationUndo::Updated {
+                        idx,
+                        before: current_entry.clone(),
+                        old_pk_key: current_pk_key.clone(),
+                        new_pk_key: new_pk_key.clone(),
+                        previous_new_pk_idx: tdata.pk_index.get(&new_pk_key).copied(),
+                        pk_changed: false,
+                        old_secondary_removed: false,
+                        new_secondary_added: false,
+                    });
+                    secondary_index_remove_row(tdata, idx, &current_row)?;
+                    if let Some(RowMutationUndo::Updated {
+                        old_secondary_removed,
+                        ..
+                    }) = undo.last_mut()
+                    {
+                        *old_secondary_removed = true;
+                    }
+                    tdata.rows[idx].row = new_row;
+                    tdata.rows[idx].version = next_row_version(schema);
+                    tdata.rows[idx].schema_version = row_schema_version;
+                    tdata.rows[idx].commit_ts_ms = now_millis();
+                    secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
+                    if let Some(RowMutationUndo::Updated {
+                        new_secondary_added,
+                        ..
+                    }) = undo.last_mut()
+                    {
+                        *new_secondary_added = true;
+                    }
+                    if pk_changed {
+                        tdata.pk_index.remove(&current_pk_key);
+                        tdata.pk_index.insert(new_pk_key.clone(), idx);
+                        if let Some(RowMutationUndo::Updated { pk_changed, .. }) = undo.last_mut() {
+                            *pk_changed = true;
+                        }
+                    }
+                    affected += 1;
+
+                    let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
+                    if let Some(pk_vals) = pk.clone() {
+                        wal_records.push(WalRowRecord::from_entry(
+                            &table.db,
+                            &table.table,
+                            schema.incarnation_id,
+                            pk_vals,
+                            &tdata.rows[idx],
+                        ));
+                    }
+                    // If the update moved the primary key, also log a tombstone for the OLD
+                    // key so WAL replay removes the pre-update row instead of leaving a
+                    // phantom live row under the old key on recovery.
+                    if pk_changed {
+                        if let Ok(old_pk) = extract_pk(schema, &current_row) {
+                            wal_records.push(WalRowRecord {
+                                db: table.db.clone(),
+                                table: table.table.clone(),
+                                incarnation_id: schema.incarnation_id,
+                                pk: old_pk,
+                                row: current_row.clone(),
+                                version: tdata.rows[idx].version,
+                                schema_version: tdata.rows[idx].schema_version,
+                                deleted: true,
+                                commit_ts_ms: tdata.rows[idx].commit_ts_ms,
+                                auto_inc_next: None,
+                            });
+                        }
+                    }
+                    change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
+                    collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
+                    snapshot_rows.push(tdata.rows[idx].row.clone());
+
+                    if let Some(lim) = limit {
+                        if affected >= lim {
+                            break;
+                        }
                     }
                 }
 
-                let mut new_row = current_row.clone();
-                for (k, v) in set.iter() {
-                    let lit = eval_expr(v, &current_row, None, args)?;
-                    new_row.insert(k.clone(), lit);
+                if affected > 0 {
+                    bump_table_version(schema);
+                    set_secondary_indexes_built_version(tdata, schema.table_version)?;
                 }
-                if let Some(col) = not_null_violation(schema, &new_row) {
-                    anyhow::bail!("invalid_request: null value for non-null column {col}");
-                }
-                let current_pk_key = pk_key(&extract_pk(schema, &current_row)?);
-                if primary_key_conflict_key(schema, tdata, &new_row, Some(idx))?.is_some() {
-                    anyhow::bail!(
-                        "conflict: {}",
-                        duplicate_key_message(primary_key_index_name(schema))
-                    );
-                }
-                if let Some(index_name) =
-                    mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx))?
-                {
-                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
-                }
-                let new_pk_key = pk_key(&extract_pk(schema, &new_row)?);
-                secondary_index_remove_row(tdata, idx, &current_row)?;
-                tdata.rows[idx].row = new_row;
-                secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
-                let pk_changed = current_pk_key != new_pk_key;
-                if pk_changed {
-                    tdata.pk_index.remove(&current_pk_key);
-                    tdata.pk_index.insert(new_pk_key, idx);
-                }
-                tdata.rows[idx].version = next_row_version(schema);
-                tdata.rows[idx].schema_version = row_schema_version;
-                tdata.rows[idx].commit_ts_ms = now_millis();
-                affected += 1;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = rollback_row_mutations(tdata, &mut undo);
+                schema.clone_from(&schema_before);
+            }
+            result
+        };
+        mutation?;
 
-                let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
-                if let Some(pk_vals) = pk.clone() {
-                    wal_records.push(WalRowRecord::from_entry(
-                        &table.db,
-                        &table.table,
-                        pk_vals,
-                        &tdata.rows[idx],
+        if affected > 0 {
+            if let Err(err) = self.wal_log_rows(&wal_records) {
+                if self.wal_write_blocked_reason.is_some() {
+                    return Err(err.context(
+                        "WAL commit outcome is uncertain; in-memory rows are retained and writes are blocked until restart",
                     ));
                 }
-                // If the update moved the primary key, also log a tombstone for the OLD
-                // key so WAL replay removes the pre-update row instead of leaving a
-                // phantom live row under the old key on recovery.
-                if pk_changed {
-                    if let Ok(old_pk) = extract_pk(schema, &current_row) {
-                        wal_records.push(WalRowRecord {
-                            db: table.db.clone(),
-                            table: table.table.clone(),
-                            pk: old_pk,
-                            row: current_row.clone(),
-                            version: tdata.rows[idx].version,
-                            schema_version: tdata.rows[idx].schema_version,
-                            deleted: true,
-                            commit_ts_ms: tdata.rows[idx].commit_ts_ms,
-                        });
+                if let Ok((schema, tdata)) = self.get_table_mut(table) {
+                    let rollback = rollback_row_mutations(tdata, &mut undo);
+                    schema.clone_from(&schema_before);
+                    if let Err(rollback_err) = rollback {
+                        return Err(
+                            err.context(format!("row rollback also failed: {rollback_err}"))
+                        );
                     }
                 }
-                change_rows.push((pk, current_row, tdata.rows[idx].row.clone()));
-                collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
-                snapshot_rows.push(tdata.rows[idx].row.clone());
-
-                if let Some(lim) = limit {
-                    if affected >= lim {
-                        break;
-                    }
-                }
+                return Err(err);
             }
-
-            if affected > 0 {
-                bump_table_version(schema);
-                set_secondary_indexes_built_version(tdata, schema.table_version)?;
-            }
+            // The WAL records carry row/table versions, so recovery repairs catalog state if
+            // this post-commit optimization write cannot be completed.
+            let _ = self.persist_catalog();
+            let _ = self.persist_table_deferred(&table.db, &table.table);
         }
 
         if !intern_items.is_empty() {
@@ -4038,15 +4391,12 @@ impl Engine {
                 store_value_items(&mut store, intern_items);
             }
         }
-
         if self.apply_snapshot_upserts(table, &snapshot_rows) {
             self.persist_snapshots_best_effort();
         }
-
         if affected > 0 {
             self.invalidate_hnsw_indexes_for_table(table);
         }
-
         for (pk, before, after) in change_rows {
             self.emit_change(
                 &table.db,
@@ -4056,12 +4406,6 @@ impl Engine {
                 Some(before),
                 Some(after),
             );
-        }
-
-        if affected > 0 {
-            self.persist_catalog()?;
-            self.wal_log_rows(&wal_records)?;
-            self.persist_table_deferred(&table.db, &table.table)?;
         }
 
         Ok(WriteResult {
@@ -4087,77 +4431,121 @@ impl Engine {
             db: table.db.clone(),
             table: table.table.clone(),
         };
+        self.ensure_table_writable(&key)?;
+        self.materialize_streaming_table(&key)?;
         let row_schema_version = self.schema_version_for(&key);
         let predicate_plan = {
             let (schema, _) = self.get_table(table)?;
             compile_interned_predicate_for_table(self, &key, schema, predicate, args)
         };
 
-        {
+        let schema_before = self.get_schema(&table.db, &table.table)?.clone();
+        let mut undo = Vec::new();
+        let mutation = {
             let (schema, tdata) = self.get_table_mut(table)?;
-            rebuild_secondary_indexes_if_stale(schema, tdata)?;
+            let result = (|| -> anyhow::Result<()> {
+                rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
-            for idx in 0..tdata.rows.len() {
-                if tdata.rows[idx].deleted {
-                    continue;
-                }
-                let row_before_delete = tdata.rows[idx].row.clone();
-                let matches = if let Some(plan) = predicate_plan.as_ref() {
-                    compiled_interned_predicate_matches_row(plan, &row_before_delete)
-                        .unwrap_or(eval_predicate(predicate, &row_before_delete, None, args)?)
-                } else {
-                    eval_predicate(predicate, &row_before_delete, None, args)?
-                };
-                if !matches {
-                    continue;
-                }
-                secondary_index_remove_row(tdata, idx, &row_before_delete)?;
-                let entry = &mut tdata.rows[idx];
-                entry.deleted = true;
-                entry.version = next_row_version(schema);
-                entry.schema_version = row_schema_version;
-                entry.commit_ts_ms = now_millis();
-                affected += 1;
-                let pk = extract_pk(schema, &row_before_delete).ok();
-                if let Some(ref pk) = pk {
-                    snapshot_pks.push(pk.clone());
-                    wal_records.push(WalRowRecord::from_entry(
-                        &table.db,
-                        &table.table,
-                        pk.clone(),
-                        &tdata.rows[idx],
-                    ));
-                }
-                change_rows.push((pk, row_before_delete));
-                if let Some(lim) = limit {
-                    if affected >= lim {
-                        break;
+                for idx in 0..tdata.rows.len() {
+                    if tdata.rows[idx].deleted {
+                        continue;
+                    }
+                    let before = tdata.rows[idx].clone();
+                    let row_before_delete = before.row.clone();
+                    let matches = match predicate_plan.as_ref() {
+                        Some(plan) => {
+                            match compiled_interned_predicate_matches_row(plan, &row_before_delete)
+                            {
+                                Some(matches) => matches,
+                                None => eval_predicate(predicate, &row_before_delete, None, args)?,
+                            }
+                        }
+                        None => eval_predicate(predicate, &row_before_delete, None, args)?,
+                    };
+                    if !matches {
+                        continue;
+                    }
+                    undo.push(RowMutationUndo::Deleted {
+                        idx,
+                        before,
+                        secondary_removed: false,
+                    });
+                    secondary_index_remove_row(tdata, idx, &row_before_delete)?;
+                    if let Some(RowMutationUndo::Deleted {
+                        secondary_removed, ..
+                    }) = undo.last_mut()
+                    {
+                        *secondary_removed = true;
+                    }
+                    let entry = &mut tdata.rows[idx];
+                    entry.deleted = true;
+                    entry.version = next_row_version(schema);
+                    entry.schema_version = row_schema_version;
+                    entry.commit_ts_ms = now_millis();
+                    affected += 1;
+                    let pk = extract_pk(schema, &row_before_delete).ok();
+                    if let Some(ref pk) = pk {
+                        snapshot_pks.push(pk.clone());
+                        wal_records.push(WalRowRecord::from_entry(
+                            &table.db,
+                            &table.table,
+                            schema.incarnation_id,
+                            pk.clone(),
+                            &tdata.rows[idx],
+                        ));
+                    }
+                    change_rows.push((pk, row_before_delete));
+                    if let Some(lim) = limit {
+                        if affected >= lim {
+                            break;
+                        }
                     }
                 }
-            }
 
-            if affected > 0 {
-                bump_table_version(schema);
-                set_secondary_indexes_built_version(tdata, schema.table_version)?;
+                if affected > 0 {
+                    bump_table_version(schema);
+                    set_secondary_indexes_built_version(tdata, schema.table_version)?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = rollback_row_mutations(tdata, &mut undo);
+                schema.clone_from(&schema_before);
             }
+            result
+        };
+        mutation?;
+
+        if affected > 0 {
+            if let Err(err) = self.wal_log_rows(&wal_records) {
+                if self.wal_write_blocked_reason.is_some() {
+                    return Err(err.context(
+                        "WAL commit outcome is uncertain; in-memory rows are retained and writes are blocked until restart",
+                    ));
+                }
+                if let Ok((schema, tdata)) = self.get_table_mut(table) {
+                    let rollback = rollback_row_mutations(tdata, &mut undo);
+                    schema.clone_from(&schema_before);
+                    if let Err(rollback_err) = rollback {
+                        return Err(
+                            err.context(format!("row rollback also failed: {rollback_err}"))
+                        );
+                    }
+                }
+                return Err(err);
+            }
+            let _ = self.persist_catalog();
+            let _ = self.persist_table_deferred(&table.db, &table.table);
         }
 
         for (pk, before) in change_rows {
             self.emit_change(&table.db, &table.table, "delete", pk, Some(before), None);
         }
-
         if self.apply_snapshot_deletes(table, &snapshot_pks) {
             self.persist_snapshots_best_effort();
         }
-
         if affected > 0 {
             self.invalidate_hnsw_indexes_for_table(table);
-        }
-
-        if affected > 0 {
-            self.persist_catalog()?;
-            self.wal_log_rows(&wal_records)?;
-            self.persist_table_deferred(&table.db, &table.table)?;
         }
 
         Ok(WriteResult {
@@ -8728,6 +9116,7 @@ impl Engine {
                     })
                     .collect(),
                 primary_key: table.schema.primary_key.clone(),
+                incarnation_id: 0,
                 compat_mysql: table.schema.compat_mysql.clone(),
                 table_version: table.schema.table_version,
                 auto_inc_next: table
@@ -9631,9 +10020,10 @@ impl Engine {
             .filter(|name| !name.is_empty())
             .unwrap_or("skein-wasm-plan")
             .to_string();
-        let (artifact, artifact_bytes) = decode_wasm_plan_artifact(&params.artifact_b64)?;
-        let info = wasm_plan_info_from_artifact(&artifact, artifact_bytes)?;
-        let raw_artifact = BASE64_STANDARD.decode(params.artifact_b64.as_bytes())?;
+        let (artifact, _) = decode_wasm_plan_artifact(&params.artifact_b64)?;
+        let raw_artifact = serde_json::to_vec(&artifact)?;
+        let artifact_b64 = BASE64_STANDARD.encode(&raw_artifact);
+        let info = wasm_plan_info_from_artifact(&artifact, raw_artifact.len())?;
         let artifact_sha256 = hex_encode(&<Sha256 as sha2::Digest>::digest(&raw_artifact));
         let manifest_json = serde_json::to_string_pretty(&serde_json::json!({
             "format": "skein.wasm.edge_package.v1",
@@ -9655,8 +10045,8 @@ impl Engine {
         Ok(WasmPlanEdgePackageResult {
             format: "skein.wasm.edge_package.v1".to_string(),
             package_name,
-            artifact_b64: params.artifact_b64,
-            artifact_bytes,
+            artifact_b64,
+            artifact_bytes: raw_artifact.len(),
             artifact_sha256,
             manifest_json,
             runner_js: wasm_plan_edge_runner_js(),
@@ -11077,8 +11467,9 @@ impl Engine {
             }
             TableResidency::Streaming { segment, .. } => {
                 let codec = self.row_encryption_codec(db, table);
+                let incarnation_id = self.get_schema(db, table)?.incarnation_id;
                 let mut scanned: u32 = 0;
-                stream_segment_rows_visit(segment, Some(&codec), |entry| {
+                stream_segment_rows_visit(segment, incarnation_id, Some(&codec), |entry| {
                     scanned = scanned.wrapping_add(1);
                     if scanned.is_multiple_of(DEADLINE_CHECK_INTERVAL) {
                         check_query_deadline()?;
@@ -11108,8 +11499,9 @@ impl Engine {
                 .map(Cow::Borrowed)),
             TableResidency::Streaming { segment, index } => {
                 let codec = self.row_encryption_codec(db, table);
+                let incarnation_id = self.get_schema(db, table)?.incarnation_id;
                 Ok(index
-                    .get_by_pk(segment, pk_key, Some(&codec))?
+                    .get_by_pk(segment, pk_key, incarnation_id, Some(&codec))?
                     .map(Cow::Owned))
             }
         }
@@ -11186,6 +11578,7 @@ impl Engine {
             db: table.db.clone(),
             table: table.table.clone(),
         };
+        self.ensure_table_writable(&key)?;
         // A streaming table must be brought fully into memory before it can be mutated:
         // the write paths address rows and the pk index by position, which a segment-backed
         // table does not hold. This is the single choke point where every DML mutation
@@ -11208,6 +11601,37 @@ impl Engine {
         unsafe { Ok((&mut *schema_ptr, &mut *tdata_ptr)) }
     }
 
+    fn ensure_table_writable(&self, key: &TableKey) -> anyhow::Result<()> {
+        if let Some(reason) = self.wal_write_blocked_reason.as_deref() {
+            anyhow::bail!("storage_recovery_required: {reason}");
+        }
+        if let Some(reason) = self.wal_write_blocked_tables.get(key) {
+            anyhow::bail!("storage_recovery_required: {reason}");
+        }
+        let codec = self.row_encryption_codec(&key.db, &key.table);
+        if codec.requires_key_but_unavailable() {
+            anyhow::bail!(
+                "encryption key required: database '{}' has encryption enabled but its active key is unavailable",
+                key.db
+            );
+        }
+        if self.encrypted_locked_tables.contains(key) {
+            anyhow::bail!(
+                "encryption key required: table '{}.{}' has encrypted data at rest; register the database key before writing",
+                key.db,
+                key.table
+            );
+        }
+        if self.corrupt_tables.contains(key) {
+            anyhow::bail!(
+                "storage_corrupt: table '{}.{}' has an unreadable on-disk file; refusing to overwrite it",
+                key.db,
+                key.table
+            );
+        }
+        Ok(())
+    }
+
     /// Bring a `Streaming` table fully into memory and flip it back to `Resident`: stream
     /// every row off the segment, rebuild the pk index and mysql-compat secondary indexes
     /// (mirroring the load path), and clear the residency. A no-op for a table that is
@@ -11227,8 +11651,9 @@ impl Engine {
         };
 
         let codec = self.row_encryption_codec(&key.db, &key.table);
+        let incarnation_id = self.get_schema(&key.db, &key.table)?.incarnation_id;
         let mut rows: Vec<RowEntry> = Vec::new();
-        stream_segment_rows_visit(&segment, Some(&codec), |entry| {
+        stream_segment_rows_visit(&segment, incarnation_id, Some(&codec), |entry| {
             rows.push(entry);
             Ok(())
         })?;
@@ -11288,6 +11713,9 @@ impl Engine {
         };
 
         self.tables.remove(&key);
+        self.encrypted_locked_tables.remove(&key);
+        self.corrupt_tables.remove(&key);
+        self.dirty_tables.remove(&key);
         self.schema_versions.remove(&key);
         self.schema_flags.remove(&key);
         self.oblivious_policies.remove(&key);
@@ -11356,8 +11784,14 @@ impl Engine {
         &self,
         path: &Path,
         codec: &RowEncryptionCodec<'_>,
+        expected_incarnation_id: u64,
     ) -> LoadedTableRows {
         if let Some(disk) = load_json::<TableRowsDisk>(path) {
+            if disk.incarnation_id != expected_incarnation_id {
+                // The catalog now points at another table incarnation. Never expose rows
+                // left behind by a crash between catalog replacement and file cleanup.
+                return LoadedTableRows::Missing;
+            }
             match decode_table_rows_disk(disk, Some(codec)) {
                 Ok(rows) => return LoadedTableRows::Rows(rows),
                 Err(err) if is_encryption_locked_error(&err) => {
@@ -11367,7 +11801,11 @@ impl Engine {
             }
         }
         if let Some(rows) = load_json::<Vec<RowEntry>>(path) {
-            return LoadedTableRows::Rows(rows);
+            return if expected_incarnation_id == 0 {
+                LoadedTableRows::Rows(rows)
+            } else {
+                LoadedTableRows::Missing
+            };
         }
         // Nothing parsed. A present-but-unparseable file is corrupt, not missing.
         if path.exists() {
@@ -11381,6 +11819,7 @@ impl Engine {
         &self,
         path: &Path,
         codec: &RowEncryptionCodec<'_>,
+        expected_incarnation_id: u64,
     ) -> LoadedTableRows {
         // Stream the segment off disk record-by-record rather than buffering the whole
         // encoded file, lowering peak memory on large segment-backed tables.
@@ -11396,6 +11835,9 @@ impl Engine {
                 };
             }
         };
+        if disk.incarnation_id != expected_incarnation_id {
+            return LoadedTableRows::Missing;
+        }
         match decode_table_rows_disk(disk, Some(codec)) {
             Ok(rows) => LoadedTableRows::Rows(rows),
             Err(err) if is_encryption_locked_error(&err) => LoadedTableRows::Locked,
@@ -11413,12 +11855,16 @@ impl Engine {
         &self,
         db: &str,
         table: &str,
+        expected_incarnation_id: u64,
     ) -> (Vec<RowEntry>, bool, bool) {
         let json_path = self.table_path(db, table);
         let segment_path = self.table_segment_path(db, table);
         let codec = self.row_encryption_codec(db, table);
-        let from_json = || self.load_table_rows_json_best_effort(&json_path, &codec);
-        let from_segment = || self.load_table_rows_segment_best_effort(&segment_path, &codec);
+        let from_json =
+            || self.load_table_rows_json_best_effort(&json_path, &codec, expected_incarnation_id);
+        let from_segment = || {
+            self.load_table_rows_segment_best_effort(&segment_path, &codec, expected_incarnation_id)
+        };
         let (first, second) = if self.storage_mode.uses_segment() {
             (from_segment(), from_json())
         } else {
@@ -11547,6 +11993,12 @@ impl Engine {
             db: db.to_string(),
             table: table.to_string(),
         };
+        let codec = self.row_encryption_codec(db, table);
+        if codec.requires_key_but_unavailable() {
+            anyhow::bail!(
+                "encryption key required: database '{db}' has encryption enabled but its active key is unavailable"
+            );
+        }
         if self.encrypted_locked_tables.contains(&key) {
             anyhow::bail!(
                 "encryption key required: table '{db}.{table}' has encrypted data at rest; \
@@ -11568,11 +12020,11 @@ impl Engine {
         if !tdata.is_resident() {
             return Ok(());
         }
+        let incarnation_id = self.get_schema(db, table)?.incarnation_id;
         let path = self.table_path(db, table);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let codec = self.row_encryption_codec(db, table);
         let encrypting = codec.active();
         // Encrypted cells produce per-row ciphertext that must not be deduplicated via the
         // plaintext value-ref planner, so disable ref planning while encryption is active.
@@ -11591,11 +12043,13 @@ impl Engine {
                     &mut seen_refs,
                     &ref_plan,
                     encrypting.then_some(&codec),
+                    incarnation_id,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let disk = TableRowsDisk {
             format_version: TABLE_ROWS_FORMAT_VERSION,
+            incarnation_id,
             rows,
         };
         if self.storage_mode.uses_segment() {
@@ -11638,7 +12092,11 @@ impl Engine {
         let mut table_targets = Vec::new();
         for (db, meta) in self.catalog.databases.iter() {
             for table in meta.tables.keys() {
-                table_targets.push((db.clone(), table.clone()));
+                if validate_storage_name(db, "database").is_ok()
+                    && validate_storage_name(table, "table").is_ok()
+                {
+                    table_targets.push((db.clone(), table.clone()));
+                }
             }
         }
         for (db, table) in table_targets.into_iter() {
@@ -11721,6 +12179,9 @@ impl Engine {
             return None;
         }
         let schema = self.get_schema(db, table).ok()?;
+        if read_table_rows_segment_incarnation(&segment).ok()? != schema.incarnation_id {
+            return None;
+        }
         if schema.primary_key.is_empty() {
             return None;
         }
@@ -11756,6 +12217,10 @@ impl Engine {
                     .keys()
                     .map(move |table| (db.clone(), table.clone()))
             })
+            .filter(|(db, table)| {
+                validate_storage_name(db, "database").is_ok()
+                    && validate_storage_name(table, "table").is_ok()
+            })
             .collect();
         let streaming_min_bytes = self.streaming_threshold_bytes();
         for (db, table) in targets {
@@ -11763,6 +12228,18 @@ impl Engine {
                 db: db.clone(),
                 table: table.clone(),
             };
+            let incarnation_id = self
+                .get_schema(&db, &table)
+                .map(|schema| schema.incarnation_id)
+                .unwrap_or_default();
+            if self
+                .row_encryption_codec(&db, &table)
+                .requires_key_but_unavailable()
+            {
+                self.encrypted_locked_tables.insert(key.clone());
+                self.tables.insert(key, TableData::default());
+                continue;
+            }
             // With streaming enabled, an eligible large segment-backed table loads as a
             // Streaming table (rows stay on disk, read via the seam) rather than materializing
             // its whole row set into memory.
@@ -11774,7 +12251,8 @@ impl Engine {
                     continue;
                 }
             }
-            let (rows, locked, corrupt) = self.load_table_rows_best_effort_for_mode(&db, &table);
+            let (rows, locked, corrupt) =
+                self.load_table_rows_best_effort_for_mode(&db, &table, incarnation_id);
             if locked {
                 self.encrypted_locked_tables.insert(key.clone());
             } else {
@@ -11821,8 +12299,18 @@ impl Engine {
             .cloned()
             .collect();
         for key in locked_targets {
+            let incarnation_id = self
+                .get_schema(&key.db, &key.table)
+                .map(|schema| schema.incarnation_id)
+                .unwrap_or_default();
+            if self
+                .row_encryption_codec(&key.db, &key.table)
+                .requires_key_but_unavailable()
+            {
+                continue;
+            }
             let (rows, locked, corrupt) =
-                self.load_table_rows_best_effort_for_mode(&key.db, &key.table);
+                self.load_table_rows_best_effort_for_mode(&key.db, &key.table, incarnation_id);
             if locked || corrupt {
                 continue;
             }
@@ -13508,6 +13996,9 @@ impl Engine {
             Some("master key bytes redacted"),
         );
         self.unlock_encrypted_tables_for_db(&params.db);
+        // A prior open may have retained encrypted redo records while this database was
+        // locked. Replaying here recovers them as soon as the key becomes available.
+        self.wal_recover();
         self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionRegisterKeyResult {
             ok: true,
@@ -13536,6 +14027,7 @@ impl Engine {
             None,
         );
         self.unlock_encrypted_tables_for_db(&params.db);
+        self.wal_recover();
         self.persist_encryption_state_best_effort();
         Ok(serde_json::to_value(SettingsEncryptionSetActiveKeyResult {
             ok: true,
@@ -16515,7 +17007,7 @@ fn decode_wasm_plan_artifact(artifact_b64: &str) -> anyhow::Result<(WasmPlanArti
         .decode(artifact_b64.as_bytes())
         .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
     let artifact_bytes = bytes.len();
-    let artifact: WasmPlanArtifactV1 = serde_json::from_slice(&bytes)
+    let mut artifact: WasmPlanArtifactV1 = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
     if artifact.format != WASM_PLAN_FORMAT_V1 {
         anyhow::bail!("invalid_request: unsupported wasm plan format");
@@ -16539,7 +17031,74 @@ fn decode_wasm_plan_artifact(artifact_b64: &str) -> anyhow::Result<(WasmPlanArti
         _ => anyhow::bail!("invalid_request: unsupported wasm plan execution"),
     }
     query_from_wasm_plan(&artifact.plan)?;
+    // Generated artifacts are caller-supplied and may outlive the compiler that produced
+    // them. Keep plans containing operators outside the currently verified codegen subset
+    // on the host evaluator, even when an older artifact claims to have a generated module.
+    if artifact.execution == WASM_PLAN_EXECUTION_GENERATED_V1
+        && wasm_plan_has_unsupported_generated_expr(&artifact.plan)
+    {
+        artifact.execution = WASM_PLAN_EXECUTION_V1.to_string();
+        artifact.generated = None;
+    }
     Ok((artifact, artifact_bytes))
+}
+
+fn wasm_plan_has_unsupported_generated_expr(plan: &WasmPlanV1) -> bool {
+    fn expression_is_unsupported(expr: &Expr) -> bool {
+        match expr {
+            Expr::Col { .. } | Expr::Lit { .. } | Expr::Param { .. } => false,
+            Expr::Op {
+                op,
+                a,
+                b,
+                args,
+                list,
+                lo,
+                hi,
+            } => {
+                !matches!(
+                    op.as_str(),
+                    "and"
+                        | "or"
+                        | "not"
+                        | "eq"
+                        | "ne"
+                        | "lt"
+                        | "le"
+                        | "gt"
+                        | "ge"
+                        | "add"
+                        | "sub"
+                        | "mul"
+                        | "mod"
+                ) || a.as_deref().is_some_and(expression_is_unsupported)
+                    || b.as_deref().is_some_and(expression_is_unsupported)
+                    || args
+                        .as_ref()
+                        .is_some_and(|items| items.iter().any(expression_is_unsupported))
+                    || list
+                        .as_ref()
+                        .is_some_and(|items| items.iter().any(expression_is_unsupported))
+                    || lo.as_deref().is_some_and(expression_is_unsupported)
+                    || hi.as_deref().is_some_and(expression_is_unsupported)
+            }
+            // The generated compiler currently handles only the expression shapes above.
+            // Treat any richer expression as host-interpreted when reading old artifacts.
+            Expr::Func { .. }
+            | Expr::Cast { .. }
+            | Expr::Case { .. }
+            | Expr::Subquery { .. }
+            | Expr::Exists { .. } => true,
+        }
+    }
+
+    plan.ops.iter().any(|op| match op {
+        WasmPlanOpV1::Scan { .. } => false,
+        WasmPlanOpV1::Filter { predicate } => expression_is_unsupported(predicate),
+        WasmPlanOpV1::Project { projection } => projection
+            .iter()
+            .any(|item| expression_is_unsupported(&item.expr)),
+    })
 }
 
 fn wasm_plan_info_from_artifact(
@@ -16924,7 +17483,7 @@ fn analyze_generated_wasm_expr(
                     }
                     Ok(GeneratedWasmValueType::Bool)
                 }
-                "add" | "sub" | "mul" | "div" | "mod" => {
+                "add" | "sub" | "mul" | "mod" => {
                     let ty = analyze_generated_wasm_numeric_pair(
                         required_generated_operand(a.as_deref())?,
                         required_generated_operand(b.as_deref())?,
@@ -17375,7 +17934,7 @@ fn compile_generated_wasm_expr_wat(
                         format!("{left}\n{right}\n{instr}"),
                     ))
                 }
-                "add" | "sub" | "mul" | "div" | "mod" => {
+                "add" | "sub" | "mul" | "mod" => {
                     let (left_ty, left) = compile_generated_wasm_expr_wat(
                         required_generated_operand(a.as_deref())?,
                         ctx,
@@ -17392,9 +17951,7 @@ fn compile_generated_wasm_expr_wat(
                         ("add", _) => "i64.add",
                         ("sub", _) => "i64.sub",
                         ("mul", _) => "i64.mul",
-                        ("div", false) => "i64.div_u",
                         ("mod", false) => "i64.rem_u",
-                        ("div", true) => "i64.div_s",
                         ("mod", true) => "i64.rem_s",
                         _ => unreachable!(),
                     };
@@ -26768,12 +27325,14 @@ fn encode_row_entry_disk(
     seen_refs: &mut HashSet<ValueId>,
     ref_plan: &HashSet<ValueId>,
     enc: Option<&RowEncryptionCodec<'_>>,
+    incarnation_id: u64,
 ) -> anyhow::Result<RowEntryDisk> {
     let mut row = BTreeMap::new();
     for (k, v) in entry.row.iter() {
         if let Some(codec) = enc {
             if codec.active() {
-                if let Some(payload) = codec.encrypt_cell(k, v)? {
+                let context_column = row_snapshot_encryption_column(k, incarnation_id);
+                if let Some(payload) = codec.encrypt_cell(&context_column, v)? {
                     row.insert(k.clone(), payload);
                     continue;
                 }
@@ -26788,6 +27347,10 @@ fn encode_row_entry_disk(
         deleted: entry.deleted,
         commit_ts_ms: entry.commit_ts_ms,
     })
+}
+
+fn row_snapshot_encryption_column(column: &str, incarnation_id: u64) -> String {
+    format!("$skein_row:{incarnation_id}:{column}")
 }
 
 /// Error returned by [`decode_table_rows_disk`] when a table's on-disk rows contain
@@ -26845,6 +27408,14 @@ struct RowEncryptionCodec<'a> {
 }
 
 impl<'a> RowEncryptionCodec<'a> {
+    fn requires_key_but_unavailable(&self) -> bool {
+        use skeindb_core::encryption::EncryptionMode;
+        self.key_manager
+            .profile(&self.db)
+            .map(|profile| !matches!(profile.mode, EncryptionMode::Off) && !self.active())
+            .unwrap_or(false)
+    }
+
     /// True when the database has an active encryption mode and a usable registered key, so
     /// new writes should be encrypted at rest.
     fn active(&self) -> bool {
@@ -27066,12 +27637,12 @@ fn decode_table_rows_disk(
     disk: TableRowsDisk,
     enc: Option<&RowEncryptionCodec<'_>>,
 ) -> anyhow::Result<Vec<RowEntry>> {
-    if disk.format_version != 2
-        && disk.format_version != 3
-        && disk.format_version != TABLE_ROWS_FORMAT_VERSION
-    {
+    if !(2..=TABLE_ROWS_FORMAT_VERSION).contains(&disk.format_version) {
         anyhow::bail!("unsupported table format version: {}", disk.format_version);
     }
+
+    let format_version = disk.format_version;
+    let incarnation_id = disk.incarnation_id;
 
     let mut seeds = HashMap::<ValueId, Lit>::new();
     for row in disk.rows.iter() {
@@ -27080,7 +27651,13 @@ fn decode_table_rows_disk(
 
     let mut rows = Vec::with_capacity(disk.rows.len());
     for row in disk.rows.into_iter() {
-        rows.push(decode_one_disk_row(row, &seeds, enc)?);
+        rows.push(decode_one_disk_row(
+            row,
+            &seeds,
+            enc,
+            format_version,
+            incarnation_id,
+        )?);
     }
     Ok(rows)
 }
@@ -27113,10 +27690,29 @@ fn decode_one_disk_row(
     row: RowEntryDisk,
     seeds: &HashMap<ValueId, Lit>,
     enc: Option<&RowEncryptionCodec<'_>>,
+    format_version: u32,
+    incarnation_id: u64,
 ) -> anyhow::Result<RowEntry> {
     let mut decoded = RowObject::new();
     for (k, v) in row.row.into_iter() {
         if let Some(payload) = decode_encrypted_cell_payload(&v) {
+            let expected_column = if format_version >= 6 {
+                row_snapshot_encryption_column(&k, incarnation_id)
+            } else {
+                if incarnation_id != 0 {
+                    return Err(anyhow::Error::from(EncryptionLockedError {
+                        db: enc.map(|codec| codec.db.clone()).unwrap_or_default(),
+                        table: enc.map(|codec| codec.table.clone()).unwrap_or_default(),
+                        detail: format!(
+                            "encrypted row format {format_version} does not authenticate table incarnation {incarnation_id}"
+                        ),
+                    }));
+                }
+                k.clone()
+            };
+            if payload.column != expected_column {
+                anyhow::bail!("encrypted row cell has an unexpected authenticated column");
+            }
             let codec = enc.ok_or_else(|| {
                 anyhow::Error::from(EncryptionLockedError {
                     db: String::new(),
@@ -27125,7 +27721,7 @@ fn decode_one_disk_row(
                 })
             })?;
             let lit = codec
-                .decrypt_cell(&payload.column, &payload.kind, &payload.env_b64)
+                .decrypt_cell(&expected_column, &payload.kind, &payload.env_b64)
                 .map_err(|e| {
                     anyhow::Error::from(EncryptionLockedError {
                         db: codec.db.clone(),
@@ -27165,6 +27761,7 @@ fn encode_table_rows_segment(disk: &TableRowsDisk) -> anyhow::Result<Vec<u8>> {
     out.extend_from_slice(&TABLE_ROWS_SEGMENT_MAGIC);
     out.extend_from_slice(&TABLE_ROWS_SEGMENT_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&disk.format_version.to_le_bytes());
+    out.extend_from_slice(&disk.incarnation_id.to_le_bytes());
     let row_count = u64::try_from(disk.rows.len())
         .map_err(|_| anyhow::anyhow!("too many rows for segment container"))?;
     out.extend_from_slice(&row_count.to_le_bytes());
@@ -27191,10 +27788,15 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 
     let mut offset = 8usize;
     let segment_version = read_u32_le_chunk(bytes, &mut offset)?;
-    if segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+    if segment_version != 1 && segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
         anyhow::bail!("unsupported segment format version: {segment_version}");
     }
     let table_format_version = read_u32_le_chunk(bytes, &mut offset)?;
+    let incarnation_id = if segment_version >= 2 {
+        read_u64_le_chunk(bytes, &mut offset)?
+    } else {
+        0
+    };
     let row_count = read_u64_le_chunk(bytes, &mut offset)?;
     let capacity = usize::try_from(row_count)
         .map_err(|_| anyhow::anyhow!("row count too large for this platform"))?;
@@ -27216,6 +27818,7 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 
     Ok(TableRowsDisk {
         format_version: table_format_version,
+        incarnation_id,
         rows,
     })
 }
@@ -27229,14 +27832,50 @@ fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
 /// table need not fully materialize is the remaining Slice 4 work.)
 fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDisk> {
     let mut rows = Vec::new();
-    let format_version = for_each_segment_record(path, |_offset, row| {
-        rows.push(row);
-        Ok(())
-    })?;
+    let (format_version, incarnation_id) =
+        for_each_segment_record_with_expected_incarnation(path, None, |_offset, row| {
+            rows.push(row);
+            Ok(())
+        })?;
     Ok(TableRowsDisk {
         format_version,
+        incarnation_id,
         rows,
     })
+}
+
+fn read_table_rows_segment_incarnation(path: &Path) -> anyhow::Result<u64> {
+    use std::io::Read;
+    let mut reader = std::io::BufReader::new(fs::File::open(path)?);
+    let mut prefix = [0u8; 16];
+    reader
+        .read_exact(&mut prefix)
+        .map_err(|_| anyhow::anyhow!("segment file too small"))?;
+    if prefix[0..8] != TABLE_ROWS_SEGMENT_MAGIC {
+        anyhow::bail!("segment magic mismatch");
+    }
+    let segment_version = u32::from_le_bytes(prefix[8..12].try_into().unwrap());
+    match segment_version {
+        1 => Ok(0),
+        2 => {
+            let mut incarnation = [0u8; 8];
+            reader
+                .read_exact(&mut incarnation)
+                .map_err(|_| anyhow::anyhow!("segment header truncated"))?;
+            Ok(u64::from_le_bytes(incarnation))
+        }
+        _ => anyhow::bail!("unsupported segment format version: {segment_version}"),
+    }
+}
+
+fn ensure_segment_incarnation(path: &Path, expected_incarnation_id: u64) -> anyhow::Result<()> {
+    let actual_incarnation_id = read_table_rows_segment_incarnation(path)?;
+    if actual_incarnation_id != expected_incarnation_id {
+        anyhow::bail!(
+            "storage_corrupt: table segment incarnation {actual_incarnation_id} does not match catalog incarnation {expected_incarnation_id}"
+        );
+    }
+    Ok(())
 }
 
 /// Stream a row segment off disk record-by-record, validating the header and framing and
@@ -27246,13 +27885,27 @@ fn read_table_rows_segment_streaming(path: &Path) -> anyhow::Result<TableRowsDis
 /// basis for seek-based point lookups on streaming tables). Never holds more than one row
 /// payload in memory. Rejects the same corruption as the in-memory decoder (bad
 /// magic/version, truncated payload, trailing bytes). Returns the table format version.
-fn for_each_segment_record(
+fn for_each_segment_record_checked(
     path: &Path,
-    mut visit: impl FnMut(u64, RowEntryDisk) -> anyhow::Result<()>,
+    expected_incarnation_id: u64,
+    visit: impl FnMut(u64, RowEntryDisk) -> anyhow::Result<()>,
 ) -> anyhow::Result<u32> {
+    Ok(for_each_segment_record_with_expected_incarnation(
+        path,
+        Some(expected_incarnation_id),
+        visit,
+    )?
+    .0)
+}
+
+fn for_each_segment_record_with_expected_incarnation(
+    path: &Path,
+    expected_incarnation_id: Option<u64>,
+    mut visit: impl FnMut(u64, RowEntryDisk) -> anyhow::Result<()>,
+) -> anyhow::Result<(u32, u64)> {
     use std::io::Read;
     let mut reader = std::io::BufReader::new(fs::File::open(path)?);
-    let mut header = [0u8; 24];
+    let mut header = [0u8; 16];
     reader
         .read_exact(&mut header)
         .map_err(|_| anyhow::anyhow!("segment file too small"))?;
@@ -27260,13 +27913,34 @@ fn for_each_segment_record(
         anyhow::bail!("segment magic mismatch");
     }
     let segment_version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    if segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+    if segment_version != 1 && segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
         anyhow::bail!("unsupported segment format version: {segment_version}");
     }
     let table_format_version = u32::from_le_bytes(header[12..16].try_into().unwrap());
-    let row_count = u64::from_le_bytes(header[16..24].try_into().unwrap());
-    // Byte cursor past the 24-byte header; the start of each record's `[len]` frame.
-    let mut pos: u64 = 24;
+    let mut pos: u64 = 16;
+    let incarnation_id = if segment_version >= 2 {
+        let mut incarnation = [0u8; 8];
+        reader
+            .read_exact(&mut incarnation)
+            .map_err(|_| anyhow::anyhow!("segment header truncated"))?;
+        pos += 8;
+        u64::from_le_bytes(incarnation)
+    } else {
+        0
+    };
+    if expected_incarnation_id.is_some_and(|expected| expected != incarnation_id) {
+        anyhow::bail!(
+            "storage_corrupt: table segment incarnation {incarnation_id} does not match catalog incarnation {}",
+            expected_incarnation_id.expect("checked above")
+        );
+    }
+    let mut row_count_bytes = [0u8; 8];
+    reader
+        .read_exact(&mut row_count_bytes)
+        .map_err(|_| anyhow::anyhow!("segment file too small"))?;
+    let row_count = u64::from_le_bytes(row_count_bytes);
+    // Byte cursor past the versioned header; the start of each record's `[len]` frame.
+    pos += 8;
     for _ in 0..row_count {
         let record_offset = pos;
         let mut len_buf = [0u8; 4];
@@ -27288,15 +27962,25 @@ fn for_each_segment_record(
     if reader.read(&mut trailing)? != 0 {
         anyhow::bail!("segment file contains trailing bytes");
     }
-    Ok(table_format_version)
+    Ok((table_format_version, incarnation_id))
 }
 
 /// Read exactly one record's `[len][payload]` frame at `record_offset` (an offset reported
 /// by [`for_each_segment_record`]) and decode the JSON `RowEntryDisk`. Seeks directly to the
 /// record without scanning the file — the point-lookup primitive for streaming tables.
-fn read_segment_record_at(path: &Path, record_offset: u64) -> anyhow::Result<RowEntryDisk> {
+fn read_segment_record_at(
+    path: &Path,
+    record_offset: u64,
+    expected_incarnation_id: u64,
+) -> anyhow::Result<RowEntryDisk> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path)?;
+    let actual_incarnation_id = read_segment_file_incarnation(&mut file)?;
+    if actual_incarnation_id != expected_incarnation_id {
+        anyhow::bail!(
+            "storage_corrupt: table segment incarnation {actual_incarnation_id} does not match catalog incarnation {expected_incarnation_id}"
+        );
+    }
     file.seek(SeekFrom::Start(record_offset))?;
     let mut len_buf = [0u8; 4];
     file.read_exact(&mut len_buf)
@@ -27306,6 +27990,28 @@ fn read_segment_record_at(path: &Path, record_offset: u64) -> anyhow::Result<Row
     file.read_exact(&mut payload)
         .map_err(|_| anyhow::anyhow!("segment record truncated"))?;
     Ok(serde_json::from_slice::<RowEntryDisk>(&payload)?)
+}
+
+fn read_segment_file_incarnation(file: &mut fs::File) -> anyhow::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    let mut prefix = [0u8; 16];
+    file.read_exact(&mut prefix)
+        .map_err(|_| anyhow::anyhow!("segment file too small"))?;
+    if prefix[0..8] != TABLE_ROWS_SEGMENT_MAGIC {
+        anyhow::bail!("segment magic mismatch");
+    }
+    let segment_version = u32::from_le_bytes(prefix[8..12].try_into().unwrap());
+    match segment_version {
+        1 => Ok(0),
+        2 => {
+            let mut incarnation = [0u8; 8];
+            file.read_exact(&mut incarnation)
+                .map_err(|_| anyhow::anyhow!("segment header truncated"))?;
+            Ok(u64::from_le_bytes(incarnation))
+        }
+        _ => anyhow::bail!("unsupported segment format version: {segment_version}"),
+    }
 }
 
 /// Decode a row segment off disk and hand each finished `RowEntry` to `visit`, one at a
@@ -27321,19 +28027,21 @@ fn read_segment_record_at(path: &Path, record_offset: u64) -> anyhow::Result<Row
 /// same segment.
 fn stream_segment_rows_visit(
     path: &Path,
+    expected_incarnation_id: u64,
     enc: Option<&RowEncryptionCodec<'_>>,
     mut visit: impl FnMut(RowEntry) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut seeds = HashMap::<ValueId, Lit>::new();
-    let format_version = for_each_segment_record(path, |_offset, row| {
-        collect_value_ref_seeds(&row, &mut seeds);
-        Ok(())
-    })?;
-    if format_version != 2 && format_version != 3 && format_version != TABLE_ROWS_FORMAT_VERSION {
+    let format_version =
+        for_each_segment_record_checked(path, expected_incarnation_id, |_offset, row| {
+            collect_value_ref_seeds(&row, &mut seeds);
+            Ok(())
+        })?;
+    if !(2..=TABLE_ROWS_FORMAT_VERSION).contains(&format_version) {
         anyhow::bail!("unsupported table format version: {format_version}");
     }
-    for_each_segment_record(path, |_offset, row| {
-        let entry = decode_one_disk_row(row, &seeds, enc)?;
+    for_each_segment_record_checked(path, expected_incarnation_id, |_offset, row| {
+        let entry = decode_one_disk_row(row, &seeds, enc, format_version, expected_incarnation_id)?;
         visit(entry)
     })?;
     Ok(())
@@ -27354,6 +28062,9 @@ struct StreamingIndex {
     /// Value-ref id → literal, covering every interned value referenced anywhere in the
     /// segment. Lets any single seeked record be decoded in isolation.
     seeds: HashMap<ValueId, Lit>,
+    /// Snapshot format and table lifetime are needed to reconstruct cell-encryption AAD.
+    format_version: u32,
+    incarnation_id: u64,
     /// `pk_key(pk)` → byte offset of that row's record frame. Point-lookup index.
     pk_offsets: HashMap<String, u64>,
     /// Row position → byte offset of that record frame, in segment order. Positional index
@@ -27375,8 +28086,14 @@ impl StreamingIndex {
         record_offset: u64,
         enc: Option<&RowEncryptionCodec<'_>>,
     ) -> anyhow::Result<RowEntry> {
-        let disk = read_segment_record_at(path, record_offset)?;
-        decode_one_disk_row(disk, &self.seeds, enc)
+        let disk = read_segment_record_at(path, record_offset, self.incarnation_id)?;
+        decode_one_disk_row(
+            disk,
+            &self.seeds,
+            enc,
+            self.format_version,
+            self.incarnation_id,
+        )
     }
 
     /// Point lookup by primary key: returns the row for `pk_key`, or `None` if absent.
@@ -27384,8 +28101,17 @@ impl StreamingIndex {
         &self,
         path: &Path,
         pk_key: &str,
+        expected_incarnation_id: u64,
         enc: Option<&RowEncryptionCodec<'_>>,
     ) -> anyhow::Result<Option<RowEntry>> {
+        if self.incarnation_id != expected_incarnation_id {
+            anyhow::bail!(
+                "storage_corrupt: streaming index belongs to table incarnation {}, catalog expects {}",
+                self.incarnation_id,
+                expected_incarnation_id
+            );
+        }
+        ensure_segment_incarnation(path, expected_incarnation_id)?;
         match self.pk_offsets.get(pk_key) {
             Some(&offset) => Ok(Some(self.decode_at(path, offset, enc)?)),
             None => Ok(None),
@@ -27406,15 +28132,20 @@ fn build_streaming_index(
 ) -> anyhow::Result<StreamingIndex> {
     let mut seeds = HashMap::<ValueId, Lit>::new();
     let mut row_offsets: Vec<u64> = Vec::new();
-    for_each_segment_record(path, |offset, row| {
-        collect_value_ref_seeds(&row, &mut seeds);
-        row_offsets.push(offset);
-        Ok(())
-    })?;
+    let format_version =
+        for_each_segment_record_checked(path, schema.incarnation_id, |offset, row| {
+            collect_value_ref_seeds(&row, &mut seeds);
+            row_offsets.push(offset);
+            Ok(())
+        })?;
+    if !(2..=TABLE_ROWS_FORMAT_VERSION).contains(&format_version) {
+        anyhow::bail!("unsupported table format version: {format_version}");
+    }
+    let incarnation_id = schema.incarnation_id;
 
     let mut pk_offsets = HashMap::<String, u64>::new();
-    for_each_segment_record(path, |offset, row| {
-        let entry = decode_one_disk_row(row, &seeds, enc)?;
+    for_each_segment_record_checked(path, incarnation_id, |offset, row| {
+        let entry = decode_one_disk_row(row, &seeds, enc, format_version, incarnation_id)?;
         if let Ok(pk) = extract_pk(schema, &entry.row) {
             pk_offsets.insert(pk_key(&pk), offset);
         }
@@ -27423,6 +28154,8 @@ fn build_streaming_index(
 
     Ok(StreamingIndex {
         seeds,
+        format_version,
+        incarnation_id,
         pk_offsets,
         row_offsets,
     })
@@ -32654,6 +33387,583 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn wal_replays_legacy_unversioned_row_records() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_legacy_row_record");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "items",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            // Version-1 catalogs have no table incarnation; represent that upgrade state.
+            engine.get_schema_mut("app", "items")?.incarnation_id = 0;
+            engine.persist_catalog()?;
+        }
+
+        let legacy_record = WalRowRecord::from_entry(
+            "app",
+            "items",
+            0,
+            vec![Lit::U64 { v: 9 }],
+            &RowEntry {
+                row: row(&[("id", Lit::U64 { v: 9 })]),
+                version: 1,
+                schema_version: 1,
+                deleted: false,
+                commit_ts_ms: 1,
+            },
+        );
+        let mut legacy_json = serde_json::to_value(legacy_record)?;
+        let legacy_object = legacy_json
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("legacy row record did not encode as an object"))?;
+        legacy_object.remove("incarnation_id");
+        let payload = serde_json::to_vec(&legacy_json)?;
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+        let mut writer = skeindb_core::wal::WalWriter::open(&wal_path)?;
+        writer.begin_txn(1)?;
+        writer.append_mutation(1, payload)?;
+        writer.commit_txn(1)?;
+        writer.sync()?;
+        drop(writer);
+
+        let engine = Engine::open(&dir)?;
+        assert_eq!(
+            engine
+                .data_get(&table, vec![Lit::U64 { v: 9 }])?
+                .row
+                .get("id"),
+            Some(&Lit::U64 { v: 9 })
+        );
+        assert!(
+            !wal_path.exists(),
+            "legacy WAL record should be checkpointed"
+        );
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wal_recovery_restores_table_version_and_auto_increment_state() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_recovers_schema_write_state");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "generated".to_string(),
+            r#as: None,
+        };
+        let catalog_path = dir.join("catalog.json");
+        let catalog_before_insert;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                "app",
+                "generated",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: true,
+                }],
+                vec!["id".into()],
+                false,
+                None,
+            )?;
+            catalog_before_insert = fs::read(&catalog_path)?;
+            let inserted = engine.data_insert(&table, vec![RowObject::new()], None)?;
+            assert_eq!(inserted.last_insert_id, 1);
+            // Model a crash or failed catalog checkpoint after the committed row WAL write.
+            fs::write(&catalog_path, &catalog_before_insert)?;
+        }
+
+        let mut recovered = Engine::open(&dir)?;
+        let inserted = recovered.data_insert(&table, vec![RowObject::new()], None)?;
+        assert_eq!(inserted.last_insert_id, 2);
+        assert_eq!(recovered.get_table(&table)?.1.rows.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn retained_wal_transaction_ids_are_not_reused() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_retained_txn_id_not_reused");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        let incarnation_id;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                &table.db,
+                &table.table,
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            incarnation_id = engine.get_schema(&table.db, &table.table)?.incarnation_id;
+        }
+
+        let phantom = serde_json::to_value(Lit::U64 { v: 999 })?;
+        let invalid_committed_record = serde_json::json!({
+            "format_version": 3,
+            "db": "app",
+            "table": "items",
+            "incarnation_id": incarnation_id,
+            "payload": {},
+        });
+        let staged_phantom = serde_json::json!({
+            "format_version": 3,
+            "db": "app",
+            "table": "items",
+            "incarnation_id": incarnation_id,
+            "payload": {
+                "pk": [phantom.clone()],
+                "row": {"id": phantom},
+                "version": 999,
+                "schema_version": 1,
+                "deleted": false,
+                "commit_ts_ms": now_millis(),
+                "auto_inc_next": null,
+            },
+        });
+        {
+            fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+            let mut writer = skeindb_core::wal::WalWriter::open(&wal_path)?;
+            writer.begin_txn(42)?;
+            writer.append_mutation(42, serde_json::to_vec(&invalid_committed_record)?)?;
+            writer.commit_txn(42)?;
+            // This uncommitted transaction has the id the old startup counter would reuse.
+            writer.begin_txn(0)?;
+            writer.append_mutation(0, serde_json::to_vec(&staged_phantom)?)?;
+            writer.sync()?;
+        }
+
+        {
+            let mut engine = Engine::open(&dir)?;
+            assert!(engine.wal_recovery_incomplete);
+            assert!(engine.wal_next_txn > 42);
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            engine.flush_dirty_tables()?;
+            assert!(
+                wal_path.exists(),
+                "the malformed committed record retains WAL"
+            );
+        }
+
+        let recovered = Engine::open(&dir)?;
+        assert!(recovered.data_get(&table, vec![Lit::U64 { v: 1 }]).is_ok());
+        assert!(recovered
+            .data_get(&table, vec![Lit::U64 { v: 999 }])
+            .is_err());
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn dirty_table_flush_keeps_wal_until_catalog_checkpoint_succeeds() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_flush_catalog_checkpoint");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "generated".to_string(),
+            r#as: None,
+        };
+        let catalog_path = dir.join("catalog.json");
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: true,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let inserted = engine.data_insert(&table, vec![RowObject::new()], None)?;
+        assert_eq!(inserted.last_insert_id, 1);
+        assert!(wal_path.exists());
+
+        // A directory at the catalog filename makes the atomic catalog replacement fail,
+        // while the already-written row snapshot remains writable.
+        fs::remove_file(&catalog_path)?;
+        fs::create_dir(&catalog_path)?;
+        assert!(engine.flush_dirty_tables().is_err());
+        assert!(
+            wal_path.exists(),
+            "WAL must survive a failed catalog checkpoint"
+        );
+        assert!(
+            !engine.dirty_tables.is_empty(),
+            "dirty table markers must survive a failed catalog checkpoint"
+        );
+
+        fs::remove_dir(&catalog_path)?;
+        engine.flush_dirty_tables()?;
+        assert!(
+            !wal_path.exists(),
+            "WAL can be removed after catalog durability"
+        );
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        let inserted = reopened.data_insert(&table, vec![RowObject::new()], None)?;
+        assert_eq!(inserted.last_insert_id, 2);
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wal_fsync_failure_keeps_commit_state_and_blocks_writes_until_restart() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("wal_fsync_uncertain_commit");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                &table.db,
+                &table.table,
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.wal_sync_fail_next_for_test = true;
+            let err = engine
+                .data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)
+                .expect_err("fsync failure must report uncertain commit outcome");
+            assert!(format!("{err:#}").contains("durability is uncertain"));
+            assert_eq!(engine.get_table(&table)?.1.rows.len(), 1);
+            assert!(engine.wal_write_blocked_reason.is_some());
+
+            let retry = engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None);
+            assert!(retry.is_err(), "writes stay blocked until WAL recovery");
+            assert_eq!(engine.get_table(&table)?.1.rows.len(), 1);
+        }
+
+        let recovered = Engine::open(&dir)?;
+        assert_eq!(recovered.get_table(&table)?.1.rows.len(), 1);
+        assert_eq!(
+            recovered
+                .data_get(&table, vec![Lit::U64 { v: 1 }])?
+                .row
+                .get("id"),
+            Some(&Lit::U64 { v: 1 })
+        );
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wal_records_from_dropped_table_do_not_replay_into_recreated_table() -> anyhow::Result<()> {
+        let dir = temp_dir("wal_table_incarnation");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let id_column = || {
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }]
+        };
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        let old_wal;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table("app", "items", id_column(), vec!["id".into()], false, None)?;
+            let old_incarnation = engine.get_schema("app", "items")?.incarnation_id;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 7 })])], None)?;
+            old_wal = fs::read(&wal_path)?;
+            engine.drop_table("app", "items", false)?;
+            engine.create_table("app", "items", id_column(), vec!["id".into()], false, None)?;
+            let new_incarnation = engine.get_schema("app", "items")?.incarnation_id;
+            assert_ne!(old_incarnation, new_incarnation);
+            // Restore the valid old transaction to simulate a crash/recovery tail that
+            // survived a schema change made by an older runtime.
+            fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+            fs::write(&wal_path, &old_wal)?;
+        }
+
+        let engine = Engine::open(&dir)?;
+        assert!(engine.get_table(&table)?.1.rows.is_empty());
+        assert!(
+            !wal_path.exists(),
+            "obsolete records should be safely discarded after incarnation check"
+        );
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn row_snapshot_from_dropped_incarnation_is_not_loaded_after_recreate() -> anyhow::Result<()> {
+        let dir = temp_dir("snapshot_table_incarnation");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let columns = || {
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }]
+        };
+        let old_snapshot;
+        let path;
+        {
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "json")?;
+            engine.create_table("app", "items", columns(), vec!["id".into()], false, None)?;
+            let old_incarnation = engine.get_schema("app", "items")?.incarnation_id;
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 7 })])], None)?;
+            engine.flush_dirty_tables()?;
+            path = engine.table_path("app", "items");
+            old_snapshot = fs::read(&path)?;
+            engine.drop_table("app", "items", false)?;
+            engine.create_table("app", "items", columns(), vec!["id".into()], false, None)?;
+            assert_ne!(
+                old_incarnation,
+                engine.get_schema("app", "items")?.incarnation_id
+            );
+            // Model a crash after catalog recreation but before stale snapshot cleanup.
+            fs::write(&path, &old_snapshot)?;
+        }
+
+        let mut reopened = Engine::open_with_storage_mode_name(&dir, "json")?;
+        assert!(reopened.get_table(&table)?.1.rows.is_empty());
+        reopened.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 8 })])], None)?;
+        reopened.flush_dirty_tables()?;
+        let saved: TableRowsDisk = load_json(&path).expect("new incarnation snapshot persisted");
+        assert_eq!(
+            saved.incarnation_id,
+            reopened.get_schema("app", "items")?.incarnation_id
+        );
+        assert_eq!(saved.rows.len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_snapshot_header_cannot_rebind_cells_to_recreated_table() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_snapshot_incarnation_aad");
+        let master_key_b64 = BASE64_STANDARD.encode([73u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+            r#as: None,
+        };
+        let path = dir.join("tables").join("app").join("secrets.json");
+        let columns = || {
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ]
+        };
+        let new_incarnation;
+        {
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "json")?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            engine.data_insert(
+                &table,
+                vec![row(&[
+                    (
+                        "id",
+                        Lit::Str {
+                            v: "secret-id".to_string(),
+                        },
+                    ),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "secret-payload".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            engine.flush_dirty_tables()?;
+            let mut tampered: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+            assert_eq!(tampered["format_version"].as_u64(), Some(6));
+            engine.drop_table("app", "secrets", false)?;
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            new_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+
+            // The old format trusted this cleartext header. Rewrite it and each visible
+            // envelope column to look current; v6 AAD must still reject the old ciphertext.
+            tampered["incarnation_id"] = serde_json::json!(new_incarnation);
+            for row in tampered["rows"].as_array_mut().expect("rows array") {
+                let cells = row["row"].as_object_mut().expect("row map");
+                for (column, value) in cells {
+                    if value.get(TABLE_ROW_ENC_KEY).is_some() {
+                        value[TABLE_ROW_ENC_KEY]["col"] = serde_json::json!(
+                            row_snapshot_encryption_column(column, new_incarnation)
+                        );
+                    }
+                }
+            }
+            fs::write(&path, serde_json::to_vec(&tampered)?)?;
+        }
+
+        let mut reopened = Engine::open_with_storage_mode_name(&dir, "json")?;
+        reopened
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+        };
+        assert!(reopened.encrypted_locked_tables.contains(&key));
+        assert!(reopened.get_table(&table)?.1.rows.is_empty());
+        let write = reopened.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::Str { v: "new".into() }),
+                ("payload", Lit::Str { v: "new".into() }),
+            ])],
+            None,
+        );
+        assert!(
+            write.is_err(),
+            "unauthenticated snapshot must remain protected"
+        );
+        assert_eq!(
+            reopened.get_schema("app", "secrets")?.incarnation_id,
+            new_incarnation
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_wal_routing_metadata_is_retained() -> anyhow::Result<()> {
+        let dir = temp_dir("malformed_wal_routing");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".into()],
+            false,
+            None,
+        )?;
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+        let mut writer = skeindb_core::wal::WalWriter::open(&wal_path)?;
+        writer.begin_txn(1)?;
+        writer.append_mutation(
+            1,
+            br#"{"table":"items","format_version":3,"incarnation_id":1,"payload":{}}"#.to_vec(),
+        )?;
+        writer.commit_txn(1)?;
+        writer.sync()?;
+        drop(writer);
+        drop(engine);
+
+        let recovered = Engine::open(&dir)?;
+        assert!(
+            wal_path.exists(),
+            "malformed routing metadata must prevent global WAL truncation"
+        );
+        assert!(recovered
+            .get_table(&BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            })?
+            .1
+            .rows
+            .is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
     fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
         fs::create_dir_all(dst)?;
         for entry in fs::read_dir(src)? {
@@ -33348,8 +34658,9 @@ mod tests {
         // The low-level streaming visitor yields rows identical to the resident, in-memory
         // rows (same order, same value-ref-resolved contents).
         let codec = engine.row_encryption_codec("app", "events");
+        let incarnation_id = engine.get_schema("app", "events")?.incarnation_id;
         let mut streamed: Vec<RowEntry> = Vec::new();
-        stream_segment_rows_visit(&seg_path, Some(&codec), |entry| {
+        stream_segment_rows_visit(&seg_path, incarnation_id, Some(&codec), |entry| {
             streamed.push(entry);
             Ok(())
         })?;
@@ -33410,14 +34721,119 @@ mod tests {
         for resident in resident_rows.iter() {
             let pk = extract_pk(&schema, &resident.row)?;
             let got = index
-                .get_by_pk(&seg_path, &pk_key(&pk), Some(&codec))?
+                .get_by_pk(&seg_path, &pk_key(&pk), schema.incarnation_id, Some(&codec))?
                 .expect("pk row present");
             assert_eq!(serde_json::to_vec(&got)?, serde_json::to_vec(resident)?);
         }
         let missing_pk = pk_key(&[Lit::U64 { v: 9999 }]);
         assert!(index
-            .get_by_pk(&seg_path, &missing_pk, Some(&codec))?
+            .get_by_pk(&seg_path, &missing_pk, schema.incarnation_id, Some(&codec))?
             .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_reads_reject_segment_replaced_from_old_incarnation() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("streaming_segment_old_incarnation");
+        let master_key_b64 = BASE64_STANDARD.encode([76u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+            r#as: None,
+        };
+        let columns = || {
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ]
+        };
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        engine
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine
+            .settings_encryption_set_mode(
+                skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                    db: "app".to_string(),
+                    mode: "enc_random".to_string(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::Str { v: "old-id".into() }),
+                (
+                    "payload",
+                    Lit::Str {
+                        v: "old-payload".into(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.flush_dirty_tables()?;
+        let segment = engine.table_segment_path("app", "secrets");
+        let old_segment_bytes = fs::read(&segment)?;
+        let old_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+
+        engine.drop_table("app", "secrets", false)?;
+        engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+        let new_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+        assert_ne!(old_incarnation, new_incarnation);
+        engine.persist_table("app", "secrets")?;
+        let new_streaming_data = engine
+            .try_load_streaming_table("app", "secrets", 1)
+            .expect("fresh empty segment is eligible for streaming");
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+        };
+        engine.tables.insert(key.clone(), new_streaming_data);
+
+        // Simulate a segment being replaced after startup with a valid encrypted segment
+        // from the same table name's earlier catalog lifetime.
+        fs::write(&segment, old_segment_bytes)?;
+        let tdata = engine.tables.get(&key).expect("streaming table loaded");
+        let scan_error = engine
+            .for_each_table_row("app", "secrets", tdata, |_| Ok(()))
+            .expect_err("full scans must compare the live segment with the catalog lifetime");
+        assert!(scan_error.to_string().contains("catalog incarnation"));
+        let point_error = engine
+            .table_row_by_pk(
+                "app",
+                "secrets",
+                tdata,
+                &pk_key(&[Lit::Str { v: "old-id".into() }]),
+            )
+            .expect_err("point reads must reject a replaced segment too");
+        assert!(point_error.to_string().contains("catalog incarnation"));
+        assert_eq!(
+            engine.get_schema("app", "secrets")?.incarnation_id,
+            new_incarnation
+        );
+
+        fs::remove_dir_all(&dir).ok();
         Ok(())
     }
 
@@ -40106,6 +41522,501 @@ mod tests {
                 Some(Lit::Str { v }) if v == secret_b
             )));
         }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_wal_is_retained_until_key_registration_then_replayed() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_wal_recovery");
+        let master_key_b64 = BASE64_STANDARD.encode([21u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let secret_pk = "private-primary-key";
+        let secret_value = "private-redo-value";
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+            r#as: None,
+        };
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine.create_table(
+                "app",
+                "secrets",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "payload".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+            engine.data_insert(
+                &table,
+                vec![row(&[
+                    (
+                        "id",
+                        Lit::Str {
+                            v: secret_pk.to_string(),
+                        },
+                    ),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: secret_value.to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+
+            let wal_bytes = fs::read(&wal_path)?;
+            assert!(!contains_subslice(&wal_bytes, secret_pk.as_bytes()));
+            assert!(!contains_subslice(&wal_bytes, secret_value.as_bytes()));
+            // Deliberately drop without a checkpoint to leave the redo record pending.
+        }
+
+        let mut locked = Engine::open(&dir)?;
+        let table_key = TableKey {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+        };
+        assert!(locked.encrypted_locked_tables.contains(&table_key));
+        assert!(wal_path.exists(), "keyless recovery must retain the WAL");
+        let write_error = locked
+            .data_insert(
+                &table,
+                vec![row(&[
+                    (
+                        "id",
+                        Lit::Str {
+                            v: "second-key".to_string(),
+                        },
+                    ),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "second-value".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("locked tables must reject writes before mutating memory");
+        assert!(write_error.to_string().contains("encryption key required"));
+
+        locked
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert!(!locked.encrypted_locked_tables.contains(&table_key));
+        let recovered = locked.data_get(
+            &table,
+            vec![Lit::Str {
+                v: secret_pk.to_string(),
+            }],
+        )?;
+        assert!(matches!(
+            recovered.row.get("payload"),
+            Some(Lit::Str { v }) if v == secret_value
+        ));
+        assert!(
+            !wal_path.exists(),
+            "successful keyed recovery checkpoints WAL"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_encryption_blocks_writes_to_empty_tables_until_key_is_registered(
+    ) -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_empty_table_key_gate");
+        let master_key_b64 = BASE64_STANDARD.encode([34u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "empty_secrets".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = Engine::open_with_storage_mode_name(&dir, "segment")?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine.create_table(
+                "app",
+                "empty_secrets",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".into()],
+                false,
+                None,
+            )?;
+        }
+
+        let mut keyless = Engine::open_with_storage_mode_name(&dir, "segment")?;
+        let table_key = TableKey {
+            db: "app".to_string(),
+            table: "empty_secrets".to_string(),
+        };
+        assert!(keyless.encrypted_locked_tables.contains(&table_key));
+        let error = keyless
+            .data_insert(
+                &table,
+                vec![row(&[(
+                    "id",
+                    Lit::Str {
+                        v: "must-not-hit-disk".to_string(),
+                    },
+                )])],
+                None,
+            )
+            .expect_err("enabled encryption without its active key must reject writes");
+        assert!(error.to_string().contains("encryption key required"));
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        assert!(!wal_path.exists());
+        let disk = decode_table_rows_segment(&fs::read(
+            keyless.table_segment_path("app", "empty_secrets"),
+        )?)?;
+        assert!(disk.rows.is_empty());
+
+        keyless
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert!(!keyless.encrypted_locked_tables.contains(&table_key));
+        keyless.data_insert(
+            &table,
+            vec![row(&[(
+                "id",
+                Lit::Str {
+                    v: "encrypted-after-key".to_string(),
+                },
+            )])],
+            None,
+        )?;
+        let wal_bytes = fs::read(&wal_path)?;
+        assert!(!contains_subslice(&wal_bytes, b"encrypted-after-key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_wal_incarnation_is_authenticated() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_wal_incarnation_aad");
+        let master_key_b64 = BASE64_STANDARD.encode([35u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+            r#as: None,
+        };
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        let old_payload;
+        let new_incarnation;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            let columns = || {
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "payload".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ]
+            };
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            let old_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+            engine.data_insert(
+                &table,
+                vec![row(&[
+                    (
+                        "id",
+                        Lit::Str {
+                            v: "old-primary-key".to_string(),
+                        },
+                    ),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "old-secret-value".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            let recovery = skeindb_core::wal::WalReader::open(&wal_path)?.recover()?;
+            old_payload = recovery.txns[0].mutations[0].payload.clone();
+            engine.drop_table("app", "secrets", false)?;
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            new_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+            assert_ne!(old_incarnation, new_incarnation);
+
+            // Simulate an attacker changing the unkeyed WAL routing incarnation and also the
+            // encrypted wrapper's column. The AEAD tag must still reject cross-incarnation replay.
+            let mut rewritten: serde_json::Value = serde_json::from_slice(&old_payload)?;
+            rewritten["incarnation_id"] = serde_json::json!(new_incarnation);
+            rewritten["payload"][TABLE_ROW_ENC_KEY]["col"] =
+                serde_json::json!(wal::wal_row_record_column(new_incarnation));
+            fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+            let mut writer = skeindb_core::wal::WalWriter::open(&wal_path)?;
+            writer.begin_txn(10)?;
+            writer.append_mutation(10, serde_json::to_vec(&rewritten)?)?;
+            writer.commit_txn(10)?;
+            writer.sync()?;
+        }
+
+        let mut keyless = Engine::open(&dir)?;
+        assert!(wal_path.exists(), "missing-key recovery retains the WAL");
+        keyless
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert!(
+            wal_path.exists(),
+            "authentication failure must retain the WAL"
+        );
+        assert!(keyless.encrypted_locked_tables.contains(&TableKey {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+        }));
+        assert!(keyless.get_table(&table)?.1.rows.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_legacy_v2_wal_cannot_rebind_to_recreated_table() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("encrypted_legacy_v2_wal_incarnation");
+        let master_key_b64 = BASE64_STANDARD.encode([74u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+            r#as: None,
+        };
+        let wal_path = dir.join("wal").join("app").join("wal-000001.log");
+        let mut legacy_record;
+        let new_incarnation;
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "app".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64: master_key_b64.clone(),
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "app".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            let columns = || {
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "payload".to_string(),
+                        r#type: type_desc("str"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ]
+            };
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            engine.data_insert(
+                &table,
+                vec![row(&[
+                    (
+                        "id",
+                        Lit::Str {
+                            v: "old-secret-id".to_string(),
+                        },
+                    ),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "old-secret-value".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+            let recovery = skeindb_core::wal::WalReader::open(&wal_path)?.recover()?;
+            legacy_record = serde_json::from_slice::<serde_json::Value>(
+                &recovery.txns[0].mutations[0].payload,
+            )?;
+            let v3_encrypted = decode_encrypted_cell_payload(&legacy_record["payload"])
+                .expect("v3 encrypted payload");
+            let codec = engine.row_encryption_codec("app", "secrets");
+            let plaintext = codec.decrypt_cell(
+                &v3_encrypted.column,
+                &v3_encrypted.kind,
+                &v3_encrypted.env_b64,
+            )?;
+            legacy_record["format_version"] = serde_json::json!(2);
+            legacy_record["payload"] = codec
+                .encrypt_cell("$skein_wal_record", &plaintext)?
+                .expect("legacy encrypted payload");
+
+            engine.drop_table("app", "secrets", false)?;
+            engine.create_table("app", "secrets", columns(), vec!["id".into()], false, None)?;
+            new_incarnation = engine.get_schema("app", "secrets")?.incarnation_id;
+            // Forging the unauthenticated v2 routing header and recomputing the outer WAL
+            // checksum must not make this old table ciphertext eligible for replay.
+            legacy_record["incarnation_id"] = serde_json::json!(new_incarnation);
+        }
+        fs::create_dir_all(wal_path.parent().expect("WAL parent"))?;
+        let mut writer = skeindb_core::wal::WalWriter::open(&wal_path)?;
+        writer.begin_txn(12)?;
+        writer.append_mutation(12, serde_json::to_vec(&legacy_record)?)?;
+        writer.commit_txn(12)?;
+        writer.sync()?;
+        drop(writer);
+
+        let mut keyless = Engine::open(&dir)?;
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "secrets".to_string(),
+        };
+        assert!(keyless.wal_write_blocked_tables.contains_key(&key));
+        assert!(keyless.wal_recovery_incomplete);
+        assert!(wal_path.exists());
+        keyless
+            .settings_encryption_register_key(
+                skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                    db: "app".to_string(),
+                    key_id: "k1".to_string(),
+                    master_key_b64,
+                    make_active: true,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert!(keyless.wal_write_blocked_tables.contains_key(&key));
+        assert!(keyless.get_table(&table)?.1.rows.is_empty());
+        assert!(keyless
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::Str { v: "fresh".into() }),
+                    ("payload", Lit::Str { v: "fresh".into() })
+                ])],
+                None,
+            )
+            .is_err());
+        assert!(wal_path.exists());
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -47532,6 +49443,138 @@ mod tests {
     }
 
     #[test]
+    fn wasm_plan_integer_division_uses_host_semantics_for_new_and_old_artifacts(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("wasm_plan_integer_division_fallback");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "metrics".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "value".to_string(),
+                    r#type: type_desc("i64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("value", Lit::I64 { v: 7 }),
+            ])],
+            None,
+        )?;
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Op {
+                            op: "div".to_string(),
+                            a: Some(Box::new(Expr::Col {
+                                col: "value".to_string(),
+                                table: None,
+                            })),
+                            b: Some(Box::new(Expr::Lit {
+                                lit: Lit::I64 { v: 2 },
+                            })),
+                            args: None,
+                            list: None,
+                            lo: None,
+                            hi: None,
+                        },
+                        r#as: Some("half".to_string()),
+                    }],
+                    from: Some(vec![TableRef::Base(table.clone())]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let compiled = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query: query.clone(),
+            abi: None,
+            target: None,
+        })?;
+        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_V1);
+        let result = engine.wasm_plan_run(
+            &compiled.artifact_b64,
+            &[],
+            ResultFormat::ObjectsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let rows = result
+            .data
+            .expect("host fallback result")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["half"]["t"].as_str(), Some("f64"));
+        assert_eq!(rows[0]["half"]["v"].as_f64(), Some(3.5));
+
+        // Before the compiler stopped generating integer division, artifacts encoded the
+        // operation as `i64.div_s`, which truncates. Decode them into the host fallback too.
+        let legacy = WasmPlanArtifactV1 {
+            format: WASM_PLAN_FORMAT_V1.to_string(),
+            abi: WASM_PLAN_ABI_V1.to_string(),
+            target: None,
+            execution: WASM_PLAN_EXECUTION_GENERATED_V1.to_string(),
+            plan: wasm_plan_from_query(&query)?,
+            generated: Some(WasmPlanGeneratedModuleV1 {
+                input_table_columns: Vec::new(),
+                param_columns: Vec::new(),
+                output_columns: Vec::new(),
+                module_b64: BASE64_STANDARD.encode([0u8]),
+            }),
+        };
+        let legacy_b64 = BASE64_STANDARD.encode(serde_json::to_vec(&legacy)?);
+        let inspected = engine.wasm_plan_inspect(WasmPlanInspectParams {
+            artifact_b64: legacy_b64.clone(),
+        })?;
+        assert_eq!(inspected.execution, WASM_PLAN_EXECUTION_V1);
+
+        let packaged = engine.wasm_plan_edge_package(WasmPlanEdgePackageParams {
+            artifact_b64: legacy_b64,
+            package_name: None,
+        })?;
+        let (normalized, _) = decode_wasm_plan_artifact(&packaged.artifact_b64)?;
+        assert_eq!(normalized.execution, WASM_PLAN_EXECUTION_V1);
+        assert!(normalized.generated.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn wasm_plan_compile_falls_back_for_unsupported_types() -> anyhow::Result<()> {
         let dir = temp_dir("wasm_plan_compile_fallback");
         let mut engine = Engine::open(&dir)?;
@@ -47832,6 +49875,247 @@ mod tests {
             Some(5)
         );
 
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn failed_multi_row_insert_does_not_publish_earlier_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("insert_statement_atomicity");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "atomic_rows",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "required".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "atomic_rows".to_string(),
+            r#as: None,
+        };
+
+        let error = engine
+            .data_insert(
+                &table,
+                vec![
+                    row(&[
+                        ("id", Lit::U64 { v: 1 }),
+                        (
+                            "required",
+                            Lit::Str {
+                                v: "valid first row".to_string(),
+                            },
+                        ),
+                    ]),
+                    row(&[("id", Lit::U64 { v: 2 }), ("required", Lit::Null)]),
+                ],
+                None,
+            )
+            .expect_err("the second row violates NOT NULL");
+        assert!(error
+            .to_string()
+            .contains("null value for non-null column required"));
+        assert!(engine.get_table(&table)?.1.rows.is_empty());
+        assert!(
+            engine.wals.is_empty(),
+            "failed statement must not open a WAL"
+        );
+        assert!(
+            !dir.join("wal").join("app").join("wal-000001.log").exists(),
+            "failed statement must not append redo records"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn failed_multi_row_updates_and_deletes_roll_back_all_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("atomic_update_delete");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "unique_rows",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".into()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{"name":"email_unique","columns":["email"],"unique":true}]
+            })),
+        )?;
+        let unique_table = BaseTableRef {
+            db: "app".to_string(),
+            table: "unique_rows".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &unique_table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    ("email", Lit::Str { v: "a".to_string() }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    ("email", Lit::Str { v: "b".to_string() }),
+                ]),
+            ],
+            None,
+        )?;
+        let unique_wal = fs::read(dir.join("wal/app/wal-000001.log"))?;
+        let change_count = engine.changes.len();
+        let update_error = engine
+            .data_update(
+                &unique_table,
+                &Expr::Lit {
+                    lit: Lit::Bool { v: true },
+                },
+                &row(&[(
+                    "email",
+                    Lit::Str {
+                        v: "duplicate".to_string(),
+                    },
+                )]),
+                None,
+                None,
+                &[],
+            )
+            .expect_err("the second row conflicts with the first staged unique key");
+        assert!(update_error.to_string().contains("duplicate key"));
+        assert_eq!(engine.changes.len(), change_count);
+        assert_eq!(fs::read(dir.join("wal/app/wal-000001.log"))?, unique_wal);
+        let unique_rows = &engine.get_table(&unique_table)?.1.rows;
+        assert!(unique_rows.iter().all(|entry| matches!(
+            entry.row.get("email"),
+            Some(Lit::Str { v }) if v == "a" || v == "b"
+        )));
+
+        engine.create_table(
+            "app",
+            "delete_rows",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".into()],
+            false,
+            None,
+        )?;
+        let delete_table = BaseTableRef {
+            db: "app".to_string(),
+            table: "delete_rows".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &delete_table,
+            vec![
+                row(&[("id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 2 })]),
+            ],
+            None,
+        )?;
+        let delete_wal_path = dir.join("wal/app/wal-000001.log");
+        let delete_wal = fs::read(&delete_wal_path)?;
+        let change_count = engine.changes.len();
+        let first_id = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let predicate = Expr::Op {
+            op: "or".to_string(),
+            a: None,
+            b: None,
+            args: Some(vec![
+                first_id,
+                Expr::Func {
+                    name: "missing_test_function".to_string(),
+                    args: Vec::new(),
+                    distinct: None,
+                },
+            ]),
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        assert!(engine
+            .data_delete(&delete_table, &predicate, None, &[])
+            .is_err());
+        assert_eq!(engine.changes.len(), change_count);
+        assert_eq!(fs::read(&delete_wal_path)?, delete_wal);
+        assert!(engine
+            .get_table(&delete_table)?
+            .1
+            .rows
+            .iter()
+            .all(|entry| !entry.deleted));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn storage_names_cannot_escape_the_data_directory() -> anyhow::Result<()> {
+        let dir = temp_dir("storage_name_path_traversal");
+        let mut engine = Engine::open(&dir)?;
+        assert!(engine.create_database("../escaped_db").is_err());
+        assert!(engine
+            .create_table(
+                "app",
+                "../../escaped_table",
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .is_err());
+        assert!(!dir.join("escaped_table.json").exists());
+        assert!(!dir.join("escaped_db").exists());
         fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -48819,6 +51103,147 @@ mod tests {
             )
             .expect_err("expected renamed unique index conflict");
         assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn rename_streaming_table_rewrites_segment_at_target_path() -> anyhow::Result<()> {
+        let dir = temp_dir("rename_streaming_table");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        let source = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let target = BaseTableRef {
+            db: "app".to_string(),
+            table: "archived_items".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(&source, vec![row(&[("id", Lit::U64 { v: 7 })])], None)?;
+        engine.flush_dirty_tables()?;
+
+        let source_key = TableKey {
+            db: "app".to_string(),
+            table: "items".to_string(),
+        };
+        let streaming = engine
+            .try_load_streaming_table("app", "items", 1)
+            .expect("persisted segment is eligible for streaming");
+        assert!(matches!(
+            streaming.residency,
+            TableResidency::Streaming { .. }
+        ));
+        engine.tables.insert(source_key, streaming);
+
+        engine.rename_table(&source, &target)?;
+        assert!(!engine.table_segment_path("app", "items").exists());
+        assert!(engine.table_segment_path("app", "archived_items").exists());
+        assert_eq!(
+            engine.data_get(&target, vec![Lit::U64 { v: 7 }])?.row["id"],
+            Lit::U64 { v: 7 }
+        );
+
+        drop(engine);
+        let reopened = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        assert_eq!(
+            reopened.data_get(&target, vec![Lit::U64 { v: 7 }])?.row["id"],
+            Lit::U64 { v: 7 }
+        );
+        assert!(reopened.data_get(&source, vec![Lit::U64 { v: 7 }]).is_err());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn rename_into_keyless_encrypted_database_fails_before_moving_table() -> anyhow::Result<()> {
+        use skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN;
+
+        let dir = temp_dir("rename_keyless_target_preflight");
+        let master_key_b64 = BASE64_STANDARD.encode([75u8; ENCRYPTION_MASTER_KEY_LEN]);
+        let source = BaseTableRef {
+            db: "source".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let target = BaseTableRef {
+            db: "destination".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        let columns = || {
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }]
+        };
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table("source", "items", columns(), vec!["id".into()], false, None)?;
+            engine.data_insert(&source, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            engine.create_table(
+                "destination",
+                "seed",
+                columns(),
+                vec!["id".into()],
+                false,
+                None,
+            )?;
+            engine
+                .settings_encryption_register_key(
+                    skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams {
+                        db: "destination".to_string(),
+                        key_id: "k1".to_string(),
+                        master_key_b64,
+                        make_active: true,
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine
+                .settings_encryption_set_mode(
+                    skeindb_skeinql::methods::SettingsEncryptionSetModeParams {
+                        db: "destination".to_string(),
+                        mode: "enc_random".to_string(),
+                    },
+                )
+                .map_err(anyhow::Error::msg)?;
+            engine.flush_dirty_tables()?;
+        }
+
+        let mut keyless = Engine::open(&dir)?;
+        let err = keyless
+            .rename_table(&source, &target)
+            .expect_err("rename must preflight the destination encryption key");
+        assert!(err.to_string().contains("encryption key required"));
+        assert_eq!(keyless.list_tables("source")?, vec!["items".to_string()]);
+        assert_eq!(
+            keyless.list_tables("destination")?,
+            vec!["seed".to_string()]
+        );
+        assert_eq!(
+            keyless.data_get(&source, vec![Lit::U64 { v: 1 }])?.row["id"],
+            Lit::U64 { v: 1 }
+        );
+        assert!(dir.join("tables/source/items.rseg").exists());
+        assert!(!dir.join("tables/destination/items.rseg").exists());
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -52360,6 +54785,11 @@ mod tests {
 
             let json_path = engine.table_path(&table.db, &table.table);
             let segment_path = engine.table_segment_path(&table.db, &table.table);
+            // A pre-incarnation catalog and row snapshot both decode with id zero.
+            engine
+                .get_schema_mut(&table.db, &table.table)?
+                .incarnation_id = 0;
+            engine.persist_catalog()?;
             let legacy_rows = serde_json::json!({
                 "format_version": 2,
                 "rows": [
@@ -53125,6 +55555,7 @@ mod tests {
                 auto_increment: false,
             }],
             primary_key: vec!["id".to_string()],
+            incarnation_id: 0,
             table_version: 1,
             auto_inc_next: HashMap::new(),
             compat_mysql: None,

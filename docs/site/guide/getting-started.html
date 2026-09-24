@@ -138,16 +138,15 @@
     </div>
     <article class="doc-article">
       <h1 id="getting-started">Getting Started<a class="headerlink" href="#getting-started" title="Permanent link">¶</a></h1>
-<p>This repository contains a <strong>single-binary</strong> SkeinDB prototype.</p>
+<p>This repository contains SkeinDB, a <strong>single-binary</strong> relational database and research platform.</p>
 <p>The focus of the scaffold is:
 - a portable executable (<code>skeindb</code>) that runs on Linux/macOS/Windows
-- an embedded HTTP API (SkeinQL JSON-RPC) + embedded admin UI (SkeinAdmin)
-- a MySQL compatibility surface (protocol + subset of SQL) intended as an adoption layer
+- an HTTP API (SkeinQL JSON-RPC) and embedded SkeinAdmin interface
+- a broad but incomplete MySQL-compatible SQL surface and a partial PostgreSQL v3 surface
 - research primitives (ETags, query patches, hash-chained WAL, ...)</p>
 <blockquote>
 <p>Note
-The current executor is a small in-memory/JSON-backed prototype intended to make SkeinQL immediately usable.
-The full ValueID/MVCC/LSM storage engine described in the paper is a planned build-out.</p>
+The live engine persists rows in <code>.rseg</code> segments by default, with JSON compatibility support. Most tables are materialized in memory; opt-in streaming keeps eligible large segment-backed tables on disk for reads. The core MANIFEST/WAL/LSM pipeline is not yet the primary row-storage path. See the <a href="true-status-matrix.html">true status matrix</a> for current storage limits and other maturity gaps.</p>
 </blockquote>
 <hr />
 <h2 id="1-install">1) Install<a class="headerlink" href="#1-install" title="Permanent link">¶</a></h2>
@@ -300,16 +299,20 @@ It now supports virtual metadata queries over:
 <span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;sql&quot;:&quot;SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10&quot;}&#39;</span>
 </code></pre></div>
 
-<h3 id="47-transaction-handles-skeinql">4.7 Transaction handles (SkeinQL)<a class="headerlink" href="#47-transaction-handles-skeinql" title="Permanent link">¶</a></h3>
+<h3 id="47-transaction-handle-bookkeeping-skeinql">4.7 Transaction handle bookkeeping (SkeinQL)<a class="headerlink" href="#47-transaction-handle-bookkeeping-skeinql" title="Permanent link">¶</a></h3>
+<p>The current <code>tx.*</code> methods open and close an opaque handle and record <code>read_only</code>
+and timestamps. Queries and DML are not bound to that handle, so these methods do
+not provide multi-statement isolation or atomic commit/rollback semantics. Use
+them only when you need the handle lifecycle itself.</p>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:8,&quot;method&quot;:&quot;tx.begin&quot;,&quot;params&quot;:{&quot;read_only&quot;:true}}&#39;</span>
 </code></pre></div>
 
-<p>Commit:</p>
+<p>Copy <code>tx_id</code> from that response and close the handle with exactly one of these:</p>
 <div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:9,&quot;method&quot;:&quot;tx.commit&quot;,&quot;params&quot;:{&quot;tx_id&quot;:&quot;tx_0000000000000001&quot;}}&#39;</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:9,&quot;method&quot;:&quot;tx.commit&quot;,&quot;params&quot;:{&quot;tx_id&quot;:&quot;&lt;tx_id returned by tx.begin&gt;&quot;}}&#39;</span>
 </code></pre></div>
 
 <hr />
@@ -406,7 +409,7 @@ It now supports virtual metadata queries over:
 <li><a href="#44-insert-data">4.4 Insert data</a></li>
 <li><a href="#45-query-select">4.5 Query select</a></li>
 <li><a href="#46-sql-compatibility-endpoint-information_schema">4.6 SQL compatibility endpoint + information_schema</a></li>
-<li><a href="#47-transaction-handles-skeinql">4.7 Transaction handles (SkeinQL)</a></li>
+<li><a href="#47-transaction-handle-bookkeeping-skeinql">4.7 Transaction handle bookkeeping (SkeinQL)</a></li>
 </ul>
 </li>
 <li><a href="#5-storage-dedup-stats">5) Storage + dedup stats</a></li>

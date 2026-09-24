@@ -327,6 +327,9 @@ pub struct RecoveredTxn {
 pub struct WalRecovery {
     pub txns: Vec<RecoveredTxn>,
     pub last_valid_lsn: u64,
+    /// Highest transaction id in any valid record, including transactions that did not
+    /// commit. Callers retaining a WAL must avoid reusing ids held by staged transactions.
+    pub max_txn_id: Option<u64>,
     pub truncated_tail: bool,
     pub discarded_tail_bytes: usize,
     pub tail_error: Option<String>,
@@ -485,9 +488,11 @@ impl WalReader {
         let mut pending: HashMap<u64, PendingTxn> = HashMap::new();
         let mut txns = Vec::new();
         let mut last_valid_lsn = 0;
+        let mut max_txn_id = None;
 
         for rec in scan.records {
             let txn_id = rec.txn_id();
+            max_txn_id = Some(max_txn_id.map_or(txn_id, |max: u64| max.max(txn_id)));
             let lsn = rec.lsn();
             let flags = rec.flags();
             last_valid_lsn = lsn;
@@ -524,6 +529,7 @@ impl WalReader {
         Ok(WalRecovery {
             txns,
             last_valid_lsn,
+            max_txn_id,
             truncated_tail: scan.truncated_tail,
             discarded_tail_bytes,
             tail_error: scan.tail_error,
@@ -694,6 +700,8 @@ mod tests {
         writer.append_mutation(1, b"a1".to_vec())?;
         writer.begin_txn(2)?;
         writer.append_mutation(2, b"b1".to_vec())?;
+        writer.begin_txn(3)?;
+        writer.append_mutation(3, b"c1".to_vec())?;
         writer.commit_txn(1)?;
         writer.abort_txn(2)?;
         writer.sync()?;
@@ -703,6 +711,7 @@ mod tests {
         assert_eq!(recovery.txns[0].txn_id, 1);
         assert_eq!(recovery.txns[0].mutations.len(), 1);
         assert_eq!(recovery.txns[0].mutations[0].payload, b"a1");
+        assert_eq!(recovery.max_txn_id, Some(3));
 
         let _ = std::fs::remove_file(path);
         Ok(())

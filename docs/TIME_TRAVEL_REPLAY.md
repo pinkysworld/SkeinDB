@@ -139,7 +139,7 @@ Replay redaction is primary-key focused. Non-key payload columns remain in the b
 ### 3.1 SkeinQL additions
 
 - `query.select`: add optional `as_of` ISO timestamp.
-- `tx.begin`: add optional `as_of` timestamp; default `read_only=true` for historical snapshots.
+- `tx.begin`: records handle metadata only; it has no `as_of` support and is not bound to `query.select` or DML.
 - `maintenance.replay.export`: creates a replay bundle from all tables or a selected database, with optional `from_lsn` / `to_lsn` filtering for included change-event metadata and optional `redaction: {mode, salt}` primary-key redaction.
 - `maintenance.replay.import`: imports a bundle into a hidden replay workspace identified by `workspace_id`.
 - `maintenance.replay.run`: reopens a replay workspace and reports checksum verification results (`expected_checksum`, `observed_checksum`, table checksums, and replayed table/row/change counts).

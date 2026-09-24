@@ -64,7 +64,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `system.*` | `system.ping`, `system.version`, `system.shutdown`, `system.capabilities` | Core | Capability discovery is the canonical method list. |
 | `transport.*` | `transport.capabilities` | Core | Reports HTTP/QUIC availability. |
 | `settings.*` | `settings.get`, `settings.list`, `settings.set` | Core | Runtime configuration surface. |
-| `tx.*` | `tx.begin`, `tx.commit`, `tx.rollback` | Core | Snapshot/read-only flags; failures map to stable RPC errors. |
+| `tx.*` | `tx.begin`, `tx.commit`, `tx.rollback` | Core | Tracks opaque handle lifecycle metadata (`read_only`, start time); query and DML requests are not bound to the handle, so this does not provide transaction isolation or atomic commit/rollback. |
 | `schema.*` | database/table DDL plus `schema.propose_change`, `schema.merge_status`, `schema.apply_merge` | Core + experimental | Conflict-free schema evolution is experimental. |
 | `data.*` | `data.get`, `data.insert`, `data.update`, `data.delete` | Core | Typed literal row APIs. |
 | `query.*` | `query.prepare`, `query.execute_prepared`, `query.select`, `query.patch`, `query.subscribe` | Core + experimental | ETags, query patches, prepared GET, and CDC hooks. |

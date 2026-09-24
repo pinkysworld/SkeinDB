@@ -280,7 +280,7 @@ surface's <code>oldest_tombstone_commit_ts_ms</code> to confirm the steady state
 <h3 id="31-skeinql-additions">3.1 SkeinQL additions<a class="headerlink" href="#31-skeinql-additions" title="Permanent link">¶</a></h3>
 <ul>
 <li><code>query.select</code>: add optional <code>as_of</code> ISO timestamp.</li>
-<li><code>tx.begin</code>: add optional <code>as_of</code> timestamp; default <code>read_only=true</code> for historical snapshots.</li>
+<li><code>tx.begin</code>: records handle metadata only; it has no <code>as_of</code> support and is not bound to <code>query.select</code> or DML.</li>
 <li><code>maintenance.replay.export</code>: creates a replay bundle from all tables or a selected database, with optional <code>from_lsn</code> / <code>to_lsn</code> filtering for included change-event metadata and optional <code>redaction: {mode, salt}</code> primary-key redaction.</li>
 <li><code>maintenance.replay.import</code>: imports a bundle into a hidden replay workspace identified by <code>workspace_id</code>.</li>
 <li><code>maintenance.replay.run</code>: reopens a replay workspace and reports checksum verification results (<code>expected_checksum</code>, <code>observed_checksum</code>, table checksums, and replayed table/row/change counts).</li>
@@ -365,6 +365,10 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li>The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.</li>
 <li>Threshold flags cover <code>--max-p95-delta-ms</code>, <code>--max-p99-delta-ms</code>, <code>--max-span-delta-ms</code>, <code>--max-disk-bytes-delta</code>, and <code>--max-missing-hot-tables-delta</code>.</li>
 <li>The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.</li>
+<li>CI executes the real <code>skeindb replay compare</code> CLI against deterministic checked-in R18 report fixtures and uploads <code>r18-replay-comparison.json</code>, guarding the comparator contract and threshold behavior on every change.</li>
+<li>Pull requests also run <code>scripts/r18_cross_revision_ci.sh</code>: the job builds separate binaries for the PR base and head commits, creates a deterministic 20-row / 20-change workload with the base binary, exports one performance-annotated bundle from the base revision, replays that exact bundle with both revisions, compares the fresh reports, and uploads the bundle, reports, comparison, metadata, and server log.</li>
+<li>Generating the artifact with the base revision intentionally adds a replay-bundle backward-compatibility check: the candidate must consume an artifact emitted by the current mainline revision.</li>
+<li>This closes the CI hardening gap for the snapshot-based R18 baseline. It does not claim reproduction of arbitrary production concurrency, complete compaction-queue state, or general wall-clock workload equivalence.</li>
 </ul>
 <p>Current R18/T188 replay-runner implementation:</p>
 <ul>

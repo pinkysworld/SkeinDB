@@ -790,22 +790,22 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 </code></pre></div>
 
 <h3 id="104-tx">10.4 tx.*<a class="headerlink" href="#104-tx" title="Permanent link">¶</a></h3>
+<p>These methods currently track opaque handle metadata only. Query and DML requests
+do not accept or use the handle, and <code>read_only</code> is recorded but not enforced by
+the transaction API. They do not provide snapshot isolation or atomic commit and
+rollback semantics.</p>
 <h4 id="txbegin">tx.begin<a class="headerlink" href="#txbegin" title="Permanent link">¶</a></h4>
 <p>Params:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;isolation&quot;</span><span class="p">:</span><span class="s2">&quot;snapshot&quot;</span><span class="p">,</span><span class="nt">&quot;read_only&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">}</span>
-</code></pre></div>
-
-<p>Optional historical read-only snapshot:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;isolation&quot;</span><span class="p">:</span><span class="s2">&quot;snapshot&quot;</span><span class="p">,</span><span class="nt">&quot;read_only&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;as_of&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;datetime&quot;</span><span class="p">,</span><span class="nt">&quot;iso&quot;</span><span class="p">:</span><span class="s2">&quot;2026-01-01T00:00:00Z&quot;</span><span class="p">}}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;read_only&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">}</span>
 </code></pre></div>
 
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;tx&quot;</span><span class="p">:</span><span class="s2">&quot;tx-abc&quot;</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;tx_id&quot;</span><span class="p">:</span><span class="s2">&quot;tx_0000000000000001&quot;</span><span class="p">,</span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="s2">&quot;open&quot;</span><span class="p">,</span><span class="nt">&quot;read_only&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="nt">&quot;started_at_ms&quot;</span><span class="p">:</span><span class="mi">1780000000000</span><span class="p">}</span>
 </code></pre></div>
 
 <h4 id="txcommit-txrollback">tx.commit / tx.rollback<a class="headerlink" href="#txcommit-txrollback" title="Permanent link">¶</a></h4>
-<p>Params: <code>{"tx":"tx-abc"}</code></p>
-<p>Result: <code>{"ok":true}</code></p>
+<p>Params: <code>{"tx_id":"tx_0000000000000001"}</code></p>
+<p>Result: includes the closed <code>tx_id</code>, the requested status, recorded <code>read_only</code> and <code>started_at_ms</code>, and <code>finished_at_ms</code>.</p>
 <h3 id="105-query">10.5 query.*<a class="headerlink" href="#105-query" title="Permanent link">¶</a></h3>
 <h4 id="queryselect">query.select<a class="headerlink" href="#queryselect" title="Permanent link">¶</a></h4>
 <p>Executes a query AST.</p>

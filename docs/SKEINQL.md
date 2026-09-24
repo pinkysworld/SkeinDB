@@ -880,29 +880,28 @@ Result:
 
 ### 10.4 tx.*
 
+These methods currently track opaque handle metadata only. Query and DML requests
+do not accept or use the handle, and `read_only` is recorded but not enforced by
+the transaction API. They do not provide snapshot isolation or atomic commit and
+rollback semantics.
+
 #### tx.begin
 Params:
 
 ```json
-{"isolation":"snapshot","read_only":false}
-```
-
-Optional historical read-only snapshot:
-
-```json
-{"isolation":"snapshot","read_only":true,"as_of":{"t":"datetime","iso":"2026-01-01T00:00:00Z"}}
+{"read_only":false}
 ```
 
 Result:
 
 ```json
-{"tx":"tx-abc"}
+{"tx_id":"tx_0000000000000001","status":"open","read_only":false,"started_at_ms":1780000000000}
 ```
 
 #### tx.commit / tx.rollback
-Params: `{"tx":"tx-abc"}`
+Params: `{"tx_id":"tx_0000000000000001"}`
 
-Result: `{"ok":true}`
+Result: includes the closed `tx_id`, the requested status, recorded `read_only` and `started_at_ms`, and `finished_at_ms`.
 
 ### 10.5 query.*
 

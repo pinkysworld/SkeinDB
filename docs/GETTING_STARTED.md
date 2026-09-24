@@ -1,16 +1,15 @@
 # Getting Started
 
-This repository contains a **single-binary** SkeinDB prototype.
+This repository contains SkeinDB, a **single-binary** relational database and research platform.
 
 The focus of the scaffold is:
 - a portable executable (`skeindb`) that runs on Linux/macOS/Windows
-- an embedded HTTP API (SkeinQL JSON-RPC) + embedded admin UI (SkeinAdmin)
-- a MySQL compatibility surface (protocol + subset of SQL) intended as an adoption layer
+- an HTTP API (SkeinQL JSON-RPC) and embedded SkeinAdmin interface
+- a broad but incomplete MySQL-compatible SQL surface and a partial PostgreSQL v3 surface
 - research primitives (ETags, query patches, hash-chained WAL, ...)
 
 > Note
-> The current executor is a small in-memory/JSON-backed prototype intended to make SkeinQL immediately usable.
-> The full ValueID/MVCC/LSM storage engine described in the paper is a planned build-out.
+> The live engine persists rows in `.rseg` segments by default, with JSON compatibility support. Most tables are materialized in memory; opt-in streaming keeps eligible large segment-backed tables on disk for reads. The core MANIFEST/WAL/LSM pipeline is not yet the primary row-storage path. See the [true status matrix](TRUE_STATUS_MATRIX.md) for current storage limits and other maturity gaps.
 
 ---
 
@@ -206,7 +205,12 @@ curl -s http://127.0.0.1:8080/api/v1/sql/exec \
   -d '{"sql":"SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10"}'
 ```
 
-### 4.7 Transaction handles (SkeinQL)
+### 4.7 Transaction handle bookkeeping (SkeinQL)
+
+The current `tx.*` methods open and close an opaque handle and record `read_only`
+and timestamps. Queries and DML are not bound to that handle, so these methods do
+not provide multi-statement isolation or atomic commit/rollback semantics. Use
+them only when you need the handle lifecycle itself.
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
@@ -214,12 +218,12 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
   -d '{"skeinql":"1.0","id":8,"method":"tx.begin","params":{"read_only":true}}'
 ```
 
-Commit:
+Copy `tx_id` from that response and close the handle with exactly one of these:
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/rpc \
   -H 'content-type: application/json' \
-  -d '{"skeinql":"1.0","id":9,"method":"tx.commit","params":{"tx_id":"tx_0000000000000001"}}'
+  -d '{"skeinql":"1.0","id":9,"method":"tx.commit","params":{"tx_id":"<tx_id returned by tx.begin>"}}'
 ```
 
 ---

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.40 - 2026-09-24
+
+Storage durability, encryption, and recovery hardening, with clearer documentation of current compatibility and maturity limits.
+
+- **Storage and security.** Encrypted row-redo WAL records now authenticate the table incarnation; encrypted snapshots bind cells to that incarnation; malformed or undecryptable WAL is retained for recovery; and checkpoint ordering prevents committed redo from being discarded before both rows and catalog state are durable.
+- **Write and recovery correctness.** Multi-row INSERT, UPDATE, and DELETE roll back all touched rows and indexes on failure. Recovery restores table-version and auto-increment state, ambiguous post-append fsync failures block further writes, and retained transaction IDs are not reused. Streaming reads validate the segment incarnation on the same file handle used for reads; renaming a streaming table now writes its segment under the target name before removing the source.
+- **Protocol and query fixes.** Binary replication fetch bounds allocations from untrusted response counts, and generated Wasm plans preserve host integer-division semantics.
+- **Documentation.** Replaced the stale README with a current quick start, project map, evaluation links, and explicit compatibility limits; refreshed the storage, API, query, and backlog guides.
+- Validated with `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+
 ## v0.3.39 - 2026-07-18
 
 Memory-bounded streaming re-sync snapshots — a replica can now be re-synced from a database far larger than RAM without a memory spike on either node. Behavior-preserving; correctness identical to the previous single-shot snapshot.

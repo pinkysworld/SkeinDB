@@ -1,6 +1,6 @@
 # Release Packaging Notes
 
-Last updated: 2026-05-11
+Last updated: 2026-09-24
 
 SkeinDB release tags run `.github/workflows/release-packages.yml`, which builds the Linux binary tarball, source tarball, Debian package, checksums, a signed macOS binary tarball, and a rendered Homebrew formula.
 
@@ -20,7 +20,7 @@ Local Developer ID or Apple Development signing example:
 cargo build --release -p skeindb
 MACOS_CODESIGN_IDENTITY="Developer ID Application: Example Inc (TEAMID)" \
 	scripts/release/build_macos_signed_artifact.sh \
-		--version 0.3.19 \
+		--version 0.3.40 \
 		--binary target/release/skeindb \
 		--output dist
 ```

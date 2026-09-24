@@ -24395,6 +24395,17 @@ fn decode_objects_fetch_binary(body: &[u8]) -> Result<Vec<RemoteTransferObject>,
             .try_into()
             .map_err(|_| RpcError::new("invalid_response", "invalid binary object count"))?,
     ) as usize;
+    // Every valid entry needs a 4-byte frame length and at least a 22-byte
+    // transfer record (20-byte header plus two one-byte varints). Reject a
+    // count that cannot fit before reserving based on this untrusted value.
+    const MIN_BINARY_OBJECT_ENTRY_LEN: usize = 4 + 22;
+    let max_count = (body.len() - 9) / MIN_BINARY_OBJECT_ENTRY_LEN;
+    if count > max_count {
+        return Err(RpcError::new(
+            "invalid_response",
+            "binary objects.fetch count exceeds the available response body",
+        ));
+    }
     let mut offset = 9usize;
     let mut objects = Vec::with_capacity(count);
     for _ in 0..count {
@@ -37285,6 +37296,17 @@ fn save_settings(state: &AppState) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn objects_fetch_binary_rejects_count_larger_than_body_can_hold() {
+        let mut body = Vec::from(OBJECTS_FETCH_BINARY_MAGIC);
+        body.push(OBJECTS_FETCH_BINARY_VERSION);
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = decode_objects_fetch_binary(&body).unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert!(error.message.contains("count exceeds"));
+    }
 
     #[test]
     fn detects_unauthenticated_network_exposure() {

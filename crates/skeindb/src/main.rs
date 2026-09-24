@@ -1312,7 +1312,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Version => {
             println!("SkeinDB v{}", env!("CARGO_PKG_VERSION"));
             println!("Build target   : {}", env!("CARGO_PKG_NAME"));
-            println!("On-disk format : v0.2 (v0.1 compatible) - see docs/ON_DISK_FORMAT.md");
+            println!("On-disk format : v0.3 (v0.2 compatible) - see docs/ON_DISK_FORMAT.md");
             println!("SkeinIR        : v1   - see docs/SKEINIR.md");
             println!("SkeinQL        : v1.0 - see docs/SKEINQL.md");
             println!("MySQL compat   : adoption layer - see docs/MYSQL_COMPAT.md");

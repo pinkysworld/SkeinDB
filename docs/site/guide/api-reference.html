@@ -282,7 +282,7 @@ Runtime baseline: v0.3.20, SkeinQL 1.0, 147 advertised RPC methods</p>
 <td><code>tx.*</code></td>
 <td><code>tx.begin</code>, <code>tx.commit</code>, <code>tx.rollback</code></td>
 <td>Core</td>
-<td>Snapshot/read-only flags; failures map to stable RPC errors.</td>
+<td>Tracks opaque handle lifecycle metadata (<code>read_only</code>, start time); query and DML requests are not bound to the handle, so this does not provide transaction isolation or atomic commit/rollback.</td>
 </tr>
 <tr>
 <td><code>schema.*</code></td>
@@ -328,9 +328,9 @@ Runtime baseline: v0.3.20, SkeinQL 1.0, 147 advertised RPC methods</p>
 </tr>
 <tr>
 <td><code>objects.*</code></td>
-<td><code>objects.need</code>, <code>objects.missing</code>, <code>objects.fetch</code>, <code>objects.pull</code></td>
+<td><code>objects.need</code>, <code>objects.missing</code>, <code>objects.fetch</code>, <code>objects.pull</code> plus HTTP <code>/api/v1/objects/fetch-bin</code></td>
 <td>Experimental</td>
-<td>ValueID object transfer for shard moves and replication.</td>
+<td>ValueID object transfer for shard moves and replication. Legacy <code>objects.fetch</code> remains unchanged; <code>transfer_only: true</code> keeps the compact JSON form. New <code>objects.pull</code> prefers the binary fetch endpoint, whose v1 response carries canonical transfer-entry bytes directly, and falls back to compact JSON-RPC on HTTP 404/405 for older sources.</td>
 </tr>
 <tr>
 <td><code>settings.encryption.*</code></td>

@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-05-27
+Last updated: 2026-09-24
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -16,6 +16,7 @@ The repo is intentionally written so you can read it in two ways:
    - includes storage/dedup `stats.snapshot` quick check
 
 2) **Core APIs**
+   - `TRUE_STATUS_MATRIX.md` (runtime truth and remaining gaps)
    - `API_REFERENCE.md` (runtime method families, transports, result formats, client checklist)
    - `SKEINQL.md` (JSON-RPC control plane spec)
    - `MYSQL_COMPAT.md` (MySQL protocol surface and current coverage)
@@ -34,7 +35,7 @@ The repo is intentionally written so you can read it in two ways:
    - `DELTA_VALUES.md` (MVCC delta chains)
    - `AUDIT_WAL.md` (tamper-evident audit logging)
    - `WASM_UDFS.md` (sandboxed extensions)
-   - includes table row `format_version: 2` ValueID ref encoding (prototype)
+   - Use `ON_DISK_FORMAT.md` for the current row format and compatibility notes; older format numbers in historical notes may no longer describe the active format.
 
 5) **Privacy, Security & Compliance**
    - `CONVERGENT_ENCRYPTION.md` (dedup-preserving convergent encryption + key rotation)
